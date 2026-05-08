@@ -1,8 +1,9 @@
 use std::{collections::VecDeque, time::Duration};
 
 use wincast_capture::{
-    CaptureError, CaptureSession, CaptureTarget, CapturedFrame, CapturedTextureMetadata,
-    FramePixelFormat, wait_next_capture_result_with, wait_next_frame_metadata_with,
+    CaptureError, CaptureSession, CaptureTarget, CapturedBgraFrame, CapturedFrame,
+    CapturedTextureMetadata, FramePixelFormat, wait_next_capture_result_with,
+    wait_next_frame_metadata_with,
 };
 
 #[test]
@@ -52,6 +53,19 @@ fn captured_texture_metadata_describes_d3d_texture_without_exposing_pixels() {
 }
 
 #[test]
+fn captured_bgra_frame_keeps_readback_bytes_separate_from_metadata() {
+    let frame = CapturedBgraFrame {
+        metadata: captured_texture_metadata(),
+        row_pitch: 5120,
+        bytes: vec![0, 1, 2, 3],
+    };
+
+    assert_eq!(frame.metadata, captured_texture_metadata());
+    assert_eq!(frame.row_pitch, 5120);
+    assert_eq!(frame.bytes, vec![0, 1, 2, 3]);
+}
+
+#[test]
 fn wait_next_frame_metadata_retries_until_frame_arrives() {
     let mut frames = VecDeque::from([None, Some(captured_frame())]);
 
@@ -77,14 +91,7 @@ fn wait_next_frame_metadata_reports_timeout() {
 
 #[test]
 fn wait_next_capture_result_supports_texture_metadata() {
-    let texture_metadata = CapturedTextureMetadata {
-        frame: captured_frame(),
-        texture_width: 1280,
-        texture_height: 720,
-        mip_levels: 1,
-        array_size: 1,
-        sample_count: 1,
-    };
+    let texture_metadata = captured_texture_metadata();
     let mut frames = VecDeque::from([None, Some(texture_metadata)]);
 
     let metadata = wait_next_capture_result_with(Duration::from_millis(100), || {
@@ -153,5 +160,16 @@ fn captured_frame() -> CapturedFrame {
         pixel_format: FramePixelFormat::Bgra8Unorm,
         sequence_number: 7,
         timestamp_ns: 123_456_789,
+    }
+}
+
+fn captured_texture_metadata() -> CapturedTextureMetadata {
+    CapturedTextureMetadata {
+        frame: captured_frame(),
+        texture_width: 1280,
+        texture_height: 720,
+        mip_levels: 1,
+        array_size: 1,
+        sample_count: 1,
     }
 }

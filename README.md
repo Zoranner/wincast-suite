@@ -10,6 +10,6 @@ WinCast Suite 是一个 Rust 工具工程，用于在内网或专网内从国产
 - 客户端需要适配 Linux x86_64 与 Linux aarch64/ARM64。
 - 系统不处理 Windows 登录、锁屏、UAC 安全桌面或不影响本地用户的独立远程会话。
 
-当前代码已完成 Rust workspace、协议/配置模型、host/client CLI 骨架、控制消息编解码、最小 TCP 控制通道握手、Windows 宿主端启动配置程序和主窗口定位入口，并新增 `wincast-capture` 捕获抽象。CLI `run` 可以建立宿主端连接并完成 `Hello` / `StartSession` 控制消息交换；宿主端收到会话启动请求后会尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话并等待首帧 D3D11 纹理描述；捕获层已能从 WGC 帧读取 D3D11 纹理描述，并在捕获尺寸变化后重建帧池，但像素拷贝、编码传输、渲染和输入注入仍未实现。
+当前代码已完成 Rust workspace、协议/配置模型、host/client CLI 骨架、控制消息编解码、最小 TCP 控制通道握手、Windows 宿主端启动配置程序和主窗口定位入口，并新增 `wincast-capture` 捕获抽象。CLI `run` 可以建立宿主端连接并完成 `Hello` / `StartSession` 控制消息交换；宿主端收到会话启动请求后会尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话并等待首帧 D3D11 纹理描述；捕获层已能从 WGC 帧读取 D3D11 纹理描述、在捕获尺寸变化后重建帧池，并提供可选 BGRA readback 缓冲，但编码传输、渲染和输入注入仍未实现。
 
 设计文档见 [docs/design.md](docs/design.md)。
