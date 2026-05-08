@@ -1,6 +1,9 @@
 use wincast_protocol::{
     input::{ButtonState, InputEvent, Modifiers},
-    message::{ControlMessage, RawBgraReadbackFrame, RawBgraReadbackFrameError},
+    message::{
+        ControlMessage, MAX_RAW_BGRA_READBACK_BYTES, RawBgraReadbackFrame,
+        RawBgraReadbackFrameError,
+    },
 };
 
 #[test]
@@ -64,6 +67,24 @@ fn raw_bgra_readback_frame_rejects_invalid_payload_shape() {
     assert_eq!(
         empty.validate(),
         Err(RawBgraReadbackFrameError::InvalidDimensions)
+    );
+}
+
+#[test]
+fn raw_bgra_readback_frame_rejects_payloads_above_debug_limit() {
+    let frame = raw_bgra_frame(
+        1,
+        (MAX_RAW_BGRA_READBACK_BYTES / 4 + 1) as u32,
+        4,
+        vec![0; MAX_RAW_BGRA_READBACK_BYTES + 4],
+    );
+
+    assert_eq!(
+        frame.validate(),
+        Err(RawBgraReadbackFrameError::PayloadTooLarge {
+            actual: MAX_RAW_BGRA_READBACK_BYTES + 4,
+            max: MAX_RAW_BGRA_READBACK_BYTES,
+        })
     );
 }
 

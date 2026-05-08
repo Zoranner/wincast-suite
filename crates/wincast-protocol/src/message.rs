@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::input::InputEvent;
 
+pub const MAX_RAW_BGRA_READBACK_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ControlMessage {
     Hello { version: u16 },
@@ -51,6 +53,12 @@ impl RawBgraReadbackFrame {
                 expected: expected_len,
             });
         }
+        if self.bytes.len() > MAX_RAW_BGRA_READBACK_BYTES {
+            return Err(RawBgraReadbackFrameError::PayloadTooLarge {
+                actual: self.bytes.len(),
+                max: MAX_RAW_BGRA_READBACK_BYTES,
+            });
+        }
 
         Ok(())
     }
@@ -61,6 +69,7 @@ pub enum RawBgraReadbackFrameError {
     InvalidDimensions,
     InvalidRowPitch,
     InvalidPayloadLength { actual: usize, expected: usize },
+    PayloadTooLarge { actual: usize, max: usize },
     SizeOverflow,
 }
 
