@@ -2,6 +2,7 @@
 members = [
     "crates/wincast-protocol",
     "crates/wincast-capture",
+    "crates/wincast-render",
     "crates/wincast-host",
     "crates/wincast-client",
 ]
@@ -20,3 +21,4 @@ thiserror = "2.0.18"
 toml = "1.1.2"
 wincast-capture = { path = "crates/wincast-capture" }
 wincast-protocol = { path = "crates/wincast-protocol" }
+wincast-render = { path = "crates/wincast-render" }
