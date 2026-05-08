@@ -18,7 +18,7 @@ use wincast_protocol::{
     config::{CaptureMode, HostConfig},
     frame::{read_message, write_message},
     handshake::accept_client_hello,
-    message::{ControlMessage, ErrorCode},
+    message::{ControlMessage, ErrorCode, RawBgraReadbackFrame},
 };
 
 mod window;
@@ -159,11 +159,12 @@ fn handle_control_client(
                     write_control_error(&mut writer, ErrorCode::WindowNotFound, message.clone());
                 message
             })?;
-            start_capture_session(config, &window, capture).map_err(|error| {
+            let first_frame = start_capture_session(config, &window, capture).map_err(|error| {
                 let message = format!("初始化画面捕获失败: {error}");
                 let _ = write_control_error(&mut writer, ErrorCode::CaptureFailed, message.clone());
                 message
             })?;
+            write_first_readback_frame(&mut writer, &first_frame)?;
             write_runtime_not_implemented(&mut writer)?;
             Ok(())
         }
@@ -252,13 +253,12 @@ fn start_capture_session(
     config: &HostConfig,
     window: &WindowCandidate,
     capture: &mut impl CaptureStarter,
-) -> Result<(), CaptureError> {
+) -> Result<CapturedBgraFrame, CaptureError> {
     let mut session = capture.start_capture(capture_target(config, window))?;
-    let _ = wait_next_capture_result_with(
+    wait_next_capture_result_with(
         Duration::from_millis(config.capture.startup_timeout_ms),
         || session.try_next_bgra_frame(),
-    )?;
-    Ok(())
+    )
 }
 
 fn capture_target(config: &HostConfig, window: &WindowCandidate) -> CaptureTarget {
@@ -280,6 +280,37 @@ fn write_control_error(
 ) -> Result<(), String> {
     write_message(writer, &ControlMessage::Error { code, message })
         .map_err(|error| format!("写入控制错误消息失败: {error}"))
+}
+
+fn write_first_readback_frame(
+    writer: &mut impl std::io::Write,
+    frame: &CapturedBgraFrame,
+) -> Result<(), String> {
+    write_message(
+        writer,
+        &ControlMessage::SessionReady {
+            width: frame.metadata.frame.width,
+            height: frame.metadata.frame.height,
+        },
+    )
+    .map_err(|error| format!("写入会话就绪消息失败: {error}"))?;
+
+    let raw_frame = RawBgraReadbackFrame {
+        width: frame.metadata.frame.width,
+        height: frame.metadata.frame.height,
+        stride_bytes: frame.metadata.frame.stride_bytes,
+        texture_width: frame.metadata.texture_width,
+        texture_height: frame.metadata.texture_height,
+        row_pitch: frame.row_pitch,
+        sequence_number: frame.metadata.frame.sequence_number,
+        timestamp_ns: frame.metadata.frame.timestamp_ns,
+        bytes: frame.bytes.clone(),
+    };
+    raw_frame
+        .validate()
+        .map_err(|error| format!("首帧 BGRA readback 无效: {error:?}"))?;
+    write_message(writer, &ControlMessage::RawBgraReadbackFrame(raw_frame))
+        .map_err(|error| format!("写入首帧 BGRA readback 失败: {error}"))
 }
 
 fn write_runtime_not_implemented(writer: &mut impl std::io::Write) -> Result<(), String> {
@@ -382,6 +413,23 @@ mod tests {
         wincast_protocol::frame::write_message(&mut client, &ControlMessage::StartSession)
             .expect("start session should write");
 
+        assert_eq!(
+            read_message(&mut client).expect("session ready should read"),
+            ControlMessage::SessionReady {
+                width: 1280,
+                height: 720,
+            }
+        );
+        match read_message(&mut client).expect("raw frame should read") {
+            ControlMessage::RawBgraReadbackFrame(frame) => {
+                frame.validate().expect("raw frame should validate");
+                assert_eq!(frame.width, 1280);
+                assert_eq!(frame.height, 720);
+                assert_eq!(frame.row_pitch, 5120);
+                assert_eq!(frame.bytes.len(), 5120 * 720);
+            }
+            message => panic!("expected raw frame, got {message:?}"),
+        }
         assert_eq!(
             read_message(&mut client).expect("runtime error should read"),
             ControlMessage::Error {
@@ -498,11 +546,13 @@ mod tests {
         };
         let attempts = capture.attempts.clone();
 
-        start_capture_session(&config, &window, &mut capture)
+        let frame = start_capture_session(&config, &window, &mut capture)
             .expect("host should wait until first frame metadata is available");
 
         assert_eq!(capture.targets, vec![CaptureTarget::Desktop]);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(frame.row_pitch, 5120);
+        assert_eq!(frame.bytes.len(), 5120 * 720);
     }
 
     #[test]
@@ -696,7 +746,7 @@ mod tests {
                 sample_count: 1,
             },
             row_pitch: 5120,
-            bytes: vec![0; 5120],
+            bytes: vec![0; 5120 * 720],
         }
     }
 }

@@ -5,7 +5,7 @@ use wincast_protocol::{
     config::ClientConfig,
     frame::read_message,
     handshake::{HandshakeError, read_host_hello, send_client_hello, send_start_session},
-    message::{ControlMessage, ErrorCode},
+    message::{ControlMessage, ErrorCode, RawBgraReadbackFrame},
 };
 
 const SUPPORTED_CLIENT_TARGETS: &[&str] =
@@ -85,10 +85,24 @@ fn run_client_with_config(config: &ClientConfig) -> Result<String, String> {
 fn read_session_start_response(stream: &mut TcpStream) -> Result<(), String> {
     match read_message(stream).map_err(|error| format!("读取宿主端会话响应失败: {error}"))?
     {
-        ControlMessage::SessionReady { .. } => Ok(()),
+        ControlMessage::SessionReady { .. } => read_first_readback_frame(stream),
         ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
         message => Err(format!("宿主端会话响应无效: {message:?}")),
     }
+}
+
+fn read_first_readback_frame(stream: &mut TcpStream) -> Result<(), String> {
+    match read_message(stream).map_err(|error| format!("读取宿主端首帧失败: {error}"))? {
+        ControlMessage::RawBgraReadbackFrame(frame) => validate_readback_frame(&frame),
+        ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
+        message => Err(format!("宿主端首帧消息无效: {message:?}")),
+    }
+}
+
+fn validate_readback_frame(frame: &RawBgraReadbackFrame) -> Result<(), String> {
+    frame
+        .validate()
+        .map_err(|error| format!("宿主端首帧 BGRA readback 无效: {error:?}"))
 }
 
 fn control_channel_ready_message(config: &ClientConfig) -> String {
@@ -154,11 +168,16 @@ mod tests {
             write_message(
                 &mut stream,
                 &ControlMessage::SessionReady {
-                    width: 1280,
-                    height: 720,
+                    width: 2,
+                    height: 2,
                 },
             )
             .expect("session ready should encode");
+            write_message(
+                &mut stream,
+                &ControlMessage::RawBgraReadbackFrame(raw_bgra_frame()),
+            )
+            .expect("raw frame should encode");
             observed_messages_tx
                 .send((hello, start_session))
                 .expect("observed messages should send");
@@ -224,6 +243,43 @@ mod tests {
         host_thread.join().expect("host thread should finish");
         assert!(error.contains("宿主端拒绝连接"));
         assert!(error.contains("运行时链路未实现"));
+    }
+
+    #[test]
+    fn client_rejects_invalid_raw_bgra_frame_from_host() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let host_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("client should connect");
+            read_message(&mut stream).expect("client hello should decode");
+            send_client_hello(&mut stream).expect("host hello should encode");
+            read_message(&mut stream).expect("start session should decode");
+            write_message(
+                &mut stream,
+                &ControlMessage::SessionReady {
+                    width: 2,
+                    height: 2,
+                },
+            )
+            .expect("session ready should encode");
+            let mut frame = raw_bgra_frame();
+            frame.bytes.pop();
+            write_message(&mut stream, &ControlMessage::RawBgraReadbackFrame(frame))
+                .expect("raw frame should encode");
+        });
+
+        let config = ClientConfig {
+            host: endpoint.ip().to_string(),
+            port: endpoint.port(),
+        };
+
+        let error = run_client_with_config(&config).expect_err("invalid frame should fail");
+
+        host_thread.join().expect("host thread should finish");
+        assert!(error.contains("首帧 BGRA readback 无效"));
     }
 
     #[test]
@@ -300,5 +356,19 @@ mod tests {
 
         assert!(message.contains("已建立宿主端控制通道"));
         assert!(message.contains("视频解码渲染和输入事件链路尚未实现"));
+    }
+
+    fn raw_bgra_frame() -> RawBgraReadbackFrame {
+        RawBgraReadbackFrame {
+            width: 2,
+            height: 2,
+            stride_bytes: 8,
+            texture_width: 2,
+            texture_height: 2,
+            row_pitch: 8,
+            sequence_number: 0,
+            timestamp_ns: 0,
+            bytes: vec![0; 16],
+        }
     }
 }
