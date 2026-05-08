@@ -448,7 +448,7 @@ mod tests {
             read_message(&mut client).expect("capture error should read"),
             ControlMessage::Error {
                 code: ErrorCode::CaptureFailed,
-                message: "初始化画面捕获失败: Windows 画面捕获实现未完成：尚未接入帧池和帧获取循环"
+                message: "初始化画面捕获失败: Windows 画面捕获实现未完成：尚未接入帧获取循环"
                     .to_owned(),
             }
         );

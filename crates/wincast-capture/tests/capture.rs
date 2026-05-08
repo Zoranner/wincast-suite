@@ -40,7 +40,7 @@ fn captured_frame_keeps_metadata_without_pixel_payload() {
 fn capture_errors_have_clear_chinese_messages() {
     assert_eq!(
         CaptureError::windows_capture_not_implemented().to_string(),
-        "Windows 画面捕获实现未完成：尚未接入帧池和帧获取循环"
+        "Windows 画面捕获实现未完成：尚未接入帧获取循环"
     );
     assert_eq!(
         CaptureError::windows_graphics_capture_unsupported().to_string(),

@@ -51,6 +51,8 @@ pub struct CapturedFrame {
 #[derive(Debug)]
 pub struct CaptureSession {
     target: CaptureTarget,
+    #[cfg(windows)]
+    state: windows_impl::WindowsCaptureState,
 }
 
 impl CaptureSession {
@@ -61,11 +63,22 @@ impl CaptureSession {
     pub fn target(&self) -> &CaptureTarget {
         &self.target
     }
+
+    pub fn is_active(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.state.is_active()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CaptureError {
-    #[error("Windows 画面捕获实现未完成：尚未接入帧池和帧获取循环")]
+    #[error("Windows 画面捕获实现未完成：尚未接入帧获取循环")]
     WindowsCaptureNotImplemented,
     #[error("当前 Windows 系统不支持 Windows Graphics Capture")]
     WindowsGraphicsCaptureUnsupported,
@@ -73,6 +86,12 @@ pub enum CaptureError {
     WindowsGraphicsCaptureSupportCheckFailed(String),
     #[error("创建窗口捕获目标失败: {0}")]
     WindowsCaptureItemCreateFailed(String),
+    #[error("初始化 Direct3D 捕获设备失败: {0}")]
+    WindowsD3dInitializationFailed(String),
+    #[error("创建 Windows 捕获会话失败: {0}")]
+    WindowsCaptureSessionCreateFailed(String),
+    #[error("启动 Windows 捕获会话失败: {0}")]
+    WindowsCaptureSessionStartFailed(String),
     #[error("当前平台不支持画面捕获：仅 Windows 支持宿主端捕获，当前平台 {platform}")]
     UnsupportedPlatform { platform: String },
 }
@@ -94,6 +113,18 @@ impl CaptureError {
         Self::WindowsCaptureItemCreateFailed(error.into())
     }
 
+    pub fn windows_d3d_initialization_failed(error: impl Into<String>) -> Self {
+        Self::WindowsD3dInitializationFailed(error.into())
+    }
+
+    pub fn windows_capture_session_create_failed(error: impl Into<String>) -> Self {
+        Self::WindowsCaptureSessionCreateFailed(error.into())
+    }
+
+    pub fn windows_capture_session_start_failed(error: impl Into<String>) -> Self {
+        Self::WindowsCaptureSessionStartFailed(error.into())
+    }
+
     pub fn unsupported_platform(platform: impl Into<String>) -> Self {
         Self::UnsupportedPlatform {
             platform: platform.into(),
@@ -103,37 +134,152 @@ impl CaptureError {
 
 #[cfg(windows)]
 fn start_platform_capture(target: CaptureTarget) -> Result<CaptureSession, CaptureError> {
-    use windows::Graphics::Capture::GraphicsCaptureSession;
+    let state = windows_impl::start_windows_capture(&target)?;
 
-    let supported = GraphicsCaptureSession::IsSupported().map_err(|error| {
-        CaptureError::windows_graphics_capture_support_check_failed(error.to_string())
-    })?;
-    if !supported {
-        return Err(CaptureError::windows_graphics_capture_unsupported());
-    }
-
-    if let CaptureTarget::Window { handle, .. } = target {
-        let _item = create_window_capture_item(handle)?;
-    }
-
-    Err(CaptureError::windows_capture_not_implemented())
+    Ok(CaptureSession { target, state })
 }
 
 #[cfg(windows)]
-fn create_window_capture_item(
-    handle: isize,
-) -> Result<windows::Graphics::Capture::GraphicsCaptureItem, CaptureError> {
+mod windows_impl {
+    use super::{CaptureError, CaptureTarget};
     use windows::{
-        Graphics::Capture::GraphicsCaptureItem,
-        Win32::{Foundation::HWND, System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop},
-        core::factory,
+        Graphics::{
+            Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
+            DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
+        },
+        Win32::{
+            Foundation::{HMODULE, HWND},
+            Graphics::{
+                Direct3D::{
+                    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_9_1,
+                    D3D_FEATURE_LEVEL_9_2, D3D_FEATURE_LEVEL_9_3, D3D_FEATURE_LEVEL_10_0,
+                    D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+                },
+                Direct3D11::{
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+                    ID3D11Device,
+                },
+                Dxgi::IDXGIDevice,
+            },
+            System::WinRT::{
+                Direct3D11::CreateDirect3D11DeviceFromDXGIDevice,
+                Graphics::Capture::IGraphicsCaptureItemInterop,
+            },
+        },
+        core::{Interface, factory},
     };
 
-    let hwnd = HWND(handle as *mut core::ffi::c_void);
-    let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-        .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))?;
-    unsafe { interop.CreateForWindow(hwnd) }
-        .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))
+    #[derive(Debug)]
+    pub(crate) struct WindowsCaptureState {
+        _d3d_device: ID3D11Device,
+        _direct3d_device: IDirect3DDevice,
+        _frame_pool: Direct3D11CaptureFramePool,
+        _session: GraphicsCaptureSession,
+    }
+
+    impl WindowsCaptureState {
+        pub(crate) fn is_active(&self) -> bool {
+            true
+        }
+    }
+
+    pub(crate) fn start_windows_capture(
+        target: &CaptureTarget,
+    ) -> Result<WindowsCaptureState, CaptureError> {
+        let supported = GraphicsCaptureSession::IsSupported().map_err(|error| {
+            CaptureError::windows_graphics_capture_support_check_failed(error.to_string())
+        })?;
+        if !supported {
+            return Err(CaptureError::windows_graphics_capture_unsupported());
+        }
+
+        let item = match target {
+            CaptureTarget::Window { handle, .. } => create_window_capture_item(*handle)?,
+            CaptureTarget::Desktop => return Err(CaptureError::windows_capture_not_implemented()),
+        };
+
+        let d3d_device = create_d3d_device()?;
+        let direct3d_device = create_direct3d_device(&d3d_device)?;
+        let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            &direct3d_device,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            1,
+            item.Size().map_err(|error| {
+                CaptureError::windows_capture_session_create_failed(error.to_string())
+            })?,
+        )
+        .map_err(|error| CaptureError::windows_capture_session_create_failed(error.to_string()))?;
+        let session = frame_pool.CreateCaptureSession(&item).map_err(|error| {
+            CaptureError::windows_capture_session_create_failed(error.to_string())
+        })?;
+        session.StartCapture().map_err(|error| {
+            CaptureError::windows_capture_session_start_failed(error.to_string())
+        })?;
+
+        Ok(WindowsCaptureState {
+            _d3d_device: d3d_device,
+            _direct3d_device: direct3d_device,
+            _frame_pool: frame_pool,
+            _session: session,
+        })
+    }
+
+    fn create_window_capture_item(handle: isize) -> Result<GraphicsCaptureItem, CaptureError> {
+        let hwnd = HWND(handle as *mut core::ffi::c_void);
+        let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+            .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))?;
+        unsafe { interop.CreateForWindow(hwnd) }
+            .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))
+    }
+
+    fn create_d3d_device() -> Result<ID3D11Device, CaptureError> {
+        let feature_flags = [
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0,
+            D3D_FEATURE_LEVEL_9_3,
+            D3D_FEATURE_LEVEL_9_2,
+            D3D_FEATURE_LEVEL_9_1,
+        ];
+        let mut d3d_device = None;
+        let mut feature_level = D3D_FEATURE_LEVEL::default();
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&feature_flags),
+                D3D11_SDK_VERSION,
+                Some(&mut d3d_device),
+                Some(&mut feature_level),
+                None,
+            )
+        }
+        .map_err(|error| CaptureError::windows_d3d_initialization_failed(error.to_string()))?;
+
+        if feature_level.0 < D3D_FEATURE_LEVEL_11_0.0 {
+            return Err(CaptureError::windows_d3d_initialization_failed(
+                "Direct3D feature level 低于 11.0",
+            ));
+        }
+
+        d3d_device.ok_or_else(|| {
+            CaptureError::windows_d3d_initialization_failed("D3D11CreateDevice 未返回设备")
+        })
+    }
+
+    fn create_direct3d_device(d3d_device: &ID3D11Device) -> Result<IDirect3DDevice, CaptureError> {
+        let dxgi_device: IDXGIDevice = d3d_device
+            .cast()
+            .map_err(|error| CaptureError::windows_d3d_initialization_failed(error.to_string()))?;
+        let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }
+            .map_err(|error| CaptureError::windows_d3d_initialization_failed(error.to_string()))?;
+        inspectable
+            .cast()
+            .map_err(|error| CaptureError::windows_d3d_initialization_failed(error.to_string()))
+    }
 }
 
 #[cfg(not(windows))]
