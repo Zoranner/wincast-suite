@@ -56,6 +56,10 @@ fn capture_errors_have_clear_chinese_messages() {
         "创建窗口捕获目标失败: invalid hwnd"
     );
     assert_eq!(
+        CaptureError::windows_frame_read_failed("no frame").to_string(),
+        "读取 Windows 捕获帧失败: no frame"
+    );
+    assert_eq!(
         CaptureError::unsupported_platform("linux").to_string(),
         "当前平台不支持画面捕获：仅 Windows 支持宿主端捕获，当前平台 linux"
     );

@@ -74,6 +74,17 @@ impl CaptureSession {
             false
         }
     }
+
+    pub fn try_next_frame_metadata(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
+        #[cfg(windows)]
+        {
+            self.state.try_next_frame_metadata()
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -92,6 +103,8 @@ pub enum CaptureError {
     WindowsCaptureSessionCreateFailed(String),
     #[error("启动 Windows 捕获会话失败: {0}")]
     WindowsCaptureSessionStartFailed(String),
+    #[error("读取 Windows 捕获帧失败: {0}")]
+    WindowsFrameReadFailed(String),
     #[error("当前平台不支持画面捕获：仅 Windows 支持宿主端捕获，当前平台 {platform}")]
     UnsupportedPlatform { platform: String },
 }
@@ -123,6 +136,10 @@ impl CaptureError {
 
     pub fn windows_capture_session_start_failed(error: impl Into<String>) -> Self {
         Self::WindowsCaptureSessionStartFailed(error.into())
+    }
+
+    pub fn windows_frame_read_failed(error: impl Into<String>) -> Self {
+        Self::WindowsFrameReadFailed(error.into())
     }
 
     pub fn unsupported_platform(platform: impl Into<String>) -> Self {
@@ -173,13 +190,41 @@ mod windows_impl {
     pub(crate) struct WindowsCaptureState {
         _d3d_device: ID3D11Device,
         _direct3d_device: IDirect3DDevice,
-        _frame_pool: Direct3D11CaptureFramePool,
+        frame_pool: Direct3D11CaptureFramePool,
         _session: GraphicsCaptureSession,
+        sequence_number: u64,
     }
 
     impl WindowsCaptureState {
         pub(crate) fn is_active(&self) -> bool {
             true
+        }
+
+        pub(crate) fn try_next_frame_metadata(
+            &mut self,
+        ) -> Result<Option<super::CapturedFrame>, CaptureError> {
+            let frame = self
+                .frame_pool
+                .TryGetNextFrame()
+                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+            let size = frame
+                .ContentSize()
+                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+            let timestamp = frame
+                .SystemRelativeTime()
+                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+
+            let sequence_number = self.sequence_number;
+            self.sequence_number = self.sequence_number.saturating_add(1);
+
+            Ok(Some(super::CapturedFrame {
+                width: size.Width.max(0) as u32,
+                height: size.Height.max(0) as u32,
+                stride_bytes: size.Width.max(0) as u32 * 4,
+                pixel_format: super::FramePixelFormat::Bgra8Unorm,
+                sequence_number,
+                timestamp_ns: timestamp.Duration.max(0) as u64 * 100,
+            }))
         }
     }
 
@@ -219,8 +264,9 @@ mod windows_impl {
         Ok(WindowsCaptureState {
             _d3d_device: d3d_device,
             _direct3d_device: direct3d_device,
-            _frame_pool: frame_pool,
+            frame_pool,
             _session: session,
+            sequence_number: 0,
         })
     }
 

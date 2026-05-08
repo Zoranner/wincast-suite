@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 mod program;
 
 use program::{ProgramRunner, StartedProgram, StdProgramRunner, launch_with_runner};
-use wincast_capture::{CaptureError, CaptureSession, CaptureTarget};
+use wincast_capture::{CaptureError, CaptureSession, CaptureTarget, CapturedFrame};
 use wincast_protocol::{
     config::{CaptureMode, HostConfig},
     frame::{read_message, write_message},
@@ -197,14 +197,30 @@ impl WindowLocator for WindowsWindowLocator {
 }
 
 trait CaptureStarter {
-    fn start_capture(&mut self, target: CaptureTarget) -> Result<(), CaptureError>;
+    fn start_capture(
+        &mut self,
+        target: CaptureTarget,
+    ) -> Result<Box<dyn CaptureRuntime>, CaptureError>;
+}
+
+trait CaptureRuntime {
+    fn try_next_frame_metadata(&mut self) -> Result<Option<CapturedFrame>, CaptureError>;
 }
 
 struct StdCaptureStarter;
 
 impl CaptureStarter for StdCaptureStarter {
-    fn start_capture(&mut self, target: CaptureTarget) -> Result<(), CaptureError> {
-        CaptureSession::start(target).map(|_| ())
+    fn start_capture(
+        &mut self,
+        target: CaptureTarget,
+    ) -> Result<Box<dyn CaptureRuntime>, CaptureError> {
+        Ok(Box::new(CaptureSession::start(target)?))
+    }
+}
+
+impl CaptureRuntime for CaptureSession {
+    fn try_next_frame_metadata(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
+        self.try_next_frame_metadata()
     }
 }
 
@@ -235,7 +251,9 @@ fn start_capture_session(
     window: &WindowCandidate,
     capture: &mut impl CaptureStarter,
 ) -> Result<(), CaptureError> {
-    capture.start_capture(capture_target(config, window))
+    let mut session = capture.start_capture(capture_target(config, window))?;
+    let _ = session.try_next_frame_metadata()?;
+    Ok(())
 }
 
 fn capture_target(config: &HostConfig, window: &WindowCandidate) -> CaptureTarget {
@@ -516,16 +534,37 @@ mod tests {
     }
 
     impl CaptureStarter for RecordingCaptureStarter {
-        fn start_capture(&mut self, target: CaptureTarget) -> Result<(), CaptureError> {
+        fn start_capture(
+            &mut self,
+            target: CaptureTarget,
+        ) -> Result<Box<dyn CaptureRuntime>, CaptureError> {
             self.targets.push(target);
-            Ok(())
+            Ok(Box::new(RecordingCaptureRuntime))
+        }
+    }
+
+    struct RecordingCaptureRuntime;
+
+    impl CaptureRuntime for RecordingCaptureRuntime {
+        fn try_next_frame_metadata(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
+            Ok(Some(CapturedFrame {
+                width: 1280,
+                height: 720,
+                stride_bytes: 5120,
+                pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
+                sequence_number: 0,
+                timestamp_ns: 0,
+            }))
         }
     }
 
     struct FailingCaptureStarter;
 
     impl CaptureStarter for FailingCaptureStarter {
-        fn start_capture(&mut self, _target: CaptureTarget) -> Result<(), CaptureError> {
+        fn start_capture(
+            &mut self,
+            _target: CaptureTarget,
+        ) -> Result<Box<dyn CaptureRuntime>, CaptureError> {
             Err(CaptureError::windows_capture_not_implemented())
         }
     }
