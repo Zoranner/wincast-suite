@@ -231,7 +231,7 @@ bitrate_kbps = 4000
 
 [capture]
 mode = "window"
-window_title_contains = ""
+window_title_contains = "SomeApp"
 startup_timeout_ms = 15000
 ```
 
