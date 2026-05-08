@@ -22,11 +22,11 @@ pub(crate) struct WindowRect {
 }
 
 impl WindowRect {
-    fn width(self) -> i32 {
+    pub(crate) fn width(self) -> i32 {
         self.right - self.left
     }
 
-    fn height(self) -> i32 {
+    pub(crate) fn height(self) -> i32 {
         self.bottom - self.top
     }
 

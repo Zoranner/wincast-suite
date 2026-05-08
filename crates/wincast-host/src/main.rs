@@ -11,8 +11,9 @@ use clap::{Parser, Subcommand};
 mod program;
 
 use program::{ProgramRunner, StartedProgram, StdProgramRunner, launch_with_runner};
+use wincast_capture::{CaptureError, CaptureSession, CaptureTarget};
 use wincast_protocol::{
-    config::HostConfig,
+    config::{CaptureMode, HostConfig},
     frame::{read_message, write_message},
     handshake::accept_client_hello,
     message::{ControlMessage, ErrorCode},
@@ -91,7 +92,7 @@ fn runtime_not_implemented_message(config: &HostConfig) -> String {
 }
 
 fn runtime_not_implemented_detail() -> &'static str {
-    "运行时链路未实现：尚未实现画面捕获、编码传输和输入注入。"
+    "运行时链路未实现：尚未实现编码传输和输入注入。"
 }
 
 fn run_control_listener_once(
@@ -100,7 +101,14 @@ fn run_control_listener_once(
 ) -> Result<SocketAddr, String> {
     let mut runner = StdProgramRunner;
     let mut locator = WindowsWindowLocator;
-    run_control_listener_once_with_runtime(listener, config, &mut runner, &mut locator)
+    let mut capture = StdCaptureStarter;
+    run_control_listener_once_with_runtime(
+        listener,
+        config,
+        &mut runner,
+        &mut locator,
+        &mut capture,
+    )
 }
 
 fn run_control_listener_once_with_runtime(
@@ -108,6 +116,7 @@ fn run_control_listener_once_with_runtime(
     config: &HostConfig,
     runner: &mut impl ProgramRunner,
     locator: &mut impl WindowLocator,
+    capture: &mut impl CaptureStarter,
 ) -> Result<SocketAddr, String> {
     let local_addr = listener
         .local_addr()
@@ -115,7 +124,7 @@ fn run_control_listener_once_with_runtime(
     let (mut stream, _peer_addr) = listener
         .accept()
         .map_err(|error| format!("接受客户端连接失败: {error}"))?;
-    handle_control_client(&mut stream, config, runner, locator)?;
+    handle_control_client(&mut stream, config, runner, locator, capture)?;
     Ok(local_addr)
 }
 
@@ -124,6 +133,7 @@ fn handle_control_client(
     config: &HostConfig,
     runner: &mut impl ProgramRunner,
     locator: &mut impl WindowLocator,
+    capture: &mut impl CaptureStarter,
 ) -> Result<(), String> {
     let mut writer = stream
         .try_clone()
@@ -141,10 +151,15 @@ fn handle_control_client(
                 );
                 message
             })?;
-            locate_started_window(config, &started, locator).map_err(|error| {
+            let window = locate_started_window(config, &started, locator).map_err(|error| {
                 let message = format!("定位宿主端程序窗口失败: {error}");
                 let _ =
                     write_control_error(&mut writer, ErrorCode::WindowNotFound, message.clone());
+                message
+            })?;
+            start_capture_session(config, &window, capture).map_err(|error| {
+                let message = format!("初始化画面捕获失败: {error}");
+                let _ = write_control_error(&mut writer, ErrorCode::CaptureFailed, message.clone());
                 message
             })?;
             write_runtime_not_implemented(&mut writer)?;
@@ -181,6 +196,18 @@ impl WindowLocator for WindowsWindowLocator {
     }
 }
 
+trait CaptureStarter {
+    fn start_capture(&mut self, target: CaptureTarget) -> Result<(), CaptureError>;
+}
+
+struct StdCaptureStarter;
+
+impl CaptureStarter for StdCaptureStarter {
+    fn start_capture(&mut self, target: CaptureTarget) -> Result<(), CaptureError> {
+        CaptureSession::start(target).map(|_| ())
+    }
+}
+
 fn locate_started_window(
     config: &HostConfig,
     started: &StartedProgram,
@@ -200,6 +227,26 @@ fn locate_started_window(
         }
 
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn start_capture_session(
+    config: &HostConfig,
+    window: &WindowCandidate,
+    capture: &mut impl CaptureStarter,
+) -> Result<(), CaptureError> {
+    capture.start_capture(capture_target(config, window))
+}
+
+fn capture_target(config: &HostConfig, window: &WindowCandidate) -> CaptureTarget {
+    match config.capture.mode {
+        CaptureMode::Desktop => CaptureTarget::Desktop,
+        CaptureMode::Window => CaptureTarget::Window {
+            handle: window.handle,
+            width: window.rect.width() as u32,
+            height: window.rect.height() as u32,
+            title: (!window.title.is_empty()).then_some(window.title.clone()),
+        },
     }
 }
 
@@ -272,7 +319,7 @@ mod tests {
         let message = runtime_not_implemented_message(&config);
 
         assert!(message.contains("运行时链路未实现"));
-        assert!(message.contains("尚未实现画面捕获"));
+        assert!(message.contains("尚未实现编码传输和输入注入"));
     }
 
     #[test]
@@ -285,14 +332,16 @@ mod tests {
         let config = host_config(endpoint.to_string());
         let mut runner = RecordingProgramRunner::default();
         let mut locator = RecordingWindowLocator::default();
+        let mut capture = RecordingCaptureStarter::default();
         let host = thread::spawn(move || {
             let result = run_control_listener_once_with_runtime(
                 listener,
                 &config,
                 &mut runner,
                 &mut locator,
+                &mut capture,
             );
-            (result, runner.launched, locator.lookups)
+            (result, runner.launched, locator.lookups, capture.targets)
         });
 
         let mut client = TcpStream::connect(endpoint).expect("client should connect");
@@ -309,11 +358,12 @@ mod tests {
             read_message(&mut client).expect("runtime error should read"),
             ControlMessage::Error {
                 code: ErrorCode::TransportFailed,
-                message: "运行时链路未实现：尚未实现画面捕获、编码传输和输入注入。".to_owned(),
+                message: "运行时链路未实现：尚未实现编码传输和输入注入。".to_owned(),
             }
         );
 
-        let (host_result, launched, lookups) = host.join().expect("host thread should finish");
+        let (host_result, launched, lookups, capture_targets) =
+            host.join().expect("host thread should finish");
         assert_eq!(
             host_result.expect("host should handle one client"),
             endpoint
@@ -323,6 +373,7 @@ mod tests {
             vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
         );
         assert_eq!(lookups, vec![(42, None)]);
+        assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
     }
 
     #[test]
@@ -335,8 +386,15 @@ mod tests {
         config.capture.startup_timeout_ms = 1;
         let mut runner = RecordingProgramRunner::default();
         let mut locator = FailingWindowLocator;
+        let mut capture = RecordingCaptureStarter::default();
         let host = thread::spawn(move || {
-            run_control_listener_once_with_runtime(listener, &config, &mut runner, &mut locator)
+            run_control_listener_once_with_runtime(
+                listener,
+                &config,
+                &mut runner,
+                &mut locator,
+                &mut capture,
+            )
         });
 
         let mut client = TcpStream::connect(endpoint).expect("client should connect");
@@ -358,6 +416,48 @@ mod tests {
             .expect("host thread should finish")
             .expect_err("host should report window lookup failure");
         assert!(error.contains("定位宿主端程序窗口失败"));
+    }
+
+    #[test]
+    fn host_reports_capture_failed_after_window_lookup() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener addr should be available");
+        let config = host_config(endpoint.to_string());
+        let mut runner = RecordingProgramRunner::default();
+        let mut locator = RecordingWindowLocator::default();
+        let mut capture = FailingCaptureStarter;
+        let host = thread::spawn(move || {
+            run_control_listener_once_with_runtime(
+                listener,
+                &config,
+                &mut runner,
+                &mut locator,
+                &mut capture,
+            )
+        });
+
+        let mut client = TcpStream::connect(endpoint).expect("client should connect");
+        send_client_hello(&mut client).expect("client hello should write");
+        read_message(&mut client).expect("host hello should read");
+        wincast_protocol::frame::write_message(&mut client, &ControlMessage::StartSession)
+            .expect("start session should write");
+
+        assert_eq!(
+            read_message(&mut client).expect("capture error should read"),
+            ControlMessage::Error {
+                code: ErrorCode::CaptureFailed,
+                message: "初始化画面捕获失败: Windows 画面捕获实现未完成：尚未接入 Windows Graphics Capture"
+                    .to_owned(),
+            }
+        );
+
+        let error = host
+            .join()
+            .expect("host thread should finish")
+            .expect_err("host should report capture failure");
+        assert!(error.contains("初始化画面捕获失败"));
     }
 
     #[derive(Default)]
@@ -407,6 +507,26 @@ mod tests {
                     bottom: 720,
                 },
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingCaptureStarter {
+        targets: Vec<CaptureTarget>,
+    }
+
+    impl CaptureStarter for RecordingCaptureStarter {
+        fn start_capture(&mut self, target: CaptureTarget) -> Result<(), CaptureError> {
+            self.targets.push(target);
+            Ok(())
+        }
+    }
+
+    struct FailingCaptureStarter;
+
+    impl CaptureStarter for FailingCaptureStarter {
+        fn start_capture(&mut self, _target: CaptureTarget) -> Result<(), CaptureError> {
+            Err(CaptureError::windows_capture_not_implemented())
         }
     }
 

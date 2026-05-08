@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/wincast-protocol",
+    "crates/wincast-capture",
     "crates/wincast-host",
     "crates/wincast-client",
 ]
@@ -17,4 +18,5 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 toml = "1.1.2"
+wincast-capture = { path = "crates/wincast-capture" }
 wincast-protocol = { path = "crates/wincast-protocol" }

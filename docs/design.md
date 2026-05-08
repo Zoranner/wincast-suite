@@ -115,7 +115,7 @@ wincast-client --config wincast-client.toml run
 wincast-client targets
 ```
 
-不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，并返回运行时未实现错误；客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，并把宿主端错误响应明确暴露出来。当前不得假装已经完成 WebRTC 信令、视频传输、画面捕获、渲染或输入事件发送。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
+不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口并初始化捕获会话；客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，并把宿主端错误响应明确暴露出来。当前 `wincast-capture` 只提供捕获抽象和明确占位错误，尚未接入真实 Windows Graphics Capture，也不得假装已经完成 WebRTC 信令、视频传输、渲染或输入事件发送。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
 
 ## 宿主端设计
 
@@ -258,6 +258,8 @@ port = 7856
 - 捕获初始化失败。
 - 编码或传输失败。
 - 输入注入失败。
+
+`CaptureFailed` 用于捕获能力本身失败，例如当前平台不支持捕获、Windows Graphics Capture 初始化失败、窗口句柄失效或捕获会话创建失败。`TransportFailed` 只用于控制通道、后续媒体传输、WebRTC/DataChannel 或编码后数据发送失败，不用于表达程序启动、窗口定位或捕获初始化错误。
 
 客户端需要区分：
 
