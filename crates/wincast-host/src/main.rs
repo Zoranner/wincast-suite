@@ -333,17 +333,14 @@ fn write_first_encoded_frame(
     let encoded_frame = match encoder.encode_first_frame(config, frame) {
         Ok(encoded_frame) => encoded_frame,
         Err(message) => {
-            write_control_error(writer, ErrorCode::EncodingFailed, message)?;
-            return Ok(());
+            write_control_error(writer, ErrorCode::EncodingFailed, message.clone())?;
+            return Err(message);
         }
     };
     if let Err(error) = encoded_frame.validate() {
-        write_control_error(
-            writer,
-            ErrorCode::EncodingFailed,
-            format!("首帧编码视频帧无效: {error:?}"),
-        )?;
-        return Ok(());
+        let message = format!("首帧编码视频帧无效: {error:?}");
+        write_control_error(writer, ErrorCode::EncodingFailed, message.clone())?;
+        return Err(message);
     }
     write_message(writer, &ControlMessage::VideoReady)
         .map_err(|error| format!("写入视频就绪消息失败: {error}"))?;
@@ -459,10 +456,8 @@ mod tests {
 
         let (host_result, launched, lookups, capture_targets) =
             host.join().expect("host thread should finish");
-        assert_eq!(
-            host_result.expect("host should handle one client"),
-            endpoint
-        );
+        let error = host_result.expect_err("host should report encoding failure");
+        assert!(error.contains("Windows 视频编码器未实现"));
         assert_eq!(
             launched,
             vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
@@ -576,12 +571,11 @@ mod tests {
             message => panic!("expected encoding error, got {message:?}"),
         }
 
-        assert_eq!(
-            host.join()
-                .expect("host thread should finish")
-                .expect("host should handle one client"),
-            endpoint
-        );
+        let error = host
+            .join()
+            .expect("host thread should finish")
+            .expect_err("host should report invalid encoded frame");
+        assert!(error.contains("首帧编码视频帧无效"));
     }
 
     #[test]
