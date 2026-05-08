@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-WinCast Suite 面向国产化操作系统访问 Windows 应用的内网远程应用工具。系统采用“专用 Windows 宿主机可被远程接管”的边界：国产化操作系统客户端连接 Windows 宿主端后，由宿主端启动配置好的 Windows 程序，采集该程序窗口或桌面区域画面并传输给客户端，同时把客户端鼠标和键盘事件映射回 Windows 宿主机。
+WinCast Suite 面向国产化操作系统访问 Windows 应用的内网远程应用工具。系统采用“专用 Windows 宿主机可被远程接管”的边界：Linux 客户端连接 Windows 宿主端后，由宿主端启动配置好的 Windows 程序，采集该程序窗口或桌面区域画面并传输给客户端，同时把客户端鼠标和键盘事件映射回 Windows 宿主机。客户端明确面向 Linux x86_64 与 Linux aarch64/ARM64 两类部署目标。
 
 本项目使用 Rust 开发，优先保证链路清晰、部署简单、低延迟可验证。系统不追求替代 RDP/RemoteApp，也不承诺不影响宿主机本地使用。
 
@@ -23,7 +23,7 @@ Windows 宿主机需要满足以下前提：
 
 ## 目标能力
 
-- 国产化操作系统客户端通过 IP 和端口连接 Windows 宿主端。
+- Linux x86_64 与 Linux aarch64/ARM64 客户端通过 IP 和端口连接 Windows 宿主端。
 - Windows 宿主端根据配置启动一个指定程序。
 - 宿主端定位目标程序窗口，捕获窗口画面；窗口捕获不稳定时允许退回桌面区域捕获。
 - 宿主端以低延迟视频流方式传输画面。
@@ -50,7 +50,7 @@ Windows 宿主机需要满足以下前提：
 系统由 Windows 宿主端和国产化操作系统客户端两部分组成。两端共享一套 Rust 协议 crate，保证控制消息、输入事件、错误码和配置模型一致。
 
 ```text
-国产化 OS 客户端
+Linux 客户端
   -> 读取 host/port
   -> 建立内网连接
   -> 创建本地显示窗口
@@ -79,7 +79,7 @@ crates/
   wincast-host/        # Windows 宿主端主程序
   wincast-capture/     # Windows 画面捕获封装
   wincast-input/       # Windows 输入注入封装
-  wincast-client/      # 国产化 OS 客户端主程序
+  wincast-client/      # Linux x86_64 与 Linux aarch64/ARM64 客户端主程序
   wincast-render/      # 客户端解码与渲染封装
 docs/
   design.md
@@ -93,6 +93,29 @@ docs/
 - `wincast-input` 只封装 Windows 输入注入，不理解客户端 UI。
 - `wincast-client` 负责连接宿主端、窗口生命周期和本地事件采集。
 - `wincast-render` 负责视频解码、帧缓冲和渲染输出。
+
+## 当前 CLI 骨架
+
+当前 `wincast-host` 与 `wincast-client` 只提供配置读取、配置校验和运行入口占位，不代表媒体链路、捕获、渲染或输入链路已经完成。
+
+宿主端 CLI：
+
+```text
+wincast-host --config wincast-host.toml
+wincast-host --config wincast-host.toml validate
+wincast-host --config wincast-host.toml run
+```
+
+客户端 CLI：
+
+```text
+wincast-client --config wincast-client.toml
+wincast-client --config wincast-client.toml validate
+wincast-client --config wincast-client.toml run
+wincast-client targets
+```
+
+不带子命令时默认进入 `run`。`run` 只在配置校验通过后输出“运行时链路未实现”，不得假装已经建立 TCP 连接、WebRTC 信令、视频传输、画面捕获、渲染或输入事件发送。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
 
 ## 宿主端设计
 
