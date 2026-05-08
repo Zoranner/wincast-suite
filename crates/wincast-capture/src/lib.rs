@@ -224,6 +224,7 @@ mod windows_impl {
         Graphics::{
             Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
             DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
+            SizeInt32,
         },
         Win32::{
             Foundation::{HMODULE, HWND},
@@ -250,9 +251,10 @@ mod windows_impl {
     #[derive(Debug)]
     pub(crate) struct WindowsCaptureState {
         _d3d_device: ID3D11Device,
-        _direct3d_device: IDirect3DDevice,
+        direct3d_device: IDirect3DDevice,
         frame_pool: Direct3D11CaptureFramePool,
         _session: GraphicsCaptureSession,
+        frame_pool_size: FramePoolSize,
         sequence_number: u64,
     }
 
@@ -271,6 +273,11 @@ mod windows_impl {
                     return Err(CaptureError::windows_frame_read_failed(error.to_string()));
                 }
             };
+            self.recreate_frame_pool_if_needed(
+                frame
+                    .ContentSize()
+                    .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?,
+            )?;
             let sequence_number = self.sequence_number;
             self.sequence_number = self.sequence_number.saturating_add(1);
 
@@ -287,6 +294,11 @@ mod windows_impl {
                     return Err(CaptureError::windows_frame_read_failed(error.to_string()));
                 }
             };
+            self.recreate_frame_pool_if_needed(
+                frame
+                    .ContentSize()
+                    .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?,
+            )?;
             let metadata = captured_frame_metadata(&frame, self.sequence_number)?;
             self.sequence_number = self.sequence_number.saturating_add(1);
 
@@ -311,6 +323,51 @@ mod windows_impl {
                 array_size: texture_desc.ArraySize,
                 sample_count: texture_desc.SampleDesc.Count,
             }))
+        }
+
+        fn recreate_frame_pool_if_needed(&mut self, size: SizeInt32) -> Result<(), CaptureError> {
+            let Some(new_size) = self
+                .frame_pool_size
+                .update_if_changed(size.Width, size.Height)
+            else {
+                return Ok(());
+            };
+
+            self.frame_pool
+                .Recreate(
+                    &self.direct3d_device,
+                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                    1,
+                    SizeInt32 {
+                        Width: new_size.width,
+                        Height: new_size.height,
+                    },
+                )
+                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FramePoolSize {
+        width: i32,
+        height: i32,
+    }
+
+    impl FramePoolSize {
+        fn from_size(size: SizeInt32) -> Self {
+            Self {
+                width: size.Width,
+                height: size.Height,
+            }
+        }
+
+        fn update_if_changed(&mut self, width: i32, height: i32) -> Option<Self> {
+            if width <= 0 || height <= 0 || (self.width == width && self.height == height) {
+                return None;
+            }
+
+            *self = Self { width, height };
+            Some(*self)
         }
     }
 
@@ -352,13 +409,14 @@ mod windows_impl {
 
         let d3d_device = create_d3d_device()?;
         let direct3d_device = create_direct3d_device(&d3d_device)?;
+        let frame_pool_size = item.Size().map_err(|error| {
+            CaptureError::windows_capture_session_create_failed(error.to_string())
+        })?;
         let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &direct3d_device,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             1,
-            item.Size().map_err(|error| {
-                CaptureError::windows_capture_session_create_failed(error.to_string())
-            })?,
+            frame_pool_size,
         )
         .map_err(|error| CaptureError::windows_capture_session_create_failed(error.to_string()))?;
         let session = frame_pool.CreateCaptureSession(&item).map_err(|error| {
@@ -370,9 +428,10 @@ mod windows_impl {
 
         Ok(WindowsCaptureState {
             _d3d_device: d3d_device,
-            _direct3d_device: direct3d_device,
+            direct3d_device,
             frame_pool,
             _session: session,
+            frame_pool_size: FramePoolSize::from_size(frame_pool_size),
             sequence_number: 0,
         })
     }
@@ -432,6 +491,37 @@ mod windows_impl {
         inspectable
             .cast()
             .map_err(|error| CaptureError::windows_d3d_initialization_failed(error.to_string()))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn frame_pool_size_updates_only_for_positive_changes() {
+            let mut size = FramePoolSize {
+                width: 1280,
+                height: 720,
+            };
+
+            assert_eq!(size.update_if_changed(1280, 720), None);
+            assert_eq!(size.update_if_changed(0, 720), None);
+            assert_eq!(size.update_if_changed(1280, -1), None);
+            assert_eq!(
+                size.update_if_changed(1920, 1080),
+                Some(FramePoolSize {
+                    width: 1920,
+                    height: 1080
+                })
+            );
+            assert_eq!(
+                size,
+                FramePoolSize {
+                    width: 1920,
+                    height: 1080
+                }
+            );
+        }
     }
 }
 
