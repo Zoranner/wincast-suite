@@ -2,7 +2,7 @@ use std::{collections::VecDeque, time::Duration};
 
 use wincast_capture::{
     CaptureError, CaptureSession, CaptureTarget, CapturedFrame, CapturedTextureMetadata,
-    FramePixelFormat, wait_next_frame_metadata_with,
+    FramePixelFormat, wait_next_capture_result_with, wait_next_frame_metadata_with,
 };
 
 #[test]
@@ -73,6 +73,26 @@ fn wait_next_frame_metadata_reports_timeout() {
         error,
         CaptureError::windows_frame_read_failed("等待 Windows 捕获首帧超时")
     );
+}
+
+#[test]
+fn wait_next_capture_result_supports_texture_metadata() {
+    let texture_metadata = CapturedTextureMetadata {
+        frame: captured_frame(),
+        texture_width: 1280,
+        texture_height: 720,
+        mip_levels: 1,
+        array_size: 1,
+        sample_count: 1,
+    };
+    let mut frames = VecDeque::from([None, Some(texture_metadata)]);
+
+    let metadata = wait_next_capture_result_with(Duration::from_millis(100), || {
+        Ok(frames.pop_front().flatten())
+    })
+    .expect("texture metadata should arrive before timeout");
+
+    assert_eq!(metadata, texture_metadata);
 }
 
 #[test]

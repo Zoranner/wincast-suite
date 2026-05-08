@@ -103,7 +103,7 @@ impl CaptureSession {
         &mut self,
         timeout: Duration,
     ) -> Result<CapturedFrame, CaptureError> {
-        wait_next_frame_metadata_with(timeout, || self.try_next_frame_metadata())
+        wait_next_capture_result_with(timeout, || self.try_next_frame_metadata())
     }
 
     pub fn try_next_texture_metadata(
@@ -186,6 +186,13 @@ pub fn wait_next_frame_metadata_with(
     timeout: Duration,
     mut try_next_frame: impl FnMut() -> Result<Option<CapturedFrame>, CaptureError>,
 ) -> Result<CapturedFrame, CaptureError> {
+    wait_next_capture_result_with(timeout, &mut try_next_frame)
+}
+
+pub fn wait_next_capture_result_with<T>(
+    timeout: Duration,
+    mut try_next_frame: impl FnMut() -> Result<Option<T>, CaptureError>,
+) -> Result<T, CaptureError> {
     let deadline = Instant::now() + timeout;
 
     loop {

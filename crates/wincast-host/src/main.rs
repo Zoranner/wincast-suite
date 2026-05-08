@@ -12,7 +12,8 @@ mod program;
 
 use program::{ProgramRunner, StartedProgram, StdProgramRunner, launch_with_runner};
 use wincast_capture::{
-    CaptureError, CaptureSession, CaptureTarget, CapturedFrame, wait_next_frame_metadata_with,
+    CaptureError, CaptureSession, CaptureTarget, CapturedTextureMetadata,
+    wait_next_capture_result_with,
 };
 use wincast_protocol::{
     config::{CaptureMode, HostConfig},
@@ -206,7 +207,9 @@ trait CaptureStarter {
 }
 
 trait CaptureRuntime {
-    fn try_next_frame_metadata(&mut self) -> Result<Option<CapturedFrame>, CaptureError>;
+    fn try_next_texture_metadata(
+        &mut self,
+    ) -> Result<Option<CapturedTextureMetadata>, CaptureError>;
 }
 
 struct StdCaptureStarter;
@@ -221,8 +224,10 @@ impl CaptureStarter for StdCaptureStarter {
 }
 
 impl CaptureRuntime for CaptureSession {
-    fn try_next_frame_metadata(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
-        self.try_next_frame_metadata()
+    fn try_next_texture_metadata(
+        &mut self,
+    ) -> Result<Option<CapturedTextureMetadata>, CaptureError> {
+        self.try_next_texture_metadata()
     }
 }
 
@@ -254,9 +259,9 @@ fn start_capture_session(
     capture: &mut impl CaptureStarter,
 ) -> Result<(), CaptureError> {
     let mut session = capture.start_capture(capture_target(config, window))?;
-    let _ = wait_next_frame_metadata_with(
+    let _ = wait_next_capture_result_with(
         Duration::from_millis(config.capture.startup_timeout_ms),
-        || session.try_next_frame_metadata(),
+        || session.try_next_texture_metadata(),
     )?;
     Ok(())
 }
@@ -493,7 +498,7 @@ mod tests {
         let config = host_config("127.0.0.1:0".to_owned());
         let window = window_candidate();
         let mut capture = RecordingCaptureStarter {
-            frames: VecDeque::from([None, Some(captured_frame())]),
+            frames: VecDeque::from([None, Some(captured_texture_metadata())]),
             ..Default::default()
         };
         let attempts = capture.attempts.clone();
@@ -576,7 +581,7 @@ mod tests {
 
     struct RecordingCaptureStarter {
         targets: Vec<CaptureTarget>,
-        frames: VecDeque<Option<CapturedFrame>>,
+        frames: VecDeque<Option<CapturedTextureMetadata>>,
         attempts: Arc<AtomicUsize>,
     }
 
@@ -584,7 +589,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 targets: Vec::new(),
-                frames: VecDeque::from([Some(captured_frame())]),
+                frames: VecDeque::from([Some(captured_texture_metadata())]),
                 attempts: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -604,12 +609,14 @@ mod tests {
     }
 
     struct RecordingCaptureRuntime {
-        frames: VecDeque<Option<CapturedFrame>>,
+        frames: VecDeque<Option<CapturedTextureMetadata>>,
         attempts: Arc<AtomicUsize>,
     }
 
     impl CaptureRuntime for RecordingCaptureRuntime {
-        fn try_next_frame_metadata(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
+        fn try_next_texture_metadata(
+            &mut self,
+        ) -> Result<Option<CapturedTextureMetadata>, CaptureError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             Ok(self.frames.pop_front().flatten())
         }
@@ -678,14 +685,21 @@ mod tests {
         }
     }
 
-    fn captured_frame() -> CapturedFrame {
-        CapturedFrame {
-            width: 1280,
-            height: 720,
-            stride_bytes: 5120,
-            pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
-            sequence_number: 0,
-            timestamp_ns: 0,
+    fn captured_texture_metadata() -> CapturedTextureMetadata {
+        CapturedTextureMetadata {
+            frame: wincast_capture::CapturedFrame {
+                width: 1280,
+                height: 720,
+                stride_bytes: 5120,
+                pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
+                sequence_number: 0,
+                timestamp_ns: 0,
+            },
+            texture_width: 1280,
+            texture_height: 720,
+            mip_levels: 1,
+            array_size: 1,
+            sample_count: 1,
         }
     }
 }
