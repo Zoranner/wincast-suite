@@ -11,4 +11,6 @@ thiserror.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Graphics_Capture",
+    "Win32_Foundation",
+    "Win32_System_WinRT_Graphics_Capture",
 ] }

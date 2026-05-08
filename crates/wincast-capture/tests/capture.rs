@@ -40,7 +40,7 @@ fn captured_frame_keeps_metadata_without_pixel_payload() {
 fn capture_errors_have_clear_chinese_messages() {
     assert_eq!(
         CaptureError::windows_capture_not_implemented().to_string(),
-        "Windows 画面捕获实现未完成：尚未接入 Windows Graphics Capture"
+        "Windows 画面捕获实现未完成：尚未接入帧池和帧获取循环"
     );
     assert_eq!(
         CaptureError::windows_graphics_capture_unsupported().to_string(),
@@ -50,6 +50,10 @@ fn capture_errors_have_clear_chinese_messages() {
         CaptureError::windows_graphics_capture_support_check_failed("HRESULT 0x80004005")
             .to_string(),
         "检测 Windows Graphics Capture 支持状态失败: HRESULT 0x80004005"
+    );
+    assert_eq!(
+        CaptureError::windows_capture_item_create_failed("invalid hwnd").to_string(),
+        "创建窗口捕获目标失败: invalid hwnd"
     );
     assert_eq!(
         CaptureError::unsupported_platform("linux").to_string(),

@@ -65,12 +65,14 @@ impl CaptureSession {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CaptureError {
-    #[error("Windows 画面捕获实现未完成：尚未接入 Windows Graphics Capture")]
+    #[error("Windows 画面捕获实现未完成：尚未接入帧池和帧获取循环")]
     WindowsCaptureNotImplemented,
     #[error("当前 Windows 系统不支持 Windows Graphics Capture")]
     WindowsGraphicsCaptureUnsupported,
     #[error("检测 Windows Graphics Capture 支持状态失败: {0}")]
     WindowsGraphicsCaptureSupportCheckFailed(String),
+    #[error("创建窗口捕获目标失败: {0}")]
+    WindowsCaptureItemCreateFailed(String),
     #[error("当前平台不支持画面捕获：仅 Windows 支持宿主端捕获，当前平台 {platform}")]
     UnsupportedPlatform { platform: String },
 }
@@ -88,6 +90,10 @@ impl CaptureError {
         Self::WindowsGraphicsCaptureSupportCheckFailed(error.into())
     }
 
+    pub fn windows_capture_item_create_failed(error: impl Into<String>) -> Self {
+        Self::WindowsCaptureItemCreateFailed(error.into())
+    }
+
     pub fn unsupported_platform(platform: impl Into<String>) -> Self {
         Self::UnsupportedPlatform {
             platform: platform.into(),
@@ -96,7 +102,7 @@ impl CaptureError {
 }
 
 #[cfg(windows)]
-fn start_platform_capture(_target: CaptureTarget) -> Result<CaptureSession, CaptureError> {
+fn start_platform_capture(target: CaptureTarget) -> Result<CaptureSession, CaptureError> {
     use windows::Graphics::Capture::GraphicsCaptureSession;
 
     let supported = GraphicsCaptureSession::IsSupported().map_err(|error| {
@@ -106,7 +112,28 @@ fn start_platform_capture(_target: CaptureTarget) -> Result<CaptureSession, Capt
         return Err(CaptureError::windows_graphics_capture_unsupported());
     }
 
+    if let CaptureTarget::Window { handle, .. } = target {
+        let _item = create_window_capture_item(handle)?;
+    }
+
     Err(CaptureError::windows_capture_not_implemented())
+}
+
+#[cfg(windows)]
+fn create_window_capture_item(
+    handle: isize,
+) -> Result<windows::Graphics::Capture::GraphicsCaptureItem, CaptureError> {
+    use windows::{
+        Graphics::Capture::GraphicsCaptureItem,
+        Win32::{Foundation::HWND, System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop},
+        core::factory,
+    };
+
+    let hwnd = HWND(handle as *mut core::ffi::c_void);
+    let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+        .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))?;
+    unsafe { interop.CreateForWindow(hwnd) }
+        .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))
 }
 
 #[cfg(not(windows))]
