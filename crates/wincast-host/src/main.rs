@@ -1,7 +1,17 @@
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{
+    fs,
+    net::{SocketAddr, TcpListener, TcpStream},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use clap::{Parser, Subcommand};
-use wincast_protocol::config::HostConfig;
+use wincast_protocol::{
+    config::HostConfig,
+    frame::{read_message, write_message},
+    handshake::accept_client_hello,
+    message::{ControlMessage, ErrorCode},
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "WinCast Windows 宿主端")]
@@ -54,14 +64,73 @@ fn validate_config(path: &PathBuf) -> Result<String, String> {
 
 fn run_host(path: &PathBuf) -> Result<String, String> {
     let config = load_config(path)?;
-    Ok(runtime_not_implemented_message(&config))
+    let listener = TcpListener::bind(&config.listen)
+        .map_err(|error| format!("宿主端 TCP 监听失败: {error}"))?;
+    let startup_message = runtime_not_implemented_message(&config);
+    let local_addr = run_control_listener_once(listener)?;
+    Ok(format!(
+        "{startup_message} 控制通道已处理一个客户端连接，实际监听 {local_addr}。"
+    ))
 }
 
 fn runtime_not_implemented_message(config: &HostConfig) -> String {
     format!(
-        "宿主端配置有效，监听 {}，程序 {}。运行时链路未实现：尚未启动 TCP 监听、程序生命周期、画面捕获、编码传输和输入注入。",
-        config.listen, config.program
+        "宿主端配置有效，监听 {}，程序 {}。{}",
+        config.listen,
+        config.program,
+        runtime_not_implemented_detail()
     )
+}
+
+fn runtime_not_implemented_detail() -> &'static str {
+    "运行时链路未实现：尚未启动程序生命周期、画面捕获、编码传输和输入注入。"
+}
+
+fn run_control_listener_once(listener: TcpListener) -> Result<SocketAddr, String> {
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| format!("读取宿主端监听地址失败: {error}"))?;
+    let (mut stream, _peer_addr) = listener
+        .accept()
+        .map_err(|error| format!("接受客户端连接失败: {error}"))?;
+    handle_control_client(&mut stream)?;
+    Ok(local_addr)
+}
+
+fn handle_control_client(stream: &mut TcpStream) -> Result<(), String> {
+    let mut writer = stream
+        .try_clone()
+        .map_err(|error| format!("克隆控制连接写入端失败: {error}"))?;
+    accept_client_hello(stream, &mut writer).map_err(|error| format!("控制握手失败: {error}"))?;
+
+    match read_message(stream).map_err(|error| format!("读取控制消息失败: {error}"))? {
+        ControlMessage::StartSession => {
+            write_runtime_not_implemented(&mut writer)?;
+            Ok(())
+        }
+        message => {
+            write_message(
+                &mut writer,
+                &ControlMessage::Error {
+                    code: ErrorCode::TransportFailed,
+                    message: format!("控制消息顺序无效，期望 StartSession，实际收到 {message:?}"),
+                },
+            )
+            .map_err(|error| format!("写入控制错误消息失败: {error}"))?;
+            Err("控制消息顺序无效，期望 StartSession".to_owned())
+        }
+    }
+}
+
+fn write_runtime_not_implemented(writer: &mut impl std::io::Write) -> Result<(), String> {
+    write_message(
+        writer,
+        &ControlMessage::Error {
+            code: ErrorCode::TransportFailed,
+            message: runtime_not_implemented_detail().to_owned(),
+        },
+    )
+    .map_err(|error| format!("写入运行时未实现消息失败: {error}"))
 }
 
 fn load_config(path: &PathBuf) -> Result<HostConfig, String> {
@@ -73,7 +142,16 @@ fn load_config(path: &PathBuf) -> Result<HostConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wincast_protocol::config::{CaptureConfig, CaptureMode, VideoCodec, VideoConfig};
+    use std::{
+        net::{TcpListener, TcpStream},
+        thread,
+    };
+    use wincast_protocol::{
+        config::{CaptureConfig, CaptureMode, VideoCodec, VideoConfig},
+        frame::read_message,
+        handshake::send_client_hello,
+        message::{ControlMessage, ErrorCode},
+    };
 
     #[test]
     fn parses_validate_command_with_config_path() {
@@ -98,9 +176,52 @@ mod tests {
     }
 
     #[test]
-    fn run_message_does_not_claim_runtime_chain_is_ready() {
-        let config = HostConfig {
-            listen: "0.0.0.0:7856".to_owned(),
+    fn runtime_message_does_not_claim_runtime_chain_is_ready() {
+        let config = host_config("0.0.0.0:7856".to_owned());
+
+        let message = runtime_not_implemented_message(&config);
+
+        assert!(message.contains("运行时链路未实现"));
+        assert!(message.contains("尚未启动程序生命周期"));
+    }
+
+    #[test]
+    fn host_accepts_one_tcp_control_handshake_before_reporting_runtime_unimplemented() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener addr should be available");
+        let host = thread::spawn(move || run_control_listener_once(listener));
+
+        let mut client = TcpStream::connect(endpoint).expect("client should connect");
+        send_client_hello(&mut client).expect("client hello should write");
+        assert_eq!(
+            read_message(&mut client).expect("host hello should read"),
+            ControlMessage::Hello { version: 1 }
+        );
+
+        wincast_protocol::frame::write_message(&mut client, &ControlMessage::StartSession)
+            .expect("start session should write");
+
+        assert_eq!(
+            read_message(&mut client).expect("runtime error should read"),
+            ControlMessage::Error {
+                code: ErrorCode::TransportFailed,
+                message: "运行时链路未实现：尚未启动程序生命周期、画面捕获、编码传输和输入注入。"
+                    .to_owned(),
+            }
+        );
+
+        let host_result = host.join().expect("host thread should finish");
+        assert_eq!(
+            host_result.expect("host should handle one client"),
+            endpoint
+        );
+    }
+
+    fn host_config(listen: String) -> HostConfig {
+        HostConfig {
+            listen,
             program: "C:\\Program Files\\SomeApp\\app.exe".to_owned(),
             args: Vec::new(),
             work_dir: "C:\\Program Files\\SomeApp".to_owned(),
@@ -116,11 +237,6 @@ mod tests {
                 window_title_contains: String::new(),
                 startup_timeout_ms: 15000,
             },
-        };
-
-        let message = runtime_not_implemented_message(&config);
-
-        assert!(message.contains("运行时链路未实现"));
-        assert!(message.contains("尚未启动 TCP 监听"));
+        }
     }
 }

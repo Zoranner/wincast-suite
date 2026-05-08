@@ -96,7 +96,7 @@ docs/
 
 ## 当前 CLI 骨架
 
-当前 `wincast-host` 与 `wincast-client` 只提供配置读取、配置校验和运行入口占位，不代表媒体链路、捕获、渲染或输入链路已经完成。
+当前 `wincast-host` 与 `wincast-client` 提供配置读取、配置校验和最小 TCP 控制通道握手，不代表媒体链路、捕获、渲染或输入链路已经完成。
 
 宿主端 CLI：
 
@@ -115,7 +115,7 @@ wincast-client --config wincast-client.toml run
 wincast-client targets
 ```
 
-不带子命令时默认进入 `run`。`run` 只在配置校验通过后输出“运行时链路未实现”，不得假装已经建立 TCP 连接、WebRTC 信令、视频传输、画面捕获、渲染或输入事件发送。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
+不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，并返回运行时未实现错误；客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，并把宿主端错误响应明确暴露出来。当前不得假装已经完成 WebRTC 信令、视频传输、画面捕获、渲染或输入事件发送。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
 
 ## 宿主端设计
 

@@ -89,3 +89,24 @@ pub fn send_start_session(writer: &mut impl Write) -> Result<(), HandshakeError>
     write_message(writer, &ControlMessage::StartSession)?;
     Ok(())
 }
+
+pub fn read_start_session(reader: &mut impl Read) -> Result<(), HandshakeError> {
+    match read_message(reader)? {
+        ControlMessage::StartSession => Ok(()),
+        _ => Err(HandshakeError::InvalidMessage),
+    }
+}
+
+pub fn send_session_ready(
+    writer: &mut impl Write,
+    width: u32,
+    height: u32,
+) -> Result<(), HandshakeError> {
+    write_message(writer, &ControlMessage::SessionReady { width, height })?;
+    Ok(())
+}
+
+pub fn send_goodbye(writer: &mut impl Write) -> Result<(), HandshakeError> {
+    write_message(writer, &ControlMessage::Goodbye)?;
+    Ok(())
+}

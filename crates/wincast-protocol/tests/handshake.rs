@@ -2,8 +2,9 @@ use std::io::Cursor;
 
 use wincast_protocol::{
     handshake::{
-        PROTOCOL_VERSION, accept_client_hello, read_host_hello, reject_busy_client,
-        send_client_hello, send_start_session,
+        PROTOCOL_VERSION, accept_client_hello, read_host_hello, read_start_session,
+        reject_busy_client, send_client_hello, send_goodbye, send_session_ready,
+        send_start_session,
     },
     message::{ControlMessage, ErrorCode},
 };
@@ -101,6 +102,52 @@ fn client_sends_start_session_after_hello_exchange() {
     let message = wincast_protocol::frame::read_message(&mut Cursor::new(bytes))
         .expect("start session should decode");
     assert_eq!(message, ControlMessage::StartSession);
+}
+
+#[test]
+fn host_reads_start_session_after_hello_exchange() {
+    let mut bytes = Vec::new();
+    wincast_protocol::frame::write_message(&mut bytes, &ControlMessage::StartSession)
+        .expect("start session should encode");
+
+    read_start_session(&mut Cursor::new(bytes)).expect("start session should be accepted");
+}
+
+#[test]
+fn host_rejects_unexpected_message_when_waiting_for_start_session() {
+    let mut bytes = Vec::new();
+    wincast_protocol::frame::write_message(&mut bytes, &ControlMessage::Heartbeat)
+        .expect("heartbeat should encode");
+
+    read_start_session(&mut Cursor::new(bytes)).expect_err("heartbeat is not start session");
+}
+
+#[test]
+fn host_sends_session_ready_with_video_size() {
+    let mut bytes = Vec::new();
+
+    send_session_ready(&mut bytes, 1280, 720).expect("session ready should encode");
+
+    let message = wincast_protocol::frame::read_message(&mut Cursor::new(bytes))
+        .expect("session ready should decode");
+    assert_eq!(
+        message,
+        ControlMessage::SessionReady {
+            width: 1280,
+            height: 720,
+        }
+    );
+}
+
+#[test]
+fn host_sends_goodbye_when_runtime_chain_stops_at_control_stage() {
+    let mut bytes = Vec::new();
+
+    send_goodbye(&mut bytes).expect("goodbye should encode");
+
+    let message = wincast_protocol::frame::read_message(&mut Cursor::new(bytes))
+        .expect("goodbye should decode");
+    assert_eq!(message, ControlMessage::Goodbye);
 }
 
 #[test]
