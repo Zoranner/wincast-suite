@@ -210,6 +210,8 @@ trait CaptureStarter {
 }
 
 trait CaptureRuntime {
+    fn is_active(&self) -> bool;
+
     fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError>;
 }
 
@@ -225,6 +227,10 @@ impl CaptureStarter for StdCaptureStarter {
 }
 
 impl CaptureRuntime for CaptureSession {
+    fn is_active(&self) -> bool {
+        self.is_active()
+    }
+
     fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError> {
         self.try_next_bgra_frame()
     }
@@ -314,7 +320,11 @@ fn write_raw_bgra_stream(
             .try_next_bgra_frame()
             .map_err(|error| format!("读取后续 raw BGRA 捕获帧失败: {error}"))?
         else {
-            return Ok(());
+            if !session.is_active() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(16));
+            continue;
         };
         write_raw_bgra_frame_from_capture(writer, &frame)?;
     }
@@ -587,6 +597,63 @@ mod tests {
     }
 
     #[test]
+    fn host_keeps_raw_stream_alive_when_no_frame_is_temporarily_available() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener addr should be available");
+        let config = host_config(endpoint.to_string());
+        let mut runner = RecordingProgramRunner::default();
+        let mut locator = RecordingWindowLocator::default();
+        let mut capture = RecordingCaptureStarter {
+            frames: VecDeque::from([
+                Some(captured_bgra_frame_with_sequence(0)),
+                None,
+                Some(captured_bgra_frame_with_sequence(1)),
+                None,
+            ]),
+            ..Default::default()
+        };
+        let host = thread::spawn(move || {
+            let result = run_control_listener_once_with_runtime(
+                listener,
+                &config,
+                &mut runner,
+                &mut locator,
+                &mut capture,
+            );
+            (result, runner.launched, locator.lookups, capture.targets)
+        });
+
+        let mut client = TcpStream::connect(endpoint).expect("client should connect");
+        send_client_hello(&mut client).expect("client hello should write");
+        read_message(&mut client).expect("host hello should read");
+        wincast_protocol::frame::write_message(&mut client, &ControlMessage::StartSession)
+            .expect("start session should write");
+
+        read_message(&mut client).expect("session ready should read");
+        read_message(&mut client).expect("video ready should read");
+        let first = read_raw_bgra_frame(&mut client).expect("first raw frame should read");
+        let second = read_raw_bgra_frame(&mut client).expect("second raw frame should read");
+
+        assert_eq!(first.sequence_number, 0);
+        assert_eq!(second.sequence_number, 1);
+
+        let (host_result, launched, lookups, capture_targets) =
+            host.join().expect("host thread should finish");
+        assert_eq!(
+            host_result.expect("host should handle one client"),
+            endpoint
+        );
+        assert_eq!(
+            launched,
+            vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
+        );
+        assert_eq!(lookups, vec![(42, None)]);
+        assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
+    }
+
+    #[test]
     fn host_reports_window_not_found_after_program_launch() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let endpoint = listener
@@ -795,6 +862,10 @@ mod tests {
     }
 
     impl CaptureRuntime for RecordingCaptureRuntime {
+        fn is_active(&self) -> bool {
+            !self.frames.is_empty()
+        }
+
         fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             Ok(self.frames.pop_front().flatten())
