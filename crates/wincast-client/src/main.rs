@@ -95,8 +95,18 @@ fn read_first_readback_frame(stream: &mut TcpStream) -> Result<(), String> {
     match read_message(stream).map_err(|error| format!("读取宿主端首帧失败: {error}"))? {
         ControlMessage::RawBgraReadbackFrame(frame) => validate_readback_frame(&frame),
         ControlMessage::EncodedVideoFrame(frame) => validate_encoded_frame(&frame),
+        ControlMessage::VideoReady => read_first_encoded_frame(stream),
         ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
         message => Err(format!("宿主端首帧消息无效: {message:?}")),
+    }
+}
+
+fn read_first_encoded_frame(stream: &mut TcpStream) -> Result<(), String> {
+    match read_message(stream).map_err(|error| format!("读取宿主端首帧编码视频失败: {error}"))?
+    {
+        ControlMessage::EncodedVideoFrame(frame) => validate_encoded_frame(&frame),
+        ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
+        message => Err(format!("宿主端首帧编码视频消息无效: {message:?}")),
     }
 }
 
@@ -322,6 +332,8 @@ mod tests {
                 },
             )
             .expect("session ready should encode");
+            write_message(&mut stream, &ControlMessage::VideoReady)
+                .expect("video ready should encode");
             write_message(
                 &mut stream,
                 &ControlMessage::EncodedVideoFrame(encoded_video_frame()),
@@ -374,6 +386,43 @@ mod tests {
 
         host_thread.join().expect("host thread should finish");
         assert!(error.contains("首帧编码视频帧无效"));
+    }
+
+    #[test]
+    fn client_rejects_invalid_message_after_video_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let host_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("client should connect");
+            read_message(&mut stream).expect("client hello should decode");
+            send_client_hello(&mut stream).expect("host hello should encode");
+            read_message(&mut stream).expect("start session should decode");
+            write_message(
+                &mut stream,
+                &ControlMessage::SessionReady {
+                    width: 2,
+                    height: 2,
+                },
+            )
+            .expect("session ready should encode");
+            write_message(&mut stream, &ControlMessage::VideoReady)
+                .expect("video ready should encode");
+            write_message(&mut stream, &ControlMessage::Heartbeat)
+                .expect("heartbeat should encode");
+        });
+
+        let config = ClientConfig {
+            host: endpoint.ip().to_string(),
+            port: endpoint.port(),
+        };
+
+        let error = run_client_with_config(&config).expect_err("invalid message should fail");
+
+        host_thread.join().expect("host thread should finish");
+        assert!(error.contains("首帧编码视频消息无效"));
     }
 
     #[test]

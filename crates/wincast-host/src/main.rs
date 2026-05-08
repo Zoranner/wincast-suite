@@ -345,6 +345,8 @@ fn write_first_encoded_frame(
         )?;
         return Ok(());
     }
+    write_message(writer, &ControlMessage::VideoReady)
+        .map_err(|error| format!("写入视频就绪消息失败: {error}"))?;
     write_message(writer, &ControlMessage::EncodedVideoFrame(encoded_frame))
         .map_err(|error| format!("写入首帧编码视频帧失败: {error}"))
 }
@@ -504,6 +506,10 @@ mod tests {
                 width: 1280,
                 height: 720,
             }
+        );
+        assert_eq!(
+            read_message(&mut client).expect("video ready should read"),
+            ControlMessage::VideoReady
         );
         match read_message(&mut client).expect("encoded frame should read") {
             ControlMessage::EncodedVideoFrame(frame) => {

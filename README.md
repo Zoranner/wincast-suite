@@ -10,6 +10,6 @@ WinCast Suite 是一个 Rust 工具工程，用于在内网或专网内从国产
 - 客户端需要适配 Linux x86_64 与 Linux aarch64/ARM64。
 - 系统不处理 Windows 登录、锁屏、UAC 安全桌面或不影响本地用户的独立远程会话。
 
-当前代码已完成 Rust workspace、协议/配置模型、host/client CLI 骨架、控制消息编解码、最小 TCP 控制通道握手、Windows 宿主端启动配置程序和主窗口定位入口，并新增 `wincast-capture` 捕获抽象。CLI `run` 可以建立宿主端连接并完成 `Hello` / `StartSession` 控制消息交换；宿主端收到会话启动请求后会尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，随后发送 `SessionReady` 并进入编码器边界；协议层已定义 raw BGRA readback 调试帧和 H.264 `EncodedVideoFrame` 线格式，客户端可以校验两类首帧消息，但生产 H.264 编码器、持续媒体传输、渲染和输入注入仍未实现。
+当前代码已完成 Rust workspace、协议/配置模型、host/client CLI 骨架、控制消息编解码、最小 TCP 控制通道握手、Windows 宿主端启动配置程序和主窗口定位入口，并新增 `wincast-capture` 捕获抽象。CLI `run` 可以建立宿主端连接并完成 `Hello` / `StartSession` 控制消息交换；宿主端收到会话启动请求后会尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，随后发送 `SessionReady` 并进入编码器边界；协议层已定义 raw BGRA readback 调试帧、`VideoReady` 阶段消息和 H.264 `EncodedVideoFrame` 线格式，客户端可以校验 raw 调试首帧或 `VideoReady` 后的 encoded 首帧，但生产 H.264 编码器、持续媒体传输、渲染和输入注入仍未实现。
 
 设计文档见 [docs/design.md](docs/design.md)。

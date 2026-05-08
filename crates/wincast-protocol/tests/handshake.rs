@@ -4,7 +4,7 @@ use wincast_protocol::{
     handshake::{
         PROTOCOL_VERSION, accept_client_hello, read_host_hello, read_start_session,
         reject_busy_client, send_client_hello, send_goodbye, send_session_ready,
-        send_start_session,
+        send_start_session, send_video_ready,
     },
     message::{ControlMessage, ErrorCode},
 };
@@ -137,6 +137,17 @@ fn host_sends_session_ready_with_video_size() {
             height: 720,
         }
     );
+}
+
+#[test]
+fn host_sends_video_ready_after_media_setup() {
+    let mut bytes = Vec::new();
+
+    send_video_ready(&mut bytes).expect("video ready should encode");
+
+    let message = wincast_protocol::frame::read_message(&mut Cursor::new(bytes))
+        .expect("video ready should decode");
+    assert_eq!(message, ControlMessage::VideoReady);
 }
 
 #[test]
