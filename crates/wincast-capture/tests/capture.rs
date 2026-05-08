@@ -1,5 +1,8 @@
+use std::{collections::VecDeque, time::Duration};
+
 use wincast_capture::{
     CaptureError, CaptureSession, CaptureTarget, CapturedFrame, FramePixelFormat,
+    wait_next_frame_metadata_with,
 };
 
 #[test]
@@ -19,14 +22,7 @@ fn capture_target_describes_desktop_and_window_targets() {
 
 #[test]
 fn captured_frame_keeps_metadata_without_pixel_payload() {
-    let frame = CapturedFrame {
-        width: 1280,
-        height: 720,
-        stride_bytes: 5120,
-        pixel_format: FramePixelFormat::Bgra8Unorm,
-        sequence_number: 7,
-        timestamp_ns: 123_456_789,
-    };
+    let frame = captured_frame();
 
     assert_eq!(frame.width, 1280);
     assert_eq!(frame.height, 720);
@@ -34,6 +30,30 @@ fn captured_frame_keeps_metadata_without_pixel_payload() {
     assert_eq!(frame.pixel_format, FramePixelFormat::Bgra8Unorm);
     assert_eq!(frame.sequence_number, 7);
     assert_eq!(frame.timestamp_ns, 123_456_789);
+}
+
+#[test]
+fn wait_next_frame_metadata_retries_until_frame_arrives() {
+    let mut frames = VecDeque::from([None, Some(captured_frame())]);
+
+    let frame = wait_next_frame_metadata_with(Duration::from_millis(100), || {
+        Ok(frames.pop_front().flatten())
+    })
+    .expect("frame should arrive before timeout");
+
+    assert_eq!(frame, captured_frame());
+    assert!(frames.is_empty());
+}
+
+#[test]
+fn wait_next_frame_metadata_reports_timeout() {
+    let error = wait_next_frame_metadata_with(Duration::from_millis(1), || Ok(None))
+        .expect_err("missing frame should time out");
+
+    assert_eq!(
+        error,
+        CaptureError::windows_frame_read_failed("等待 Windows 捕获首帧超时")
+    );
 }
 
 #[test]
@@ -84,4 +104,15 @@ fn non_windows_start_returns_unsupported_platform() {
         error,
         CaptureError::unsupported_platform(std::env::consts::OS)
     );
+}
+
+fn captured_frame() -> CapturedFrame {
+    CapturedFrame {
+        width: 1280,
+        height: 720,
+        stride_bytes: 5120,
+        pixel_format: FramePixelFormat::Bgra8Unorm,
+        sequence_number: 7,
+        timestamp_ns: 123_456_789,
+    }
 }

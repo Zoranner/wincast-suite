@@ -11,7 +11,9 @@ use clap::{Parser, Subcommand};
 mod program;
 
 use program::{ProgramRunner, StartedProgram, StdProgramRunner, launch_with_runner};
-use wincast_capture::{CaptureError, CaptureSession, CaptureTarget, CapturedFrame};
+use wincast_capture::{
+    CaptureError, CaptureSession, CaptureTarget, CapturedFrame, wait_next_frame_metadata_with,
+};
 use wincast_protocol::{
     config::{CaptureMode, HostConfig},
     frame::{read_message, write_message},
@@ -252,7 +254,10 @@ fn start_capture_session(
     capture: &mut impl CaptureStarter,
 ) -> Result<(), CaptureError> {
     let mut session = capture.start_capture(capture_target(config, window))?;
-    let _ = session.try_next_frame_metadata()?;
+    let _ = wait_next_frame_metadata_with(
+        Duration::from_millis(config.capture.startup_timeout_ms),
+        || session.try_next_frame_metadata(),
+    )?;
     Ok(())
 }
 
@@ -298,7 +303,12 @@ fn load_config(path: &PathBuf) -> Result<HostConfig, String> {
 mod tests {
     use super::*;
     use std::{
+        collections::VecDeque,
         net::{TcpListener, TcpStream},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         thread,
     };
     use wincast_protocol::{
@@ -478,6 +488,42 @@ mod tests {
         assert!(error.contains("初始化画面捕获失败"));
     }
 
+    #[test]
+    fn host_treats_missing_initial_frame_as_waitable_state() {
+        let config = host_config("127.0.0.1:0".to_owned());
+        let window = window_candidate();
+        let mut capture = RecordingCaptureStarter {
+            frames: VecDeque::from([None, Some(captured_frame())]),
+            ..Default::default()
+        };
+        let attempts = capture.attempts.clone();
+
+        start_capture_session(&config, &window, &mut capture)
+            .expect("host should wait until first frame metadata is available");
+
+        assert_eq!(capture.targets, vec![CaptureTarget::Desktop]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn host_reports_capture_failed_when_initial_frame_times_out() {
+        let mut config = host_config("127.0.0.1:0".to_owned());
+        config.capture.startup_timeout_ms = 1;
+        let window = window_candidate();
+        let mut capture = RecordingCaptureStarter {
+            frames: VecDeque::from([None, None]),
+            ..Default::default()
+        };
+
+        let error = start_capture_session(&config, &window, &mut capture)
+            .expect_err("host should fail when no frame metadata arrives before timeout");
+
+        assert_eq!(
+            error,
+            CaptureError::windows_frame_read_failed("等待 Windows 捕获首帧超时")
+        );
+    }
+
     #[derive(Default)]
     struct RecordingProgramRunner {
         launched: Vec<(String, Vec<String>)>,
@@ -528,9 +574,20 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct RecordingCaptureStarter {
         targets: Vec<CaptureTarget>,
+        frames: VecDeque<Option<CapturedFrame>>,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl Default for RecordingCaptureStarter {
+        fn default() -> Self {
+            Self {
+                targets: Vec::new(),
+                frames: VecDeque::from([Some(captured_frame())]),
+                attempts: Arc::new(AtomicUsize::new(0)),
+            }
+        }
     }
 
     impl CaptureStarter for RecordingCaptureStarter {
@@ -539,22 +596,22 @@ mod tests {
             target: CaptureTarget,
         ) -> Result<Box<dyn CaptureRuntime>, CaptureError> {
             self.targets.push(target);
-            Ok(Box::new(RecordingCaptureRuntime))
+            Ok(Box::new(RecordingCaptureRuntime {
+                frames: self.frames.clone(),
+                attempts: self.attempts.clone(),
+            }))
         }
     }
 
-    struct RecordingCaptureRuntime;
+    struct RecordingCaptureRuntime {
+        frames: VecDeque<Option<CapturedFrame>>,
+        attempts: Arc<AtomicUsize>,
+    }
 
     impl CaptureRuntime for RecordingCaptureRuntime {
         fn try_next_frame_metadata(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
-            Ok(Some(CapturedFrame {
-                width: 1280,
-                height: 720,
-                stride_bytes: 5120,
-                pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
-                sequence_number: 0,
-                timestamp_ns: 0,
-            }))
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(self.frames.pop_front().flatten())
         }
     }
 
@@ -602,6 +659,33 @@ mod tests {
                 window_title_contains: String::new(),
                 startup_timeout_ms: 15000,
             },
+        }
+    }
+
+    fn window_candidate() -> WindowCandidate {
+        WindowCandidate {
+            handle: 100,
+            process_id: 42,
+            title: "SomeApp".to_owned(),
+            visible: true,
+            tool_window: false,
+            rect: window::WindowRect {
+                left: 0,
+                top: 0,
+                right: 1280,
+                bottom: 720,
+            },
+        }
+    }
+
+    fn captured_frame() -> CapturedFrame {
+        CapturedFrame {
+            width: 1280,
+            height: 720,
+            stride_bytes: 5120,
+            pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
+            sequence_number: 0,
+            timestamp_ns: 0,
         }
     }
 }

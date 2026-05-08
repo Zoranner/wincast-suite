@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt, thread,
+    time::{Duration, Instant},
+};
 
 use thiserror::Error;
 
@@ -85,6 +88,13 @@ impl CaptureSession {
             Ok(None)
         }
     }
+
+    pub fn wait_next_frame_metadata(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<CapturedFrame, CaptureError> {
+        wait_next_frame_metadata_with(timeout, || self.try_next_frame_metadata())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -149,6 +159,27 @@ impl CaptureError {
     }
 }
 
+pub fn wait_next_frame_metadata_with(
+    timeout: Duration,
+    mut try_next_frame: impl FnMut() -> Result<Option<CapturedFrame>, CaptureError>,
+) -> Result<CapturedFrame, CaptureError> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(frame) = try_next_frame()? {
+            return Ok(frame);
+        }
+
+        if Instant::now() >= deadline {
+            return Err(CaptureError::windows_frame_read_failed(
+                "等待 Windows 捕获首帧超时",
+            ));
+        }
+
+        thread::sleep(Duration::from_millis(16));
+    }
+}
+
 #[cfg(windows)]
 fn start_platform_capture(target: CaptureTarget) -> Result<CaptureSession, CaptureError> {
     let state = windows_impl::start_windows_capture(&target)?;
@@ -203,10 +234,13 @@ mod windows_impl {
         pub(crate) fn try_next_frame_metadata(
             &mut self,
         ) -> Result<Option<super::CapturedFrame>, CaptureError> {
-            let frame = self
-                .frame_pool
-                .TryGetNextFrame()
-                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+            let frame = match self.frame_pool.TryGetNextFrame() {
+                Ok(frame) => frame,
+                Err(error) if error.code().0 == 0 => return Ok(None),
+                Err(error) => {
+                    return Err(CaptureError::windows_frame_read_failed(error.to_string()));
+                }
+            };
             let size = frame
                 .ContentSize()
                 .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
