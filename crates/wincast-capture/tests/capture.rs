@@ -1,8 +1,8 @@
 use std::{collections::VecDeque, time::Duration};
 
 use wincast_capture::{
-    CaptureError, CaptureSession, CaptureTarget, CapturedFrame, FramePixelFormat,
-    wait_next_frame_metadata_with,
+    CaptureError, CaptureSession, CaptureTarget, CapturedFrame, CapturedTextureMetadata,
+    FramePixelFormat, wait_next_frame_metadata_with,
 };
 
 #[test]
@@ -30,6 +30,25 @@ fn captured_frame_keeps_metadata_without_pixel_payload() {
     assert_eq!(frame.pixel_format, FramePixelFormat::Bgra8Unorm);
     assert_eq!(frame.sequence_number, 7);
     assert_eq!(frame.timestamp_ns, 123_456_789);
+}
+
+#[test]
+fn captured_texture_metadata_describes_d3d_texture_without_exposing_pixels() {
+    let metadata = CapturedTextureMetadata {
+        frame: captured_frame(),
+        texture_width: 1280,
+        texture_height: 720,
+        mip_levels: 1,
+        array_size: 1,
+        sample_count: 1,
+    };
+
+    assert_eq!(metadata.frame, captured_frame());
+    assert_eq!(metadata.texture_width, 1280);
+    assert_eq!(metadata.texture_height, 720);
+    assert_eq!(metadata.mip_levels, 1);
+    assert_eq!(metadata.array_size, 1);
+    assert_eq!(metadata.sample_count, 1);
 }
 
 #[test]

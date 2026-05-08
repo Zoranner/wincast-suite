@@ -51,6 +51,16 @@ pub struct CapturedFrame {
     pub timestamp_ns: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapturedTextureMetadata {
+    pub frame: CapturedFrame,
+    pub texture_width: u32,
+    pub texture_height: u32,
+    pub mip_levels: u32,
+    pub array_size: u32,
+    pub sample_count: u32,
+}
+
 #[derive(Debug)]
 pub struct CaptureSession {
     target: CaptureTarget,
@@ -94,6 +104,19 @@ impl CaptureSession {
         timeout: Duration,
     ) -> Result<CapturedFrame, CaptureError> {
         wait_next_frame_metadata_with(timeout, || self.try_next_frame_metadata())
+    }
+
+    pub fn try_next_texture_metadata(
+        &mut self,
+    ) -> Result<Option<CapturedTextureMetadata>, CaptureError> {
+        #[cfg(windows)]
+        {
+            self.state.try_next_texture_metadata()
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(None)
+        }
     }
 }
 
@@ -204,13 +227,13 @@ mod windows_impl {
                     D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
                 },
                 Direct3D11::{
-                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
-                    ID3D11Device,
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+                    D3D11CreateDevice, ID3D11Device, ID3D11Texture2D,
                 },
                 Dxgi::IDXGIDevice,
             },
             System::WinRT::{
-                Direct3D11::CreateDirect3D11DeviceFromDXGIDevice,
+                Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
                 Graphics::Capture::IGraphicsCaptureItemInterop,
             },
         },
@@ -241,25 +264,68 @@ mod windows_impl {
                     return Err(CaptureError::windows_frame_read_failed(error.to_string()));
                 }
             };
-            let size = frame
-                .ContentSize()
-                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
-            let timestamp = frame
-                .SystemRelativeTime()
-                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
-
             let sequence_number = self.sequence_number;
             self.sequence_number = self.sequence_number.saturating_add(1);
 
-            Ok(Some(super::CapturedFrame {
-                width: size.Width.max(0) as u32,
-                height: size.Height.max(0) as u32,
-                stride_bytes: size.Width.max(0) as u32 * 4,
-                pixel_format: super::FramePixelFormat::Bgra8Unorm,
-                sequence_number,
-                timestamp_ns: timestamp.Duration.max(0) as u64 * 100,
+            Ok(Some(captured_frame_metadata(&frame, sequence_number)?))
+        }
+
+        pub(crate) fn try_next_texture_metadata(
+            &mut self,
+        ) -> Result<Option<super::CapturedTextureMetadata>, CaptureError> {
+            let frame = match self.frame_pool.TryGetNextFrame() {
+                Ok(frame) => frame,
+                Err(error) if error.code().0 == 0 => return Ok(None),
+                Err(error) => {
+                    return Err(CaptureError::windows_frame_read_failed(error.to_string()));
+                }
+            };
+            let metadata = captured_frame_metadata(&frame, self.sequence_number)?;
+            self.sequence_number = self.sequence_number.saturating_add(1);
+
+            let surface = frame
+                .Surface()
+                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+            let dxgi_access: IDirect3DDxgiInterfaceAccess = surface
+                .cast()
+                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+            let texture = unsafe { dxgi_access.GetInterface::<ID3D11Texture2D>() }
+                .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+            let mut texture_desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe {
+                texture.GetDesc(&mut texture_desc);
+            }
+
+            Ok(Some(super::CapturedTextureMetadata {
+                frame: metadata,
+                texture_width: texture_desc.Width,
+                texture_height: texture_desc.Height,
+                mip_levels: texture_desc.MipLevels,
+                array_size: texture_desc.ArraySize,
+                sample_count: texture_desc.SampleDesc.Count,
             }))
         }
+    }
+
+    fn captured_frame_metadata(
+        frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
+        sequence_number: u64,
+    ) -> Result<super::CapturedFrame, CaptureError> {
+        let size = frame
+            .ContentSize()
+            .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+        let timestamp = frame
+            .SystemRelativeTime()
+            .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
+
+        Ok(super::CapturedFrame {
+            width: size.Width.max(0) as u32,
+            height: size.Height.max(0) as u32,
+            stride_bytes: size.Width.max(0) as u32 * 4,
+            pixel_format: super::FramePixelFormat::Bgra8Unorm,
+            sequence_number,
+            timestamp_ns: timestamp.Duration.max(0) as u64 * 100,
+        })
     }
 
     pub(crate) fn start_windows_capture(
