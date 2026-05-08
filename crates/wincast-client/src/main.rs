@@ -11,6 +11,7 @@ use wincast_protocol::{
 
 const SUPPORTED_CLIENT_TARGETS: &[&str] =
     &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
+const RAW_BGRA_VALIDATION_FRAME_COUNT: usize = 1;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "WinCast Linux 客户端")]
@@ -102,9 +103,37 @@ fn read_first_readback_frame(stream: &mut TcpStream) -> Result<(), String> {
 }
 
 fn read_first_raw_binary_frame(stream: &mut TcpStream) -> Result<(), String> {
-    let frame = read_raw_bgra_frame(stream)
-        .map_err(|error| format!("读取宿主端 raw BGRA 视频帧失败: {error}"))?;
-    validate_raw_binary_frame(&frame)
+    read_raw_bgra_frames(stream, RAW_BGRA_VALIDATION_FRAME_COUNT).map(|_| ())
+}
+
+fn read_raw_bgra_frames(
+    reader: &mut impl std::io::Read,
+    frame_count: usize,
+) -> Result<RawBgraReceiveSummary, String> {
+    if frame_count == 0 {
+        return Err("raw BGRA 视频帧接收数量不能为 0".to_owned());
+    }
+
+    let mut last_sequence_number = None;
+    for _ in 0..frame_count {
+        let frame = read_raw_bgra_frame(reader)
+            .map_err(|error| format!("读取宿主端 raw BGRA 视频帧失败: {error}"))?;
+        validate_raw_binary_frame(&frame)?;
+        if let Some(previous) = last_sequence_number
+            && frame.sequence_number < previous
+        {
+            return Err(format!(
+                "宿主端 raw BGRA 视频帧序号回退: 上一帧 {previous}，当前帧 {}",
+                frame.sequence_number
+            ));
+        }
+        last_sequence_number = Some(frame.sequence_number);
+    }
+
+    Ok(RawBgraReceiveSummary {
+        frames: frame_count,
+        last_sequence_number: last_sequence_number.expect("frame_count is non-zero"),
+    })
 }
 
 fn validate_readback_frame(frame: &RawBgraReadbackFrame) -> Result<(), String> {
@@ -117,6 +146,12 @@ fn validate_raw_binary_frame(frame: &RawBgraFrame) -> Result<(), String> {
     frame
         .validate()
         .map_err(|error| format!("宿主端 raw BGRA 视频帧无效: {error}"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawBgraReceiveSummary {
+    frames: usize,
+    last_sequence_number: u64,
 }
 
 fn control_channel_ready_message(config: &ClientConfig) -> String {
@@ -346,6 +381,40 @@ mod tests {
     }
 
     #[test]
+    fn client_reads_multiple_raw_bgra_frames_after_video_ready() {
+        let mut bytes = Vec::new();
+        for sequence_number in 0..3 {
+            write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(sequence_number))
+                .expect("raw binary frame should encode");
+        }
+
+        let summary = read_raw_bgra_frames(&mut bytes.as_slice(), 3)
+            .expect("raw frame loop should accept three frames");
+
+        assert_eq!(
+            summary,
+            RawBgraReceiveSummary {
+                frames: 3,
+                last_sequence_number: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn client_rejects_sequence_number_regression_in_raw_bgra_loop() {
+        let mut bytes = Vec::new();
+        write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(2))
+            .expect("first frame should encode");
+        write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(1))
+            .expect("second frame should encode");
+
+        let error = read_raw_bgra_frames(&mut bytes.as_slice(), 2)
+            .expect_err("sequence regression should fail");
+
+        assert!(error.contains("raw BGRA 视频帧序号回退"));
+    }
+
+    #[test]
     fn parses_run_command_with_config_path() {
         let args =
             Args::try_parse_from(["wincast-client", "--config", "custom-client.toml", "run"])
@@ -436,12 +505,16 @@ mod tests {
     }
 
     fn raw_binary_frame() -> RawBgraFrame {
+        raw_binary_frame_with_sequence(0)
+    }
+
+    fn raw_binary_frame_with_sequence(sequence_number: u64) -> RawBgraFrame {
         RawBgraFrame {
             width: 2,
             height: 2,
             row_pitch: 8,
-            sequence_number: 0,
-            timestamp_ns: 0,
+            sequence_number,
+            timestamp_ns: sequence_number * 1_000_000,
             bytes: vec![0; 16],
         }
     }

@@ -160,13 +160,15 @@ fn handle_control_client(
                     write_control_error(&mut writer, ErrorCode::WindowNotFound, message.clone());
                 message
             })?;
-            let first_frame = start_capture_session(config, &window, capture).map_err(|error| {
-                let message = format!("初始化画面捕获失败: {error}");
-                let _ = write_control_error(&mut writer, ErrorCode::CaptureFailed, message.clone());
-                message
-            })?;
+            let (mut session, first_frame) = start_capture_session(config, &window, capture)
+                .map_err(|error| {
+                    let message = format!("初始化画面捕获失败: {error}");
+                    let _ =
+                        write_control_error(&mut writer, ErrorCode::CaptureFailed, message.clone());
+                    message
+                })?;
             write_session_ready(&mut writer, &first_frame)?;
-            write_first_raw_bgra_frame(&mut writer, &first_frame)?;
+            write_raw_bgra_stream(&mut writer, &first_frame, session.as_mut())?;
             Ok(())
         }
         message => {
@@ -254,12 +256,13 @@ fn start_capture_session(
     config: &HostConfig,
     window: &WindowCandidate,
     capture: &mut impl CaptureStarter,
-) -> Result<CapturedBgraFrame, CaptureError> {
+) -> Result<(Box<dyn CaptureRuntime>, CapturedBgraFrame), CaptureError> {
     let mut session = capture.start_capture(capture_target(config, window))?;
-    wait_next_capture_result_with(
+    let first_frame = wait_next_capture_result_with(
         Duration::from_millis(config.capture.startup_timeout_ms),
         || session.try_next_bgra_frame(),
-    )
+    )?;
+    Ok((session, first_frame))
 }
 
 fn capture_target(config: &HostConfig, window: &WindowCandidate) -> CaptureTarget {
@@ -297,12 +300,30 @@ fn write_session_ready(
     .map_err(|error| format!("写入会话就绪消息失败: {error}"))
 }
 
-fn write_first_raw_bgra_frame(
+fn write_raw_bgra_stream(
     writer: &mut impl std::io::Write,
-    frame: &CapturedBgraFrame,
+    first_frame: &CapturedBgraFrame,
+    session: &mut dyn CaptureRuntime,
 ) -> Result<(), String> {
     write_message(writer, &ControlMessage::VideoReady)
         .map_err(|error| format!("写入视频就绪消息失败: {error}"))?;
+    write_raw_bgra_frame_from_capture(writer, first_frame)?;
+
+    loop {
+        let Some(frame) = session
+            .try_next_bgra_frame()
+            .map_err(|error| format!("读取后续 raw BGRA 捕获帧失败: {error}"))?
+        else {
+            return Ok(());
+        };
+        write_raw_bgra_frame_from_capture(writer, &frame)?;
+    }
+}
+
+fn write_raw_bgra_frame_from_capture(
+    writer: &mut impl std::io::Write,
+    frame: &CapturedBgraFrame,
+) -> Result<(), String> {
     let raw_frame = RawBgraFrame {
         width: frame.metadata.frame.width,
         height: frame.metadata.frame.height,
@@ -312,7 +333,7 @@ fn write_first_raw_bgra_frame(
         bytes: frame.bytes.clone(),
     };
     write_raw_bgra_frame(writer, &raw_frame)
-        .map_err(|error| format!("写入首帧 raw BGRA 二进制帧失败: {error}"))
+        .map_err(|error| format!("写入 raw BGRA 二进制帧失败: {error}"))
 }
 
 fn load_config(path: &PathBuf) -> Result<HostConfig, String> {
@@ -497,6 +518,75 @@ mod tests {
     }
 
     #[test]
+    fn host_streams_available_raw_binary_frames_after_first_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener addr should be available");
+        let config = host_config(endpoint.to_string());
+        let mut runner = RecordingProgramRunner::default();
+        let mut locator = RecordingWindowLocator::default();
+        let mut capture = RecordingCaptureStarter {
+            frames: VecDeque::from([
+                Some(captured_bgra_frame_with_sequence(0)),
+                Some(captured_bgra_frame_with_sequence(1)),
+                Some(captured_bgra_frame_with_sequence(2)),
+                None,
+            ]),
+            ..Default::default()
+        };
+        let attempts = capture.attempts.clone();
+        let host = thread::spawn(move || {
+            let result = run_control_listener_once_with_runtime(
+                listener,
+                &config,
+                &mut runner,
+                &mut locator,
+                &mut capture,
+            );
+            (result, runner.launched, locator.lookups, capture.targets)
+        });
+
+        let mut client = TcpStream::connect(endpoint).expect("client should connect");
+        send_client_hello(&mut client).expect("client hello should write");
+        read_message(&mut client).expect("host hello should read");
+        wincast_protocol::frame::write_message(&mut client, &ControlMessage::StartSession)
+            .expect("start session should write");
+
+        assert_eq!(
+            read_message(&mut client).expect("session ready should read"),
+            ControlMessage::SessionReady {
+                width: 1280,
+                height: 720,
+            }
+        );
+        assert_eq!(
+            read_message(&mut client).expect("video ready should read"),
+            ControlMessage::VideoReady
+        );
+        let first = read_raw_bgra_frame(&mut client).expect("first raw frame should read");
+        let second = read_raw_bgra_frame(&mut client).expect("second raw frame should read");
+        let third = read_raw_bgra_frame(&mut client).expect("third raw frame should read");
+        assert_eq!(first.sequence_number, 0);
+        assert_eq!(second.sequence_number, 1);
+        assert_eq!(third.sequence_number, 2);
+
+        let (host_result, launched, lookups, capture_targets) =
+            host.join().expect("host thread should finish");
+        assert_eq!(
+            host_result.expect("host should handle one client"),
+            endpoint
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            launched,
+            vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
+        );
+        assert_eq!(lookups, vec![(42, None)]);
+        assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
+    }
+
+    #[test]
     fn host_reports_window_not_found_after_program_launch() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let endpoint = listener
@@ -590,7 +680,7 @@ mod tests {
         };
         let attempts = capture.attempts.clone();
 
-        let frame = start_capture_session(&config, &window, &mut capture)
+        let (_session, frame) = start_capture_session(&config, &window, &mut capture)
             .expect("host should wait until first frame metadata is available");
 
         assert_eq!(capture.targets, vec![CaptureTarget::Desktop]);
@@ -609,8 +699,10 @@ mod tests {
             ..Default::default()
         };
 
-        let error = start_capture_session(&config, &window, &mut capture)
-            .expect_err("host should fail when no frame metadata arrives before timeout");
+        let error = match start_capture_session(&config, &window, &mut capture) {
+            Ok(_) => panic!("host should fail when no frame metadata arrives before timeout"),
+            Err(error) => error,
+        };
 
         assert_eq!(
             error,
@@ -773,6 +865,10 @@ mod tests {
     }
 
     fn captured_bgra_frame() -> CapturedBgraFrame {
+        captured_bgra_frame_with_sequence(0)
+    }
+
+    fn captured_bgra_frame_with_sequence(sequence_number: u64) -> CapturedBgraFrame {
         CapturedBgraFrame {
             metadata: wincast_capture::CapturedTextureMetadata {
                 frame: wincast_capture::CapturedFrame {
@@ -780,8 +876,8 @@ mod tests {
                     height: 720,
                     stride_bytes: 5120,
                     pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
-                    sequence_number: 0,
-                    timestamp_ns: 0,
+                    sequence_number,
+                    timestamp_ns: sequence_number * 1_000_000,
                 },
                 texture_width: 1280,
                 texture_height: 720,

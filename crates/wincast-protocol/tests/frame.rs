@@ -146,6 +146,37 @@ fn raw_bgra_binary_frame_round_trips_without_json_control_envelope() {
 }
 
 #[test]
+fn raw_bgra_binary_frame_reads_consecutive_frames_from_same_stream() {
+    let first = RawBgraFrame {
+        width: 2,
+        height: 2,
+        row_pitch: 8,
+        sequence_number: 1,
+        timestamp_ns: 10,
+        bytes: vec![1; 16],
+    };
+    let second = RawBgraFrame {
+        width: 2,
+        height: 2,
+        row_pitch: 8,
+        sequence_number: 2,
+        timestamp_ns: 20,
+        bytes: vec![2; 16],
+    };
+    let mut bytes = Vec::new();
+
+    write_raw_bgra_frame(&mut bytes, &first).expect("first raw frame should encode");
+    write_raw_bgra_frame(&mut bytes, &second).expect("second raw frame should encode");
+
+    let mut cursor = Cursor::new(bytes);
+    let decoded_first = read_raw_bgra_frame(&mut cursor).expect("first raw frame should decode");
+    let decoded_second = read_raw_bgra_frame(&mut cursor).expect("second raw frame should decode");
+
+    assert_eq!(decoded_first, first);
+    assert_eq!(decoded_second, second);
+}
+
+#[test]
 fn raw_bgra_binary_frame_rejects_invalid_payload_shape() {
     let frame = RawBgraFrame {
         width: 2,
