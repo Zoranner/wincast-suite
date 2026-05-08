@@ -1,9 +1,10 @@
 use std::io::Cursor;
 
 use wincast_protocol::{
+    config::VideoCodec,
     frame::{FrameError, MAX_FRAME_LEN, decode_message, read_message, write_message},
     input::{ButtonState, InputEvent, Modifiers},
-    message::{ControlMessage, RawBgraReadbackFrame},
+    message::{ControlMessage, EncodedVideoFrame, RawBgraReadbackFrame},
 };
 
 #[test]
@@ -44,6 +45,25 @@ fn length_prefixed_frame_round_trips_raw_bgra_readback_message() {
     write_message(&mut bytes, &message).expect("raw frame should encode");
 
     let decoded = read_message(&mut Cursor::new(bytes)).expect("raw frame should decode");
+    assert_eq!(decoded, message);
+}
+
+#[test]
+fn length_prefixed_frame_round_trips_encoded_video_frame_message() {
+    let message = ControlMessage::EncodedVideoFrame(EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        width: 1280,
+        height: 720,
+        sequence_number: 2,
+        timestamp_ns: 20,
+        keyframe: true,
+        bytes: vec![0, 0, 0, 1, 103],
+    });
+    let mut bytes = Vec::new();
+
+    write_message(&mut bytes, &message).expect("encoded frame should encode");
+
+    let decoded = read_message(&mut Cursor::new(bytes)).expect("encoded frame should decode");
     assert_eq!(decoded, message);
 }
 

@@ -1,8 +1,9 @@
 use wincast_protocol::{
+    config::VideoCodec,
     input::{ButtonState, InputEvent, Modifiers},
     message::{
-        ControlMessage, MAX_RAW_BGRA_READBACK_BYTES, RawBgraReadbackFrame,
-        RawBgraReadbackFrameError,
+        ControlMessage, EncodedVideoFrame, EncodedVideoFrameError, MAX_ENCODED_VIDEO_FRAME_BYTES,
+        MAX_RAW_BGRA_READBACK_BYTES, RawBgraReadbackFrame, RawBgraReadbackFrameError,
     },
 };
 
@@ -88,6 +89,49 @@ fn raw_bgra_readback_frame_rejects_payloads_above_debug_limit() {
     );
 }
 
+#[test]
+fn encoded_video_frame_validates_payload_shape() {
+    let frame = encoded_frame(vec![1, 2, 3]);
+
+    frame.validate().expect("encoded frame should be valid");
+
+    assert_eq!(
+        ControlMessage::EncodedVideoFrame(frame.clone()),
+        ControlMessage::EncodedVideoFrame(frame)
+    );
+}
+
+#[test]
+fn encoded_video_frame_rejects_invalid_payload_shape() {
+    let empty_payload = encoded_frame(Vec::new());
+    assert_eq!(
+        empty_payload.validate(),
+        Err(EncodedVideoFrameError::EmptyPayload)
+    );
+
+    let empty_width = EncodedVideoFrame {
+        width: 0,
+        ..encoded_frame(vec![1])
+    };
+    assert_eq!(
+        empty_width.validate(),
+        Err(EncodedVideoFrameError::InvalidDimensions)
+    );
+}
+
+#[test]
+fn encoded_video_frame_rejects_payloads_above_frame_limit() {
+    let frame = encoded_frame(vec![0; MAX_ENCODED_VIDEO_FRAME_BYTES + 1]);
+
+    assert_eq!(
+        frame.validate(),
+        Err(EncodedVideoFrameError::PayloadTooLarge {
+            actual: MAX_ENCODED_VIDEO_FRAME_BYTES + 1,
+            max: MAX_ENCODED_VIDEO_FRAME_BYTES,
+        })
+    );
+}
+
 fn raw_bgra_frame(width: u32, height: u32, row_pitch: u32, bytes: Vec<u8>) -> RawBgraReadbackFrame {
     RawBgraReadbackFrame {
         width,
@@ -98,6 +142,18 @@ fn raw_bgra_frame(width: u32, height: u32, row_pitch: u32, bytes: Vec<u8>) -> Ra
         row_pitch,
         sequence_number: 7,
         timestamp_ns: 123_456,
+        bytes,
+    }
+}
+
+fn encoded_frame(bytes: Vec<u8>) -> EncodedVideoFrame {
+    EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        width: 1280,
+        height: 720,
+        sequence_number: 7,
+        timestamp_ns: 123_456,
+        keyframe: true,
         bytes,
     }
 }
