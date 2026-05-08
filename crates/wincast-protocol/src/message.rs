@@ -119,6 +119,7 @@ pub enum ErrorCode {
     ProgramLaunchFailed,
     WindowNotFound,
     CaptureFailed,
+    EncodingFailed,
     TransportFailed,
     UnsupportedVersion,
 }

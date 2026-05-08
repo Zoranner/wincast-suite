@@ -132,6 +132,7 @@ fn format_host_error(code: ErrorCode, message: String) -> String {
     match code {
         ErrorCode::Busy => format!("宿主端忙碌: {message}"),
         ErrorCode::UnsupportedVersion => format!("协议版本不匹配: {message}"),
+        ErrorCode::EncodingFailed => format!("宿主端视频编码失败: {message}"),
         _ => format!("宿主端拒绝连接: {message}"),
     }
 }
@@ -251,6 +252,17 @@ mod tests {
         host_thread.join().expect("host thread should finish");
         assert!(error.contains("宿主端拒绝连接"));
         assert!(error.contains("运行时链路未实现"));
+    }
+
+    #[test]
+    fn client_reports_encoding_failure_in_chinese() {
+        let error = format_host_error(
+            ErrorCode::EncodingFailed,
+            "Windows 视频编码器未实现：尚未接入 H.264 编码器。".to_owned(),
+        );
+
+        assert!(error.contains("宿主端视频编码失败"));
+        assert!(error.contains("尚未接入 H.264 编码器"));
     }
 
     #[test]

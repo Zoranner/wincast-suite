@@ -4,7 +4,7 @@ use wincast_protocol::{
     config::VideoCodec,
     frame::{FrameError, MAX_FRAME_LEN, decode_message, read_message, write_message},
     input::{ButtonState, InputEvent, Modifiers},
-    message::{ControlMessage, EncodedVideoFrame, RawBgraReadbackFrame},
+    message::{ControlMessage, EncodedVideoFrame, ErrorCode, RawBgraReadbackFrame},
 };
 
 #[test]
@@ -64,6 +64,20 @@ fn length_prefixed_frame_round_trips_encoded_video_frame_message() {
     write_message(&mut bytes, &message).expect("encoded frame should encode");
 
     let decoded = read_message(&mut Cursor::new(bytes)).expect("encoded frame should decode");
+    assert_eq!(decoded, message);
+}
+
+#[test]
+fn length_prefixed_frame_round_trips_encoding_failed_error() {
+    let message = ControlMessage::Error {
+        code: ErrorCode::EncodingFailed,
+        message: "Windows 视频编码器未实现：尚未接入 H.264 编码器。".to_owned(),
+    };
+    let mut bytes = Vec::new();
+
+    write_message(&mut bytes, &message).expect("encoding error should encode");
+
+    let decoded = read_message(&mut Cursor::new(bytes)).expect("encoding error should decode");
     assert_eq!(decoded, message);
 }
 

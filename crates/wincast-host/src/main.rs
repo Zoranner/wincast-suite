@@ -333,13 +333,18 @@ fn write_first_encoded_frame(
     let encoded_frame = match encoder.encode_first_frame(config, frame) {
         Ok(encoded_frame) => encoded_frame,
         Err(message) => {
-            write_control_error(writer, ErrorCode::TransportFailed, message)?;
+            write_control_error(writer, ErrorCode::EncodingFailed, message)?;
             return Ok(());
         }
     };
-    encoded_frame
-        .validate()
-        .map_err(|error| format!("首帧编码视频帧无效: {error:?}"))?;
+    if let Err(error) = encoded_frame.validate() {
+        write_control_error(
+            writer,
+            ErrorCode::EncodingFailed,
+            format!("首帧编码视频帧无效: {error:?}"),
+        )?;
+        return Ok(());
+    }
     write_message(writer, &ControlMessage::EncodedVideoFrame(encoded_frame))
         .map_err(|error| format!("写入首帧编码视频帧失败: {error}"))
 }
@@ -445,7 +450,7 @@ mod tests {
         assert_eq!(
             read_message(&mut client).expect("runtime error should read"),
             ControlMessage::Error {
-                code: ErrorCode::TransportFailed,
+                code: ErrorCode::EncodingFailed,
                 message: "Windows 视频编码器未实现：尚未接入 H.264 编码器。".to_owned(),
             }
         );
@@ -520,6 +525,57 @@ mod tests {
             endpoint
         );
         assert_eq!(encoder_inputs, vec![(1280, 720, 5120 * 720)]);
+    }
+
+    #[test]
+    fn host_reports_encoding_failed_when_encoder_returns_invalid_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener addr should be available");
+        let config = host_config(endpoint.to_string());
+        let mut runner = RecordingProgramRunner::default();
+        let mut locator = RecordingWindowLocator::default();
+        let mut capture = RecordingCaptureStarter::default();
+        let mut encoder = InvalidFrameEncoder;
+        let host = thread::spawn(move || {
+            run_control_listener_once_with_runtime(
+                listener,
+                &config,
+                &mut runner,
+                &mut locator,
+                &mut capture,
+                &mut encoder,
+            )
+        });
+
+        let mut client = TcpStream::connect(endpoint).expect("client should connect");
+        send_client_hello(&mut client).expect("client hello should write");
+        read_message(&mut client).expect("host hello should read");
+        wincast_protocol::frame::write_message(&mut client, &ControlMessage::StartSession)
+            .expect("start session should write");
+
+        assert_eq!(
+            read_message(&mut client).expect("session ready should read"),
+            ControlMessage::SessionReady {
+                width: 1280,
+                height: 720,
+            }
+        );
+        match read_message(&mut client).expect("encoding error should read") {
+            ControlMessage::Error { code, message } => {
+                assert_eq!(code, ErrorCode::EncodingFailed);
+                assert!(message.contains("首帧编码视频帧无效"));
+            }
+            message => panic!("expected encoding error, got {message:?}"),
+        }
+
+        assert_eq!(
+            host.join()
+                .expect("host thread should finish")
+                .expect("host should handle one client"),
+            endpoint
+        );
     }
 
     #[test]
@@ -774,6 +830,26 @@ mod tests {
                 timestamp_ns: frame.metadata.frame.timestamp_ns,
                 keyframe: true,
                 bytes: vec![0x57, 0x43, frame.bytes[0], frame.bytes[1]],
+            })
+        }
+    }
+
+    struct InvalidFrameEncoder;
+
+    impl FrameEncoder for InvalidFrameEncoder {
+        fn encode_first_frame(
+            &mut self,
+            config: &HostConfig,
+            frame: &CapturedBgraFrame,
+        ) -> Result<EncodedVideoFrame, String> {
+            Ok(EncodedVideoFrame {
+                codec: config.video.codec,
+                width: frame.metadata.frame.width,
+                height: frame.metadata.frame.height,
+                sequence_number: frame.metadata.frame.sequence_number,
+                timestamp_ns: frame.metadata.frame.timestamp_ns,
+                keyframe: true,
+                bytes: Vec::new(),
             })
         }
     }

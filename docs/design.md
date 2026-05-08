@@ -256,10 +256,11 @@ port = 7856
 - 程序启动失败。
 - 程序启动后找不到窗口。
 - 捕获初始化失败。
-- 编码或传输失败。
+- 编码失败。
+- 传输失败。
 - 输入注入失败。
 
-`CaptureFailed` 用于捕获能力本身失败，例如当前平台不支持捕获、Windows Graphics Capture 初始化失败、窗口句柄失效或捕获会话创建失败。`TransportFailed` 只用于控制通道、后续媒体传输、WebRTC/DataChannel 或编码后数据发送失败，不用于表达程序启动、窗口定位或捕获初始化错误。
+`CaptureFailed` 用于捕获能力本身失败，例如当前平台不支持捕获、Windows Graphics Capture 初始化失败、窗口句柄失效或捕获会话创建失败。`EncodingFailed` 用于编码器未实现、编码器初始化失败、首帧或后续帧编码失败，以及编码器产出非法帧。`TransportFailed` 只用于控制通道、后续媒体传输、WebRTC/DataChannel 或编码后数据发送失败，不用于表达程序启动、窗口定位、捕获初始化或编码器本身错误。
 
 客户端需要区分：
 
