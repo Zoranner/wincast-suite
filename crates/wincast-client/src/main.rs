@@ -5,7 +5,7 @@ use wincast_protocol::{
     config::ClientConfig,
     frame::read_message,
     handshake::{HandshakeError, read_host_hello, send_client_hello, send_start_session},
-    message::{ControlMessage, ErrorCode, RawBgraReadbackFrame},
+    message::{ControlMessage, EncodedVideoFrame, ErrorCode, RawBgraReadbackFrame},
 };
 
 const SUPPORTED_CLIENT_TARGETS: &[&str] =
@@ -94,6 +94,7 @@ fn read_session_start_response(stream: &mut TcpStream) -> Result<(), String> {
 fn read_first_readback_frame(stream: &mut TcpStream) -> Result<(), String> {
     match read_message(stream).map_err(|error| format!("读取宿主端首帧失败: {error}"))? {
         ControlMessage::RawBgraReadbackFrame(frame) => validate_readback_frame(&frame),
+        ControlMessage::EncodedVideoFrame(frame) => validate_encoded_frame(&frame),
         ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
         message => Err(format!("宿主端首帧消息无效: {message:?}")),
     }
@@ -103,6 +104,12 @@ fn validate_readback_frame(frame: &RawBgraReadbackFrame) -> Result<(), String> {
     frame
         .validate()
         .map_err(|error| format!("宿主端首帧 BGRA readback 无效: {error:?}"))
+}
+
+fn validate_encoded_frame(frame: &EncodedVideoFrame) -> Result<(), String> {
+    frame
+        .validate()
+        .map_err(|error| format!("宿主端首帧编码视频帧无效: {error:?}"))
 }
 
 fn control_channel_ready_message(config: &ClientConfig) -> String {
@@ -147,9 +154,10 @@ mod tests {
     use super::*;
     use std::{net::TcpListener, sync::mpsc, thread, time::Duration};
     use wincast_protocol::{
+        config::VideoCodec,
         frame::write_message,
         handshake::send_client_hello,
-        message::{ControlMessage, ErrorCode},
+        message::{ControlMessage, EncodedVideoFrame, ErrorCode},
     };
 
     #[test]
@@ -283,6 +291,80 @@ mod tests {
     }
 
     #[test]
+    fn client_accepts_encoded_video_frame_from_host() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let host_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("client should connect");
+            read_message(&mut stream).expect("client hello should decode");
+            send_client_hello(&mut stream).expect("host hello should encode");
+            read_message(&mut stream).expect("start session should decode");
+            write_message(
+                &mut stream,
+                &ControlMessage::SessionReady {
+                    width: 2,
+                    height: 2,
+                },
+            )
+            .expect("session ready should encode");
+            write_message(
+                &mut stream,
+                &ControlMessage::EncodedVideoFrame(encoded_video_frame()),
+            )
+            .expect("encoded frame should encode");
+        });
+
+        let config = ClientConfig {
+            host: endpoint.ip().to_string(),
+            port: endpoint.port(),
+        };
+
+        run_client_with_config(&config).expect("encoded frame should be accepted");
+
+        host_thread.join().expect("host thread should finish");
+    }
+
+    #[test]
+    fn client_rejects_invalid_encoded_video_frame_from_host() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let host_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("client should connect");
+            read_message(&mut stream).expect("client hello should decode");
+            send_client_hello(&mut stream).expect("host hello should encode");
+            read_message(&mut stream).expect("start session should decode");
+            write_message(
+                &mut stream,
+                &ControlMessage::SessionReady {
+                    width: 2,
+                    height: 2,
+                },
+            )
+            .expect("session ready should encode");
+            let mut frame = encoded_video_frame();
+            frame.bytes.clear();
+            write_message(&mut stream, &ControlMessage::EncodedVideoFrame(frame))
+                .expect("encoded frame should encode");
+        });
+
+        let config = ClientConfig {
+            host: endpoint.ip().to_string(),
+            port: endpoint.port(),
+        };
+
+        let error = run_client_with_config(&config).expect_err("invalid frame should fail");
+
+        host_thread.join().expect("host thread should finish");
+        assert!(error.contains("首帧编码视频帧无效"));
+    }
+
+    #[test]
     fn parses_run_command_with_config_path() {
         let args =
             Args::try_parse_from(["wincast-client", "--config", "custom-client.toml", "run"])
@@ -369,6 +451,18 @@ mod tests {
             sequence_number: 0,
             timestamp_ns: 0,
             bytes: vec![0; 16],
+        }
+    }
+
+    fn encoded_video_frame() -> EncodedVideoFrame {
+        EncodedVideoFrame {
+            codec: VideoCodec::H264,
+            width: 2,
+            height: 2,
+            sequence_number: 0,
+            timestamp_ns: 0,
+            keyframe: true,
+            bytes: vec![0, 1, 2, 3],
         }
     }
 }
