@@ -5,7 +5,8 @@ use wincast_protocol::{
     config::ClientConfig,
     frame::read_message,
     handshake::{HandshakeError, read_host_hello, send_client_hello, send_start_session},
-    message::{ControlMessage, EncodedVideoFrame, ErrorCode, RawBgraReadbackFrame},
+    message::{ControlMessage, ErrorCode, RawBgraReadbackFrame},
+    raw_frame::{RawBgraFrame, read_raw_bgra_frame},
 };
 
 const SUPPORTED_CLIENT_TARGETS: &[&str] =
@@ -94,20 +95,16 @@ fn read_session_start_response(stream: &mut TcpStream) -> Result<(), String> {
 fn read_first_readback_frame(stream: &mut TcpStream) -> Result<(), String> {
     match read_message(stream).map_err(|error| format!("读取宿主端首帧失败: {error}"))? {
         ControlMessage::RawBgraReadbackFrame(frame) => validate_readback_frame(&frame),
-        ControlMessage::EncodedVideoFrame(frame) => validate_encoded_frame(&frame),
-        ControlMessage::VideoReady => read_first_encoded_frame(stream),
+        ControlMessage::VideoReady => read_first_raw_binary_frame(stream),
         ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
         message => Err(format!("宿主端首帧消息无效: {message:?}")),
     }
 }
 
-fn read_first_encoded_frame(stream: &mut TcpStream) -> Result<(), String> {
-    match read_message(stream).map_err(|error| format!("读取宿主端首帧编码视频失败: {error}"))?
-    {
-        ControlMessage::EncodedVideoFrame(frame) => validate_encoded_frame(&frame),
-        ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
-        message => Err(format!("宿主端首帧编码视频消息无效: {message:?}")),
-    }
+fn read_first_raw_binary_frame(stream: &mut TcpStream) -> Result<(), String> {
+    let frame = read_raw_bgra_frame(stream)
+        .map_err(|error| format!("读取宿主端 raw BGRA 视频帧失败: {error}"))?;
+    validate_raw_binary_frame(&frame)
 }
 
 fn validate_readback_frame(frame: &RawBgraReadbackFrame) -> Result<(), String> {
@@ -116,10 +113,10 @@ fn validate_readback_frame(frame: &RawBgraReadbackFrame) -> Result<(), String> {
         .map_err(|error| format!("宿主端首帧 BGRA readback 无效: {error:?}"))
 }
 
-fn validate_encoded_frame(frame: &EncodedVideoFrame) -> Result<(), String> {
+fn validate_raw_binary_frame(frame: &RawBgraFrame) -> Result<(), String> {
     frame
         .validate()
-        .map_err(|error| format!("宿主端首帧编码视频帧无效: {error:?}"))
+        .map_err(|error| format!("宿主端 raw BGRA 视频帧无效: {error}"))
 }
 
 fn control_channel_ready_message(config: &ClientConfig) -> String {
@@ -165,10 +162,10 @@ mod tests {
     use super::*;
     use std::{net::TcpListener, sync::mpsc, thread, time::Duration};
     use wincast_protocol::{
-        config::VideoCodec,
         frame::write_message,
         handshake::send_client_hello,
-        message::{ControlMessage, EncodedVideoFrame, ErrorCode},
+        message::{ControlMessage, ErrorCode},
+        raw_frame::{RawBgraFrame, write_raw_bgra_frame},
     };
 
     #[test]
@@ -192,11 +189,10 @@ mod tests {
                 },
             )
             .expect("session ready should encode");
-            write_message(
-                &mut stream,
-                &ControlMessage::RawBgraReadbackFrame(raw_bgra_frame()),
-            )
-            .expect("raw frame should encode");
+            write_message(&mut stream, &ControlMessage::VideoReady)
+                .expect("video ready should encode");
+            write_raw_bgra_frame(&mut stream, &raw_binary_frame())
+                .expect("raw binary frame should encode");
             observed_messages_tx
                 .send((hello, start_session))
                 .expect("observed messages should send");
@@ -313,82 +309,6 @@ mod tests {
     }
 
     #[test]
-    fn client_accepts_encoded_video_frame_from_host() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let endpoint = listener
-            .local_addr()
-            .expect("listener address should exist");
-
-        let host_thread = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("client should connect");
-            read_message(&mut stream).expect("client hello should decode");
-            send_client_hello(&mut stream).expect("host hello should encode");
-            read_message(&mut stream).expect("start session should decode");
-            write_message(
-                &mut stream,
-                &ControlMessage::SessionReady {
-                    width: 2,
-                    height: 2,
-                },
-            )
-            .expect("session ready should encode");
-            write_message(&mut stream, &ControlMessage::VideoReady)
-                .expect("video ready should encode");
-            write_message(
-                &mut stream,
-                &ControlMessage::EncodedVideoFrame(encoded_video_frame()),
-            )
-            .expect("encoded frame should encode");
-        });
-
-        let config = ClientConfig {
-            host: endpoint.ip().to_string(),
-            port: endpoint.port(),
-        };
-
-        run_client_with_config(&config).expect("encoded frame should be accepted");
-
-        host_thread.join().expect("host thread should finish");
-    }
-
-    #[test]
-    fn client_rejects_invalid_encoded_video_frame_from_host() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let endpoint = listener
-            .local_addr()
-            .expect("listener address should exist");
-
-        let host_thread = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("client should connect");
-            read_message(&mut stream).expect("client hello should decode");
-            send_client_hello(&mut stream).expect("host hello should encode");
-            read_message(&mut stream).expect("start session should decode");
-            write_message(
-                &mut stream,
-                &ControlMessage::SessionReady {
-                    width: 2,
-                    height: 2,
-                },
-            )
-            .expect("session ready should encode");
-            let mut frame = encoded_video_frame();
-            frame.bytes.clear();
-            write_message(&mut stream, &ControlMessage::EncodedVideoFrame(frame))
-                .expect("encoded frame should encode");
-        });
-
-        let config = ClientConfig {
-            host: endpoint.ip().to_string(),
-            port: endpoint.port(),
-        };
-
-        let error = run_client_with_config(&config).expect_err("invalid frame should fail");
-
-        host_thread.join().expect("host thread should finish");
-        assert!(error.contains("首帧编码视频帧无效"));
-    }
-
-    #[test]
     fn client_rejects_invalid_message_after_video_ready() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let endpoint = listener
@@ -422,7 +342,7 @@ mod tests {
         let error = run_client_with_config(&config).expect_err("invalid message should fail");
 
         host_thread.join().expect("host thread should finish");
-        assert!(error.contains("首帧编码视频消息无效"));
+        assert!(error.contains("raw BGRA 视频帧失败"));
     }
 
     #[test]
@@ -515,15 +435,14 @@ mod tests {
         }
     }
 
-    fn encoded_video_frame() -> EncodedVideoFrame {
-        EncodedVideoFrame {
-            codec: VideoCodec::H264,
+    fn raw_binary_frame() -> RawBgraFrame {
+        RawBgraFrame {
             width: 2,
             height: 2,
+            row_pitch: 8,
             sequence_number: 0,
             timestamp_ns: 0,
-            keyframe: true,
-            bytes: vec![0, 1, 2, 3],
+            bytes: vec![0; 16],
         }
     }
 }

@@ -18,7 +18,8 @@ use wincast_protocol::{
     config::{CaptureMode, HostConfig},
     frame::{read_message, write_message},
     handshake::accept_client_hello,
-    message::{ControlMessage, EncodedVideoFrame, ErrorCode},
+    message::{ControlMessage, ErrorCode},
+    raw_frame::{RawBgraFrame, write_raw_bgra_frame},
 };
 
 mod window;
@@ -97,10 +98,6 @@ fn runtime_not_implemented_detail() -> &'static str {
     "运行时链路未实现：尚未实现编码传输和输入注入。"
 }
 
-fn video_encoder_not_implemented_detail() -> &'static str {
-    "Windows 视频编码器未实现：尚未接入 H.264 编码器。"
-}
-
 fn run_control_listener_once(
     listener: TcpListener,
     config: &HostConfig,
@@ -108,14 +105,12 @@ fn run_control_listener_once(
     let mut runner = StdProgramRunner;
     let mut locator = WindowsWindowLocator;
     let mut capture = StdCaptureStarter;
-    let mut encoder = UnimplementedFrameEncoder;
     run_control_listener_once_with_runtime(
         listener,
         config,
         &mut runner,
         &mut locator,
         &mut capture,
-        &mut encoder,
     )
 }
 
@@ -125,7 +120,6 @@ fn run_control_listener_once_with_runtime(
     runner: &mut impl ProgramRunner,
     locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
-    encoder: &mut impl FrameEncoder,
 ) -> Result<SocketAddr, String> {
     let local_addr = listener
         .local_addr()
@@ -133,7 +127,7 @@ fn run_control_listener_once_with_runtime(
     let (mut stream, _peer_addr) = listener
         .accept()
         .map_err(|error| format!("接受客户端连接失败: {error}"))?;
-    handle_control_client(&mut stream, config, runner, locator, capture, encoder)?;
+    handle_control_client(&mut stream, config, runner, locator, capture)?;
     Ok(local_addr)
 }
 
@@ -143,7 +137,6 @@ fn handle_control_client(
     runner: &mut impl ProgramRunner,
     locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
-    encoder: &mut impl FrameEncoder,
 ) -> Result<(), String> {
     let mut writer = stream
         .try_clone()
@@ -173,7 +166,7 @@ fn handle_control_client(
                 message
             })?;
             write_session_ready(&mut writer, &first_frame)?;
-            write_first_encoded_frame(&mut writer, config, &first_frame, encoder)?;
+            write_first_raw_bgra_frame(&mut writer, &first_frame)?;
             Ok(())
         }
         message => {
@@ -218,14 +211,6 @@ trait CaptureRuntime {
     fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError>;
 }
 
-trait FrameEncoder {
-    fn encode_first_frame(
-        &mut self,
-        config: &HostConfig,
-        frame: &CapturedBgraFrame,
-    ) -> Result<EncodedVideoFrame, String>;
-}
-
 struct StdCaptureStarter;
 
 impl CaptureStarter for StdCaptureStarter {
@@ -240,18 +225,6 @@ impl CaptureStarter for StdCaptureStarter {
 impl CaptureRuntime for CaptureSession {
     fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError> {
         self.try_next_bgra_frame()
-    }
-}
-
-struct UnimplementedFrameEncoder;
-
-impl FrameEncoder for UnimplementedFrameEncoder {
-    fn encode_first_frame(
-        &mut self,
-        _config: &HostConfig,
-        _frame: &CapturedBgraFrame,
-    ) -> Result<EncodedVideoFrame, String> {
-        Err(video_encoder_not_implemented_detail().to_owned())
     }
 }
 
@@ -324,28 +297,22 @@ fn write_session_ready(
     .map_err(|error| format!("写入会话就绪消息失败: {error}"))
 }
 
-fn write_first_encoded_frame(
+fn write_first_raw_bgra_frame(
     writer: &mut impl std::io::Write,
-    config: &HostConfig,
     frame: &CapturedBgraFrame,
-    encoder: &mut impl FrameEncoder,
 ) -> Result<(), String> {
-    let encoded_frame = match encoder.encode_first_frame(config, frame) {
-        Ok(encoded_frame) => encoded_frame,
-        Err(message) => {
-            write_control_error(writer, ErrorCode::EncodingFailed, message.clone())?;
-            return Err(message);
-        }
-    };
-    if let Err(error) = encoded_frame.validate() {
-        let message = format!("首帧编码视频帧无效: {error:?}");
-        write_control_error(writer, ErrorCode::EncodingFailed, message.clone())?;
-        return Err(message);
-    }
     write_message(writer, &ControlMessage::VideoReady)
         .map_err(|error| format!("写入视频就绪消息失败: {error}"))?;
-    write_message(writer, &ControlMessage::EncodedVideoFrame(encoded_frame))
-        .map_err(|error| format!("写入首帧编码视频帧失败: {error}"))
+    let raw_frame = RawBgraFrame {
+        width: frame.metadata.frame.width,
+        height: frame.metadata.frame.height,
+        row_pitch: frame.row_pitch,
+        sequence_number: frame.metadata.frame.sequence_number,
+        timestamp_ns: frame.metadata.frame.timestamp_ns,
+        bytes: frame.bytes.clone(),
+    };
+    write_raw_bgra_frame(writer, &raw_frame)
+        .map_err(|error| format!("写入首帧 raw BGRA 二进制帧失败: {error}"))
 }
 
 fn load_config(path: &PathBuf) -> Result<HostConfig, String> {
@@ -371,6 +338,7 @@ mod tests {
         frame::read_message,
         handshake::send_client_hello,
         message::{ControlMessage, ErrorCode},
+        raw_frame::read_raw_bgra_frame,
     };
 
     #[test]
@@ -416,7 +384,6 @@ mod tests {
         let mut runner = RecordingProgramRunner::default();
         let mut locator = RecordingWindowLocator::default();
         let mut capture = RecordingCaptureStarter::default();
-        let mut encoder = UnimplementedFrameEncoder;
         let host = thread::spawn(move || {
             let result = run_control_listener_once_with_runtime(
                 listener,
@@ -424,7 +391,6 @@ mod tests {
                 &mut runner,
                 &mut locator,
                 &mut capture,
-                &mut encoder,
             );
             (result, runner.launched, locator.lookups, capture.targets)
         });
@@ -447,17 +413,21 @@ mod tests {
             }
         );
         assert_eq!(
-            read_message(&mut client).expect("runtime error should read"),
-            ControlMessage::Error {
-                code: ErrorCode::EncodingFailed,
-                message: "Windows 视频编码器未实现：尚未接入 H.264 编码器。".to_owned(),
-            }
+            read_message(&mut client).expect("video ready should read"),
+            ControlMessage::VideoReady
         );
+        let frame = read_raw_bgra_frame(&mut client).expect("raw binary frame should read");
+        assert_eq!(frame.width, 1280);
+        assert_eq!(frame.height, 720);
+        assert_eq!(frame.row_pitch, 5120);
+        assert_eq!(frame.bytes.len(), 5120 * 720);
 
         let (host_result, launched, lookups, capture_targets) =
             host.join().expect("host thread should finish");
-        let error = host_result.expect_err("host should report encoding failure");
-        assert!(error.contains("Windows 视频编码器未实现"));
+        assert_eq!(
+            host_result.expect("host should handle one client"),
+            endpoint
+        );
         assert_eq!(
             launched,
             vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
@@ -467,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn host_can_send_first_encoded_frame_after_session_ready() {
+    fn host_can_send_first_raw_binary_frame_after_session_ready() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let endpoint = listener
             .local_addr()
@@ -476,7 +446,6 @@ mod tests {
         let mut runner = RecordingProgramRunner::default();
         let mut locator = RecordingWindowLocator::default();
         let mut capture = RecordingCaptureStarter::default();
-        let mut encoder = FakeFrameEncoder::default();
         let host = thread::spawn(move || {
             let result = run_control_listener_once_with_runtime(
                 listener,
@@ -484,9 +453,8 @@ mod tests {
                 &mut runner,
                 &mut locator,
                 &mut capture,
-                &mut encoder,
             );
-            (result, encoder.inputs)
+            (result, runner.launched, locator.lookups, capture.targets)
         });
 
         let mut client = TcpStream::connect(endpoint).expect("client should connect");
@@ -506,76 +474,26 @@ mod tests {
             read_message(&mut client).expect("video ready should read"),
             ControlMessage::VideoReady
         );
-        match read_message(&mut client).expect("encoded frame should read") {
-            ControlMessage::EncodedVideoFrame(frame) => {
-                frame.validate().expect("encoded frame should validate");
-                assert_eq!(frame.codec, VideoCodec::H264);
-                assert_eq!(frame.width, 1280);
-                assert_eq!(frame.height, 720);
-                assert_eq!(frame.sequence_number, 0);
-                assert_eq!(frame.timestamp_ns, 0);
-                assert!(frame.keyframe);
-                assert_eq!(frame.bytes, vec![0x57, 0x43, 0, 0]);
-            }
-            message => panic!("expected encoded frame, got {message:?}"),
-        }
+        let frame = read_raw_bgra_frame(&mut client).expect("raw binary frame should read");
+        assert_eq!(frame.width, 1280);
+        assert_eq!(frame.height, 720);
+        assert_eq!(frame.row_pitch, 5120);
+        assert_eq!(frame.sequence_number, 0);
+        assert_eq!(frame.timestamp_ns, 0);
+        assert_eq!(frame.bytes.len(), 5120 * 720);
 
-        let (host_result, encoder_inputs) = host.join().expect("host thread should finish");
+        let (host_result, launched, lookups, capture_targets) =
+            host.join().expect("host thread should finish");
         assert_eq!(
             host_result.expect("host should handle one client"),
             endpoint
         );
-        assert_eq!(encoder_inputs, vec![(1280, 720, 5120 * 720)]);
-    }
-
-    #[test]
-    fn host_reports_encoding_failed_when_encoder_returns_invalid_frame() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let endpoint = listener
-            .local_addr()
-            .expect("listener addr should be available");
-        let config = host_config(endpoint.to_string());
-        let mut runner = RecordingProgramRunner::default();
-        let mut locator = RecordingWindowLocator::default();
-        let mut capture = RecordingCaptureStarter::default();
-        let mut encoder = InvalidFrameEncoder;
-        let host = thread::spawn(move || {
-            run_control_listener_once_with_runtime(
-                listener,
-                &config,
-                &mut runner,
-                &mut locator,
-                &mut capture,
-                &mut encoder,
-            )
-        });
-
-        let mut client = TcpStream::connect(endpoint).expect("client should connect");
-        send_client_hello(&mut client).expect("client hello should write");
-        read_message(&mut client).expect("host hello should read");
-        wincast_protocol::frame::write_message(&mut client, &ControlMessage::StartSession)
-            .expect("start session should write");
-
         assert_eq!(
-            read_message(&mut client).expect("session ready should read"),
-            ControlMessage::SessionReady {
-                width: 1280,
-                height: 720,
-            }
+            launched,
+            vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
         );
-        match read_message(&mut client).expect("encoding error should read") {
-            ControlMessage::Error { code, message } => {
-                assert_eq!(code, ErrorCode::EncodingFailed);
-                assert!(message.contains("首帧编码视频帧无效"));
-            }
-            message => panic!("expected encoding error, got {message:?}"),
-        }
-
-        let error = host
-            .join()
-            .expect("host thread should finish")
-            .expect_err("host should report invalid encoded frame");
-        assert!(error.contains("首帧编码视频帧无效"));
+        assert_eq!(lookups, vec![(42, None)]);
+        assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
     }
 
     #[test]
@@ -589,7 +507,6 @@ mod tests {
         let mut runner = RecordingProgramRunner::default();
         let mut locator = FailingWindowLocator;
         let mut capture = RecordingCaptureStarter::default();
-        let mut encoder = UnimplementedFrameEncoder;
         let host = thread::spawn(move || {
             run_control_listener_once_with_runtime(
                 listener,
@@ -597,7 +514,6 @@ mod tests {
                 &mut runner,
                 &mut locator,
                 &mut capture,
-                &mut encoder,
             )
         });
 
@@ -632,7 +548,6 @@ mod tests {
         let mut runner = RecordingProgramRunner::default();
         let mut locator = RecordingWindowLocator::default();
         let mut capture = FailingCaptureStarter;
-        let mut encoder = UnimplementedFrameEncoder;
         let host = thread::spawn(move || {
             run_control_listener_once_with_runtime(
                 listener,
@@ -640,7 +555,6 @@ mod tests {
                 &mut runner,
                 &mut locator,
                 &mut capture,
-                &mut encoder,
             )
         });
 
@@ -803,54 +717,6 @@ mod tests {
             _target: CaptureTarget,
         ) -> Result<Box<dyn CaptureRuntime>, CaptureError> {
             Err(CaptureError::windows_capture_not_implemented())
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeFrameEncoder {
-        inputs: Vec<(u32, u32, usize)>,
-    }
-
-    impl FrameEncoder for FakeFrameEncoder {
-        fn encode_first_frame(
-            &mut self,
-            config: &HostConfig,
-            frame: &CapturedBgraFrame,
-        ) -> Result<EncodedVideoFrame, String> {
-            self.inputs.push((
-                frame.metadata.frame.width,
-                frame.metadata.frame.height,
-                frame.bytes.len(),
-            ));
-            Ok(EncodedVideoFrame {
-                codec: config.video.codec,
-                width: frame.metadata.frame.width,
-                height: frame.metadata.frame.height,
-                sequence_number: frame.metadata.frame.sequence_number,
-                timestamp_ns: frame.metadata.frame.timestamp_ns,
-                keyframe: true,
-                bytes: vec![0x57, 0x43, frame.bytes[0], frame.bytes[1]],
-            })
-        }
-    }
-
-    struct InvalidFrameEncoder;
-
-    impl FrameEncoder for InvalidFrameEncoder {
-        fn encode_first_frame(
-            &mut self,
-            config: &HostConfig,
-            frame: &CapturedBgraFrame,
-        ) -> Result<EncodedVideoFrame, String> {
-            Ok(EncodedVideoFrame {
-                codec: config.video.codec,
-                width: frame.metadata.frame.width,
-                height: frame.metadata.frame.height,
-                sequence_number: frame.metadata.frame.sequence_number,
-                timestamp_ns: frame.metadata.frame.timestamp_ns,
-                keyframe: true,
-                bytes: Vec::new(),
-            })
         }
     }
 

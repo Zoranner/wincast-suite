@@ -54,7 +54,7 @@ Linux 客户端
   -> 读取 host/port
   -> 建立内网连接
   -> 创建本地显示窗口
-  -> 解码并渲染远程画面
+  -> 接收并渲染远程画面
   -> 采集鼠标键盘事件并发送
 
 Windows 宿主端
@@ -63,7 +63,7 @@ Windows 宿主端
   -> 启动 Windows 程序
   -> 定位目标窗口
   -> 捕获窗口或桌面区域
-  -> 编码并发送画面
+  -> 发送画面帧
   -> 接收输入事件并注入
 ```
 
@@ -92,7 +92,7 @@ docs/
 - `wincast-capture` 只封装 Windows 捕获能力，不处理网络和进程启动。
 - `wincast-input` 只封装 Windows 输入注入，不理解客户端 UI。
 - `wincast-client` 负责连接宿主端、窗口生命周期和本地事件采集。
-- `wincast-render` 负责视频解码、帧缓冲和渲染输出。
+- `wincast-render` 负责帧缓冲和渲染输出；后续接入 H.264 时再承担视频解码。
 
 ## 当前 CLI 骨架
 
@@ -115,7 +115,7 @@ wincast-client --config wincast-client.toml run
 wincast-client targets
 ```
 
-不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`，再进入首帧编码器边界；生产路径当前会明确返回“Windows 视频编码器未实现”，不会伪造 H.264 数据。客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，可以校验 raw BGRA readback 调试帧，或校验 `VideoReady` 后的 H.264 `EncodedVideoFrame` 首帧消息形状，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA readback、`VideoReady` 与 H.264 `EncodedVideoFrame` 线格式，其中 raw BGRA 只作为过渡调试消息；`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback，但尚未实现真实编码器、持续媒体传输、渲染或输入事件发送。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
+不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 和一帧独立二进制 raw BGRA 帧；客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，读取并校验该 raw BGRA 首帧，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady` 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback，但尚未实现持续帧循环、渲染或输入事件发送。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
 
 ## 宿主端设计
 
@@ -153,14 +153,13 @@ Windows 捕获优先采用窗口级捕获，目标是只传输被启动程序的
 
 ## 视频传输
 
-系统使用低延迟 H.264 视频流。传输层采用以下路线：
+当前阶段优先使用低复杂度 raw BGRA 帧通道，先形成可见画面的端到端闭环。该路线参考“覆盖式最新帧”模型：宿主端捕获 BGRA 帧后写入独立二进制帧，客户端读取最新帧并渲染；慢客户端允许丢帧，不把每一帧都堆成可靠队列。
 
-- WebRTC 媒体通道传输视频。
-- WebRTC DataChannel 传输输入事件。
+raw BGRA 帧头包含 magic、宽度、高度、row pitch、序号、时间戳和 payload 长度，payload 为 BGRA32 字节。控制消息只承载握手、阶段切换、错误和输入事件，不承载持续大帧。
 
-采用 WebRTC 是因为它已经包含低延迟媒体传输、抖动缓冲、带宽估计和数据通道。内网场景不需要公网 TURN 中继，连接模型限制为局域网直连。
+H.264/WebRTC 保留为后续优化路线：当 raw BGRA 在目标分辨率、帧率或网络环境下不可接受时，再接入 H.264 编码、媒体传输和解码渲染。内网场景不需要公网 TURN 中继，连接模型限制为局域网直连。
 
-Rust 负责配置、生命周期和协议编排。媒体底层可以封装 Rust WebRTC 能力；如果硬件编码和系统媒体管线集成成本过高，也可以封装 GStreamer 管线，但外部架构和协议边界保持不变。
+Rust 负责配置、生命周期和协议编排。后续媒体底层可以封装 Rust WebRTC 能力；如果硬件编码和系统媒体管线集成成本过高，也可以封装 GStreamer 管线，但外部架构和协议边界保持不变。
 
 ## 输入映射
 
@@ -210,7 +209,7 @@ Client -> Host: StopSession
 Host -> Client: Goodbye
 ```
 
-控制通道还需要承载 SDP offer/answer 和 ICE candidate。内网直连场景下，信令过程隐藏在 `StartSession` 到 `VideoReady` 之间。
+当前 raw BGRA 阶段不需要 SDP offer/answer 或 ICE candidate。后续接入 WebRTC 时，控制通道再承载 SDP offer/answer 和 ICE candidate，信令过程隐藏在 `StartSession` 到 `VideoReady` 之间。
 
 ## 配置设计
 
@@ -260,7 +259,7 @@ port = 7856
 - 传输失败。
 - 输入注入失败。
 
-`CaptureFailed` 用于捕获能力本身失败，例如当前平台不支持捕获、Windows Graphics Capture 初始化失败、窗口句柄失效或捕获会话创建失败。`EncodingFailed` 用于编码器未实现、编码器初始化失败、首帧或后续帧编码失败，以及编码器产出非法帧。`TransportFailed` 只用于控制通道、后续媒体传输、WebRTC/DataChannel 或编码后数据发送失败，不用于表达程序启动、窗口定位、捕获初始化或编码器本身错误。
+`CaptureFailed` 用于捕获能力本身失败，例如当前平台不支持捕获、Windows Graphics Capture 初始化失败、窗口句柄失效或捕获会话创建失败。`EncodingFailed` 仅用于后续 H.264 编码路线中的编码器初始化失败、首帧或后续帧编码失败，以及编码器产出非法帧。`TransportFailed` 用于控制通道、raw BGRA 帧通道、后续媒体传输、WebRTC/DataChannel 或编码后数据发送失败，不用于表达程序启动、窗口定位、捕获初始化或编码器本身错误。
 
 客户端需要区分：
 
@@ -282,11 +281,11 @@ port = 7856
 -> 创建 session
 -> 启动程序
 -> 创建捕获资源
--> 创建编码资源
+-> 创建帧发送资源
 -> 建立输入循环
 -> 连接断开或用户停止
 -> 停止捕获
--> 停止编码
+-> 停止帧发送
 -> 可配置是否关闭远程程序
 -> 释放 session
 ```
@@ -322,8 +321,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 - 建立 Rust workspace、配置模型、控制通道和本地回环协议测试。
 - 实现 Windows 宿主端启动程序和窗口定位。
 - 实现画面捕获原型，验证帧可取。
-- 实现客户端窗口、视频渲染和输入采集。
-- 接入低延迟编码和传输，形成端到端可用链路。
+- 实现 raw BGRA 帧通道，先形成可读取首帧的端到端链路。
+- 实现客户端窗口、raw BGRA 渲染和输入采集。
+- 按性能需要接入低延迟编码和传输。
 - 补错误处理、资源释放、基础测试和打包。
 
 每一步都应形成可运行、可验证的闭环，避免同时堆叠捕获、编码、网络、输入和 UI 问题。
@@ -331,7 +331,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 ## 关键风险
 
 - Windows 会话限制是结构性风险。系统必须接受宿主机可被接管，不能承诺不影响本地用户。
+- raw BGRA 帧带宽较高，只适合作为内网优先闭环和原型路线；高分辨率或高帧率场景需要后续 H.264/WebRTC 优化。
 - 不同 Windows 版本和显卡驱动对窗口捕获、硬件编码支持存在差异，需要保留兜底路线。
 - DPI、窗口缩放和多显示器会影响输入坐标映射，需要在协议里保留画面尺寸和捕获区域元数据。
 - 输入法和组合键在跨系统场景下容易出现不一致，系统只保证基础键鼠事件。
-- Rust 生态中 WebRTC、硬编、Windows 捕获之间的集成成本需要原型验证，必要时可用 GStreamer 降低底层媒体链路风险。
+- Rust 生态中 WebRTC、硬编、Windows 捕获之间的集成成本需要原型验证，必要时可用 GStreamer 降低后续媒体链路风险。
