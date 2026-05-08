@@ -8,3 +8,4 @@ rust-version.workspace = true
 [dependencies]
 clap.workspace = true
 wincast-protocol.workspace = true
+wincast-render.workspace = true

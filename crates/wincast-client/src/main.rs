@@ -79,31 +79,116 @@ fn run_client_with_config(config: &ClientConfig) -> Result<String, String> {
     send_client_hello(&mut stream).map_err(format_handshake_error)?;
     read_host_hello(&mut stream).map_err(format_handshake_error)?;
     send_start_session(&mut stream).map_err(format_handshake_error)?;
-    read_session_start_response(&mut stream)?;
+    let render_mode = ClientRenderMode::for_current_platform();
+    read_session_start_response(&mut stream, render_mode)?;
 
     Ok(control_channel_ready_message(config))
 }
 
-fn read_session_start_response(stream: &mut TcpStream) -> Result<(), String> {
+fn read_session_start_response(
+    stream: &mut TcpStream,
+    render_mode: ClientRenderMode,
+) -> Result<(), String> {
     match read_message(stream).map_err(|error| format!("读取宿主端会话响应失败: {error}"))?
     {
-        ControlMessage::SessionReady { .. } => read_first_readback_frame(stream),
+        ControlMessage::SessionReady { width, height } => {
+            read_first_readback_frame(stream, render_mode, width, height)
+        }
         ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
         message => Err(format!("宿主端会话响应无效: {message:?}")),
     }
 }
 
-fn read_first_readback_frame(stream: &mut TcpStream) -> Result<(), String> {
+fn read_first_readback_frame(
+    stream: &mut TcpStream,
+    render_mode: ClientRenderMode,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
     match read_message(stream).map_err(|error| format!("读取宿主端首帧失败: {error}"))? {
         ControlMessage::RawBgraReadbackFrame(frame) => validate_readback_frame(&frame),
-        ControlMessage::VideoReady => read_first_raw_binary_frame(stream),
+        ControlMessage::VideoReady => {
+            read_first_raw_binary_frame(stream, render_mode, width, height)
+        }
         ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
         message => Err(format!("宿主端首帧消息无效: {message:?}")),
     }
 }
 
-fn read_first_raw_binary_frame(stream: &mut TcpStream) -> Result<(), String> {
-    read_raw_bgra_frames(stream, RAW_BGRA_VALIDATION_FRAME_COUNT).map(|_| ())
+fn read_first_raw_binary_frame(
+    stream: &mut TcpStream,
+    render_mode: ClientRenderMode,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    match render_mode {
+        ClientRenderMode::SdlWindow => {
+            read_first_raw_binary_frame_with_sdl_window(stream, width, height)
+        }
+        ClientRenderMode::ProtocolOnly => {
+            read_raw_bgra_frames(stream, RAW_BGRA_VALIDATION_FRAME_COUNT).map(|_| ())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_first_raw_binary_frame_with_sdl_window(
+    stream: &mut TcpStream,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let mut renderer = wincast_render::SdlRawBgraRenderer::new(wincast_render::RenderConfig {
+        title: "WinCast Client".to_owned(),
+        width,
+        height,
+    })
+    .map_err(|error| format!("创建客户端 SDL2 窗口失败: {error}"))?;
+    read_raw_bgra_frames_with_renderer(stream, RAW_BGRA_VALIDATION_FRAME_COUNT, &mut renderer)
+        .map(|_| ())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_first_raw_binary_frame_with_sdl_window(
+    _stream: &mut TcpStream,
+    _width: u32,
+    _height: u32,
+) -> Result<(), String> {
+    Err("当前平台不支持 SDL2 客户端窗口".to_owned())
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn read_raw_bgra_frames_with_renderer(
+    reader: &mut impl std::io::Read,
+    frame_count: usize,
+    renderer: &mut impl wincast_render::RawBgraRenderer,
+) -> Result<RawBgraReceiveSummary, String> {
+    if frame_count == 0 {
+        return Err("raw BGRA 视频帧接收数量不能为 0".to_owned());
+    }
+
+    let mut last_sequence_number = None;
+    for _ in 0..frame_count {
+        let frame = read_raw_bgra_frame(reader)
+            .map_err(|error| format!("读取宿主端 raw BGRA 视频帧失败: {error}"))?;
+        validate_raw_binary_frame(&frame)?;
+        renderer
+            .render_frame(&frame)
+            .map_err(|error| format!("渲染宿主端 raw BGRA 视频帧失败: {error}"))?;
+        if let Some(previous) = last_sequence_number
+            && frame.sequence_number < previous
+        {
+            return Err(format!(
+                "宿主端 raw BGRA 视频帧序号回退: 上一帧 {previous}，当前帧 {}",
+                frame.sequence_number
+            ));
+        }
+        last_sequence_number = Some(frame.sequence_number);
+    }
+
+    Ok(RawBgraReceiveSummary {
+        frames: frame_count,
+        last_sequence_number: last_sequence_number.expect("frame_count is non-zero"),
+    })
 }
 
 fn read_raw_bgra_frames(
@@ -154,6 +239,22 @@ struct RawBgraReceiveSummary {
     last_sequence_number: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientRenderMode {
+    SdlWindow,
+    ProtocolOnly,
+}
+
+impl ClientRenderMode {
+    fn for_current_platform() -> Self {
+        if cfg!(target_os = "linux") {
+            Self::SdlWindow
+        } else {
+            Self::ProtocolOnly
+        }
+    }
+}
+
 fn control_channel_ready_message(config: &ClientConfig) -> String {
     format!(
         "客户端配置有效，已建立宿主端控制通道 {}，已发送会话启动请求。后续窗口、视频解码渲染和输入事件链路尚未实现。",
@@ -202,6 +303,7 @@ mod tests {
         message::{ControlMessage, ErrorCode},
         raw_frame::{RawBgraFrame, write_raw_bgra_frame},
     };
+    use wincast_render::{RawBgraRenderer, RenderError, RenderLoopAction, RenderLoopResult};
 
     #[test]
     fn client_run_performs_tcp_control_handshake() {
@@ -401,6 +503,42 @@ mod tests {
     }
 
     #[test]
+    fn client_renders_raw_bgra_frames_after_video_ready() {
+        let mut bytes = Vec::new();
+        for sequence_number in 0..2 {
+            write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(sequence_number))
+                .expect("raw binary frame should encode");
+        }
+        let mut renderer = RecordingRenderer::default();
+
+        let summary = read_raw_bgra_frames_with_renderer(&mut bytes.as_slice(), 2, &mut renderer)
+            .expect("raw frame loop should render frames");
+
+        assert_eq!(
+            summary,
+            RawBgraReceiveSummary {
+                frames: 2,
+                last_sequence_number: 1,
+            }
+        );
+        assert_eq!(renderer.rendered_sequences, vec![0, 1]);
+    }
+
+    #[test]
+    fn client_reports_renderer_errors_in_chinese() {
+        let mut bytes = Vec::new();
+        write_raw_bgra_frame(&mut bytes, &raw_binary_frame())
+            .expect("raw binary frame should encode");
+        let mut renderer = FailingRenderer;
+
+        let error = read_raw_bgra_frames_with_renderer(&mut bytes.as_slice(), 1, &mut renderer)
+            .expect_err("renderer failure should fail client frame loop");
+
+        assert!(error.contains("渲染宿主端 raw BGRA 视频帧失败"));
+        assert!(error.contains("测试渲染失败"));
+    }
+
+    #[test]
     fn client_rejects_sequence_number_regression_in_raw_bgra_loop() {
         let mut bytes = Vec::new();
         write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(2))
@@ -490,6 +628,16 @@ mod tests {
         assert!(message.contains("视频解码渲染和输入事件链路尚未实现"));
     }
 
+    #[test]
+    fn current_platform_uses_protocol_only_render_mode_outside_linux() {
+        if !cfg!(target_os = "linux") {
+            assert_eq!(
+                ClientRenderMode::for_current_platform(),
+                ClientRenderMode::ProtocolOnly
+            );
+        }
+    }
+
     fn raw_bgra_frame() -> RawBgraReadbackFrame {
         RawBgraReadbackFrame {
             width: 2,
@@ -516,6 +664,40 @@ mod tests {
             sequence_number,
             timestamp_ns: sequence_number * 1_000_000,
             bytes: vec![0; 16],
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRenderer {
+        rendered_sequences: Vec<u64>,
+    }
+
+    impl RawBgraRenderer for RecordingRenderer {
+        fn render_frame(&mut self, frame: &RawBgraFrame) -> Result<(), RenderError> {
+            self.rendered_sequences.push(frame.sequence_number);
+            Ok(())
+        }
+
+        fn poll_input(&mut self) -> Result<RenderLoopResult, RenderError> {
+            Ok(RenderLoopResult {
+                action: RenderLoopAction::Continue,
+                input_events: Vec::new(),
+            })
+        }
+    }
+
+    struct FailingRenderer;
+
+    impl RawBgraRenderer for FailingRenderer {
+        fn render_frame(&mut self, _frame: &RawBgraFrame) -> Result<(), RenderError> {
+            Err(RenderError::Backend("测试渲染失败".to_owned()))
+        }
+
+        fn poll_input(&mut self) -> Result<RenderLoopResult, RenderError> {
+            Ok(RenderLoopResult {
+                action: RenderLoopAction::Continue,
+                input_events: Vec::new(),
+            })
         }
     }
 }

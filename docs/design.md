@@ -80,7 +80,7 @@ crates/
   wincast-capture/     # Windows 画面捕获封装
   wincast-input/       # Windows 输入注入封装
   wincast-client/      # Linux x86_64 与 Linux aarch64/ARM64 客户端主程序
-  wincast-render/      # 客户端解码与渲染封装
+  wincast-render/      # 客户端 raw BGRA 渲染封装，第一阶段使用 SDL2
 docs/
   design.md
 ```
@@ -92,7 +92,7 @@ docs/
 - `wincast-capture` 只封装 Windows 捕获能力，不处理网络和进程启动。
 - `wincast-input` 只封装 Windows 输入注入，不理解客户端 UI。
 - `wincast-client` 负责连接宿主端、窗口生命周期和本地事件采集。
-- `wincast-render` 负责帧缓冲和渲染输出；后续接入 H.264 时再承担视频解码。
+- `wincast-render` 负责帧缓冲和渲染输出；第一阶段使用 SDL2 在 Linux 上显示 raw BGRA 帧，后续接入 H.264 时再承担视频解码。
 
 ## 当前 CLI 骨架
 
@@ -115,7 +115,7 @@ wincast-client --config wincast-client.toml run
 wincast-client targets
 ```
 
-不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 和一帧独立二进制 raw BGRA 帧；客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，读取并校验该 raw BGRA 首帧，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady` 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback，但尚未实现持续帧循环、渲染或输入事件发送。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
+不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 和 raw BGRA 二进制帧；Linux 客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，创建 SDL2 窗口并渲染 raw BGRA 首帧，非 Linux 开发环境只执行协议校验路径，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady` 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback；`wincast-render` 已提供 SDL2 raw BGRA 窗口后端，但尚未实现长时间渲染循环、输入事件发送或输入注入。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
 
 ## 宿主端设计
 
@@ -156,6 +156,8 @@ Windows 捕获优先采用窗口级捕获，目标是只传输被启动程序的
 当前阶段优先使用低复杂度 raw BGRA 帧通道，先形成可见画面的端到端闭环。该路线参考“覆盖式最新帧”模型：宿主端捕获 BGRA 帧后写入独立二进制帧，客户端读取最新帧并渲染；慢客户端允许丢帧，不把每一帧都堆成可靠队列。
 
 raw BGRA 帧头包含 magic、宽度、高度、row pitch、序号、时间戳和 payload 长度，payload 为 BGRA32 字节。控制消息只承载握手、阶段切换、错误和输入事件，不承载持续大帧。
+
+客户端第一阶段窗口后端固定为 SDL2，不引入 Slint 或 egui。这样可以降低银河麒麟 V10 等老系统上的 GPU、Vulkan、Wayland 和桌面环境依赖风险，优先通过 SDL2 streaming texture 直接显示 BGRA8888 帧。
 
 H.264/WebRTC 保留为后续优化路线：当 raw BGRA 在目标分辨率、帧率或网络环境下不可接受时，再接入 H.264 编码、媒体传输和解码渲染。内网场景不需要公网 TURN 中继，连接模型限制为局域网直连。
 
