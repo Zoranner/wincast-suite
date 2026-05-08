@@ -115,7 +115,7 @@ wincast-client --config wincast-client.toml run
 wincast-client targets
 ```
 
-不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 和 raw BGRA 二进制帧；Linux 客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，创建 SDL2 窗口并渲染 raw BGRA 首帧，非 Linux 开发环境只执行协议校验路径，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady` 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback；`wincast-render` 已提供 SDL2 raw BGRA 窗口后端，但尚未实现长时间渲染循环、输入事件发送或输入注入。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
+不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 并持续写入 raw BGRA 二进制帧；Linux 客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，创建 SDL2 窗口持续渲染 raw BGRA 帧，轮询 SDL2 基础键鼠事件并写回控制连接，窗口退出时发送 `StopSession`。宿主端使用阻塞输入读取线程处理客户端输入事件，避免在非阻塞单次 `read_message` 中丢失半包状态，并通过 Windows SendInput 注入基础鼠标、滚轮和键盘事件。非 Linux 开发环境只执行协议校验路径，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady` 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback；`wincast-render` 已提供 SDL2 raw BGRA 窗口后端。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
 
 ## 宿主端设计
 
@@ -181,7 +181,7 @@ Rust 负责配置、生命周期和协议编排。后续媒体底层可以封装
 
 ## 协议设计
 
-控制通道使用长度前缀二进制消息和 `serde` 序列化，避免粘包和半包问题，同时保留调试日志输出。
+控制消息使用长度前缀二进制消息和 `serde` 序列化。阻塞读取路径必须完整读完长度头和 payload 后才解码，避免粘包和半包问题；需要轮询时不能用无状态非阻塞 `read_message` 丢弃半包状态。
 
 核心消息：
 

@@ -3,13 +3,16 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     process::ExitCode,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
 use clap::{Parser, Subcommand};
+mod input;
 mod program;
 
+use input::{CaptureInputBounds, WindowsInputEventSink};
 use program::{ProgramRunner, StartedProgram, StdProgramRunner, launch_with_runner};
 use wincast_capture::{
     CaptureError, CaptureSession, CaptureTarget, CapturedBgraFrame, wait_next_capture_result_with,
@@ -18,6 +21,7 @@ use wincast_protocol::{
     config::{CaptureMode, HostConfig},
     frame::{read_message, write_message},
     handshake::accept_client_hello,
+    input::InputEvent,
     message::{ControlMessage, ErrorCode},
     raw_frame::{RawBgraFrame, write_raw_bgra_frame},
 };
@@ -95,7 +99,7 @@ fn runtime_not_implemented_message(config: &HostConfig) -> String {
 }
 
 fn runtime_not_implemented_detail() -> &'static str {
-    "运行时链路未实现：尚未实现编码传输和输入注入。"
+    "运行时链路未实现：尚未实现编码传输。"
 }
 
 fn run_control_listener_once(
@@ -168,7 +172,13 @@ fn handle_control_client(
                     message
                 })?;
             write_session_ready(&mut writer, &first_frame)?;
-            write_raw_bgra_stream(&mut writer, &first_frame, session.as_mut())?;
+            write_raw_bgra_stream(
+                &mut writer,
+                stream,
+                &first_frame,
+                session.as_mut(),
+                capture_input_bounds(config, &window, &first_frame),
+            )?;
             Ok(())
         }
         message => {
@@ -213,6 +223,10 @@ trait CaptureRuntime {
     fn is_active(&self) -> bool;
 
     fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError>;
+}
+
+trait InputEventSink {
+    fn handle_input_event(&mut self, event: InputEvent) -> Result<(), String>;
 }
 
 struct StdCaptureStarter;
@@ -283,6 +297,27 @@ fn capture_target(config: &HostConfig, window: &WindowCandidate) -> CaptureTarge
     }
 }
 
+fn capture_input_bounds(
+    config: &HostConfig,
+    window: &WindowCandidate,
+    frame: &CapturedBgraFrame,
+) -> CaptureInputBounds {
+    match config.capture.mode {
+        CaptureMode::Desktop => CaptureInputBounds {
+            origin_x: 0,
+            origin_y: 0,
+            width: frame.metadata.frame.width,
+            height: frame.metadata.frame.height,
+        },
+        CaptureMode::Window => CaptureInputBounds {
+            origin_x: window.rect.left,
+            origin_y: window.rect.top,
+            width: frame.metadata.frame.width,
+            height: frame.metadata.frame.height,
+        },
+    }
+}
+
 fn write_control_error(
     writer: &mut impl std::io::Write,
     code: ErrorCode,
@@ -308,18 +343,39 @@ fn write_session_ready(
 
 fn write_raw_bgra_stream(
     writer: &mut impl std::io::Write,
+    input_reader: &TcpStream,
     first_frame: &CapturedBgraFrame,
     session: &mut dyn CaptureRuntime,
+    input_bounds: CaptureInputBounds,
+) -> Result<(), String> {
+    let input_stream = input_reader
+        .try_clone()
+        .map_err(|error| format!("克隆客户端输入事件读取端失败: {error}"))?;
+    let input_events = spawn_input_event_reader(input_stream, input_bounds);
+    write_raw_bgra_stream_with_input_events(writer, first_frame, session, &input_events)
+}
+
+fn write_raw_bgra_stream_with_input_events(
+    writer: &mut impl std::io::Write,
+    first_frame: &CapturedBgraFrame,
+    session: &mut dyn CaptureRuntime,
+    input_events: &mpsc::Receiver<InputReaderEvent>,
 ) -> Result<(), String> {
     write_message(writer, &ControlMessage::VideoReady)
         .map_err(|error| format!("写入视频就绪消息失败: {error}"))?;
     write_raw_bgra_frame_from_capture(writer, first_frame)?;
+    if check_input_reader_events(input_events)? {
+        return Ok(());
+    }
 
     loop {
         let Some(frame) = session
             .try_next_bgra_frame()
             .map_err(|error| format!("读取后续 raw BGRA 捕获帧失败: {error}"))?
         else {
+            if check_input_reader_events(input_events)? {
+                return Ok(());
+            }
             if !session.is_active() {
                 return Ok(());
             }
@@ -327,6 +383,9 @@ fn write_raw_bgra_stream(
             continue;
         };
         write_raw_bgra_frame_from_capture(writer, &frame)?;
+        if check_input_reader_events(input_events)? {
+            return Ok(());
+        }
     }
 }
 
@@ -344,6 +403,57 @@ fn write_raw_bgra_frame_from_capture(
     };
     write_raw_bgra_frame(writer, &raw_frame)
         .map_err(|error| format!("写入 raw BGRA 二进制帧失败: {error}"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputReaderEvent {
+    StopSession,
+    Failed(String),
+}
+
+fn spawn_input_event_reader(
+    mut input_reader: TcpStream,
+    input_bounds: CaptureInputBounds,
+) -> mpsc::Receiver<InputReaderEvent> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut input_sink = WindowsInputEventSink::new(input_bounds);
+        let event = read_input_events_until_stop(&mut input_reader, &mut input_sink);
+        let _ = sender.send(event);
+    });
+    receiver
+}
+
+fn read_input_events_until_stop(
+    reader: &mut impl std::io::Read,
+    sink: &mut impl InputEventSink,
+) -> InputReaderEvent {
+    loop {
+        match read_message(reader) {
+            Ok(ControlMessage::InputEvent(event)) => {
+                if let Err(error) = sink.handle_input_event(event) {
+                    return InputReaderEvent::Failed(format!("处理客户端输入事件失败: {error}"));
+                }
+            }
+            Ok(ControlMessage::StopSession) | Ok(ControlMessage::Goodbye) => {
+                return InputReaderEvent::StopSession;
+            }
+            Ok(message) => {
+                return InputReaderEvent::Failed(format!("客户端输入事件消息无效: {message:?}"));
+            }
+            Err(error) => {
+                return InputReaderEvent::Failed(format!("读取客户端输入事件失败: {error}"));
+            }
+        }
+    }
+}
+
+fn check_input_reader_events(receiver: &mpsc::Receiver<InputReaderEvent>) -> Result<bool, String> {
+    match receiver.try_recv() {
+        Ok(InputReaderEvent::StopSession) | Err(mpsc::TryRecvError::Disconnected) => Ok(true),
+        Ok(InputReaderEvent::Failed(error)) => Err(error),
+        Err(mpsc::TryRecvError::Empty) => Ok(false),
+    }
 }
 
 fn load_config(path: &PathBuf) -> Result<HostConfig, String> {
@@ -366,8 +476,9 @@ mod tests {
     };
     use wincast_protocol::{
         config::{CaptureConfig, CaptureMode, VideoCodec, VideoConfig},
-        frame::read_message,
+        frame::{read_message, write_message},
         handshake::send_client_hello,
+        input::{ButtonState, InputEvent, Modifiers},
         message::{ControlMessage, ErrorCode},
         raw_frame::read_raw_bgra_frame,
     };
@@ -401,7 +512,8 @@ mod tests {
         let message = runtime_not_implemented_message(&config);
 
         assert!(message.contains("运行时链路未实现"));
-        assert!(message.contains("尚未实现编码传输和输入注入"));
+        assert!(message.contains("尚未实现编码传输"));
+        assert!(!message.contains("尚未实现编码传输和输入注入"));
     }
 
     #[test]
@@ -757,6 +869,51 @@ mod tests {
     }
 
     #[test]
+    fn capture_input_bounds_keep_window_origin_for_window_capture() {
+        let mut config = host_config("127.0.0.1:0".to_owned());
+        config.capture.mode = CaptureMode::Window;
+        let mut window = window_candidate();
+        window.rect = window::WindowRect {
+            left: 50,
+            top: 75,
+            right: 1330,
+            bottom: 795,
+        };
+        let frame = captured_bgra_frame();
+
+        let bounds = capture_input_bounds(&config, &window, &frame);
+
+        assert_eq!(
+            bounds,
+            CaptureInputBounds {
+                origin_x: 50,
+                origin_y: 75,
+                width: 1280,
+                height: 720,
+            }
+        );
+    }
+
+    #[test]
+    fn capture_input_bounds_use_frame_size_for_desktop_capture() {
+        let config = host_config("127.0.0.1:0".to_owned());
+        let window = window_candidate();
+        let frame = captured_bgra_frame();
+
+        let bounds = capture_input_bounds(&config, &window, &frame);
+
+        assert_eq!(
+            bounds,
+            CaptureInputBounds {
+                origin_x: 0,
+                origin_y: 0,
+                width: 1280,
+                height: 720,
+            }
+        );
+    }
+
+    #[test]
     fn host_reports_capture_failed_when_initial_frame_times_out() {
         let mut config = host_config("127.0.0.1:0".to_owned());
         config.capture.startup_timeout_ms = 1;
@@ -775,6 +932,115 @@ mod tests {
             error,
             CaptureError::windows_frame_read_failed("等待 Windows 捕获首帧超时")
         );
+    }
+
+    #[test]
+    fn input_reader_handles_client_input_events_until_stop_session() {
+        let mut bytes = Vec::new();
+        write_message(
+            &mut bytes,
+            &ControlMessage::InputEvent(InputEvent::Key {
+                code: 65,
+                state: ButtonState::Pressed,
+                modifiers: Modifiers {
+                    shift: true,
+                    ctrl: false,
+                    alt: false,
+                    logo: false,
+                },
+            }),
+        )
+        .expect("input event should encode");
+        write_message(&mut bytes, &ControlMessage::StopSession).expect("stop should encode");
+        let mut sink = RecordingInputEventSink::default();
+
+        let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink);
+
+        assert_eq!(event, InputReaderEvent::StopSession);
+        assert_eq!(
+            sink.events,
+            vec![InputEvent::Key {
+                code: 65,
+                state: ButtonState::Pressed,
+                modifiers: Modifiers {
+                    shift: true,
+                    ctrl: false,
+                    alt: false,
+                    logo: false,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn input_reader_rejects_non_input_messages() {
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &ControlMessage::Heartbeat).expect("heartbeat should encode");
+        let mut sink = RecordingInputEventSink::default();
+
+        let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink);
+
+        assert_eq!(
+            event,
+            InputReaderEvent::Failed("客户端输入事件消息无效: Heartbeat".to_owned())
+        );
+        assert!(sink.events.is_empty());
+    }
+
+    #[test]
+    fn input_reader_reports_stop_session_after_input_events() {
+        let mut bytes = Vec::new();
+        write_message(
+            &mut bytes,
+            &ControlMessage::InputEvent(InputEvent::MouseWheel {
+                delta_x: 0,
+                delta_y: 1,
+            }),
+        )
+        .expect("input event should encode");
+        write_message(&mut bytes, &ControlMessage::StopSession).expect("stop should encode");
+        let mut sink = RecordingInputEventSink::default();
+
+        let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink);
+
+        assert_eq!(event, InputReaderEvent::StopSession);
+        assert_eq!(
+            sink.events,
+            vec![InputEvent::MouseWheel {
+                delta_x: 0,
+                delta_y: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn raw_bgra_stream_stops_cleanly_when_input_reader_stops() {
+        let mut writer = Vec::new();
+        let mut session = RecordingCaptureRuntime {
+            frames: VecDeque::from([Some(captured_bgra_frame_with_sequence(1))]),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(InputReaderEvent::StopSession)
+            .expect("input stop should send");
+
+        write_raw_bgra_stream_with_input_events(
+            &mut writer,
+            &captured_bgra_frame(),
+            &mut session,
+            &receiver,
+        )
+        .expect("stop session should end raw stream without error");
+
+        let mut reader = writer.as_slice();
+        assert_eq!(
+            read_message(&mut reader).expect("video ready should decode"),
+            ControlMessage::VideoReady
+        );
+        let frame = read_raw_bgra_frame(&mut reader).expect("first frame should decode");
+        assert_eq!(frame.sequence_number, 0);
+        assert_eq!(session.attempts.load(Ordering::SeqCst), 0);
     }
 
     #[derive(Default)]
@@ -895,6 +1161,18 @@ mod tests {
                 process_id,
                 title_contains: None,
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingInputEventSink {
+        events: Vec<InputEvent>,
+    }
+
+    impl InputEventSink for RecordingInputEventSink {
+        fn handle_input_event(&mut self, event: InputEvent) -> Result<(), String> {
+            self.events.push(event);
+            Ok(())
         }
     }
 

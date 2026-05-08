@@ -108,7 +108,7 @@ impl RawBgraRenderer for SdlRawBgraRenderer {
                     repeat,
                     ..
                 } if !repeat => {
-                    if let Some(code) = keycode.map(|code| code as i32 as u32) {
+                    if let Some(code) = keycode.map(|code| code.into_i32() as u32) {
                         input_events.push(InputEvent::Key {
                             code,
                             state: ButtonState::Pressed,
@@ -119,7 +119,7 @@ impl RawBgraRenderer for SdlRawBgraRenderer {
                 Event::KeyUp {
                     keycode, keymod, ..
                 } => {
-                    if let Some(code) = keycode.map(|code| code as i32 as u32) {
+                    if let Some(code) = keycode.map(|code| code.into_i32() as u32) {
                         input_events.push(InputEvent::Key {
                             code,
                             state: ButtonState::Released,
