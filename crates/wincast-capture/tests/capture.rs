@@ -43,6 +43,15 @@ fn capture_errors_have_clear_chinese_messages() {
         "Windows 画面捕获实现未完成：尚未接入 Windows Graphics Capture"
     );
     assert_eq!(
+        CaptureError::windows_graphics_capture_unsupported().to_string(),
+        "当前 Windows 系统不支持 Windows Graphics Capture"
+    );
+    assert_eq!(
+        CaptureError::windows_graphics_capture_support_check_failed("HRESULT 0x80004005")
+            .to_string(),
+        "检测 Windows Graphics Capture 支持状态失败: HRESULT 0x80004005"
+    );
+    assert_eq!(
         CaptureError::unsupported_platform("linux").to_string(),
         "当前平台不支持画面捕获：仅 Windows 支持宿主端捕获，当前平台 linux"
     );

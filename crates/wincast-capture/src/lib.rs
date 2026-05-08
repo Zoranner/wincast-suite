@@ -67,6 +67,10 @@ impl CaptureSession {
 pub enum CaptureError {
     #[error("Windows 画面捕获实现未完成：尚未接入 Windows Graphics Capture")]
     WindowsCaptureNotImplemented,
+    #[error("当前 Windows 系统不支持 Windows Graphics Capture")]
+    WindowsGraphicsCaptureUnsupported,
+    #[error("检测 Windows Graphics Capture 支持状态失败: {0}")]
+    WindowsGraphicsCaptureSupportCheckFailed(String),
     #[error("当前平台不支持画面捕获：仅 Windows 支持宿主端捕获，当前平台 {platform}")]
     UnsupportedPlatform { platform: String },
 }
@@ -74,6 +78,14 @@ pub enum CaptureError {
 impl CaptureError {
     pub fn windows_capture_not_implemented() -> Self {
         Self::WindowsCaptureNotImplemented
+    }
+
+    pub fn windows_graphics_capture_unsupported() -> Self {
+        Self::WindowsGraphicsCaptureUnsupported
+    }
+
+    pub fn windows_graphics_capture_support_check_failed(error: impl Into<String>) -> Self {
+        Self::WindowsGraphicsCaptureSupportCheckFailed(error.into())
     }
 
     pub fn unsupported_platform(platform: impl Into<String>) -> Self {
@@ -85,6 +97,15 @@ impl CaptureError {
 
 #[cfg(windows)]
 fn start_platform_capture(_target: CaptureTarget) -> Result<CaptureSession, CaptureError> {
+    use windows::Graphics::Capture::GraphicsCaptureSession;
+
+    let supported = GraphicsCaptureSession::IsSupported().map_err(|error| {
+        CaptureError::windows_graphics_capture_support_check_failed(error.to_string())
+    })?;
+    if !supported {
+        return Err(CaptureError::windows_graphics_capture_unsupported());
+    }
+
     Err(CaptureError::windows_capture_not_implemented())
 }
 
