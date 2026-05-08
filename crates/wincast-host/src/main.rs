@@ -12,8 +12,7 @@ mod program;
 
 use program::{ProgramRunner, StartedProgram, StdProgramRunner, launch_with_runner};
 use wincast_capture::{
-    CaptureError, CaptureSession, CaptureTarget, CapturedTextureMetadata,
-    wait_next_capture_result_with,
+    CaptureError, CaptureSession, CaptureTarget, CapturedBgraFrame, wait_next_capture_result_with,
 };
 use wincast_protocol::{
     config::{CaptureMode, HostConfig},
@@ -207,9 +206,7 @@ trait CaptureStarter {
 }
 
 trait CaptureRuntime {
-    fn try_next_texture_metadata(
-        &mut self,
-    ) -> Result<Option<CapturedTextureMetadata>, CaptureError>;
+    fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError>;
 }
 
 struct StdCaptureStarter;
@@ -224,10 +221,8 @@ impl CaptureStarter for StdCaptureStarter {
 }
 
 impl CaptureRuntime for CaptureSession {
-    fn try_next_texture_metadata(
-        &mut self,
-    ) -> Result<Option<CapturedTextureMetadata>, CaptureError> {
-        self.try_next_texture_metadata()
+    fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError> {
+        self.try_next_bgra_frame()
     }
 }
 
@@ -261,7 +256,7 @@ fn start_capture_session(
     let mut session = capture.start_capture(capture_target(config, window))?;
     let _ = wait_next_capture_result_with(
         Duration::from_millis(config.capture.startup_timeout_ms),
-        || session.try_next_texture_metadata(),
+        || session.try_next_bgra_frame(),
     )?;
     Ok(())
 }
@@ -498,7 +493,7 @@ mod tests {
         let config = host_config("127.0.0.1:0".to_owned());
         let window = window_candidate();
         let mut capture = RecordingCaptureStarter {
-            frames: VecDeque::from([None, Some(captured_texture_metadata())]),
+            frames: VecDeque::from([None, Some(captured_bgra_frame())]),
             ..Default::default()
         };
         let attempts = capture.attempts.clone();
@@ -581,7 +576,7 @@ mod tests {
 
     struct RecordingCaptureStarter {
         targets: Vec<CaptureTarget>,
-        frames: VecDeque<Option<CapturedTextureMetadata>>,
+        frames: VecDeque<Option<CapturedBgraFrame>>,
         attempts: Arc<AtomicUsize>,
     }
 
@@ -589,7 +584,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 targets: Vec::new(),
-                frames: VecDeque::from([Some(captured_texture_metadata())]),
+                frames: VecDeque::from([Some(captured_bgra_frame())]),
                 attempts: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -609,14 +604,12 @@ mod tests {
     }
 
     struct RecordingCaptureRuntime {
-        frames: VecDeque<Option<CapturedTextureMetadata>>,
+        frames: VecDeque<Option<CapturedBgraFrame>>,
         attempts: Arc<AtomicUsize>,
     }
 
     impl CaptureRuntime for RecordingCaptureRuntime {
-        fn try_next_texture_metadata(
-            &mut self,
-        ) -> Result<Option<CapturedTextureMetadata>, CaptureError> {
+        fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             Ok(self.frames.pop_front().flatten())
         }
@@ -685,21 +678,25 @@ mod tests {
         }
     }
 
-    fn captured_texture_metadata() -> CapturedTextureMetadata {
-        CapturedTextureMetadata {
-            frame: wincast_capture::CapturedFrame {
-                width: 1280,
-                height: 720,
-                stride_bytes: 5120,
-                pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
-                sequence_number: 0,
-                timestamp_ns: 0,
+    fn captured_bgra_frame() -> CapturedBgraFrame {
+        CapturedBgraFrame {
+            metadata: wincast_capture::CapturedTextureMetadata {
+                frame: wincast_capture::CapturedFrame {
+                    width: 1280,
+                    height: 720,
+                    stride_bytes: 5120,
+                    pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
+                    sequence_number: 0,
+                    timestamp_ns: 0,
+                },
+                texture_width: 1280,
+                texture_height: 720,
+                mip_levels: 1,
+                array_size: 1,
+                sample_count: 1,
             },
-            texture_width: 1280,
-            texture_height: 720,
-            mip_levels: 1,
-            array_size: 1,
-            sample_count: 1,
+            row_pitch: 5120,
+            bytes: vec![0; 5120],
         }
     }
 }
