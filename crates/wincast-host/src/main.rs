@@ -10,6 +10,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 mod program;
+pub mod session_state;
 
 use program::{ProgramRunner, StartedProgram, StdProgramRunner, launch_with_runner};
 use wincast_capture::{
