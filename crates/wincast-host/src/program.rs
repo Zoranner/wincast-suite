@@ -19,10 +19,47 @@ impl LaunchRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartedProgram {
     pub(crate) process_id: u32,
+    #[cfg(windows)]
+    child: Option<std::process::Child>,
 }
+
+impl StartedProgram {
+    #[cfg(test)]
+    pub(crate) fn from_process_id(process_id: u32) -> Self {
+        Self {
+            process_id,
+            #[cfg(windows)]
+            child: None,
+        }
+    }
+
+    #[cfg(windows)]
+    fn from_child(child: std::process::Child) -> Self {
+        Self {
+            process_id: child.id(),
+            child: Some(child),
+        }
+    }
+}
+
+impl fmt::Debug for StartedProgram {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StartedProgram")
+            .field("process_id", &self.process_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for StartedProgram {
+    fn eq(&self, other: &Self) -> bool {
+        self.process_id == other.process_id
+    }
+}
+
+impl Eq for StartedProgram {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LaunchError {
@@ -55,6 +92,10 @@ impl std::error::Error for LaunchError {}
 
 pub(crate) trait ProgramRunner {
     fn launch(&mut self, request: &LaunchRequest) -> Result<StartedProgram, LaunchError>;
+
+    fn cleanup(&mut self, _started: &mut StartedProgram) -> Result<(), LaunchError> {
+        Ok(())
+    }
 }
 
 pub(crate) struct StdProgramRunner;
@@ -62,6 +103,10 @@ pub(crate) struct StdProgramRunner;
 impl ProgramRunner for StdProgramRunner {
     fn launch(&mut self, request: &LaunchRequest) -> Result<StartedProgram, LaunchError> {
         launch_std_process(request)
+    }
+
+    fn cleanup(&mut self, started: &mut StartedProgram) -> Result<(), LaunchError> {
+        cleanup_std_process(started)
     }
 }
 
@@ -81,14 +126,39 @@ fn launch_std_process(request: &LaunchRequest) -> Result<StartedProgram, LaunchE
         .spawn()
         .map_err(|error| LaunchError::from_io("启动宿主端配置程序失败", error))?;
 
-    Ok(StartedProgram {
-        process_id: child.id(),
-    })
+    Ok(StartedProgram::from_child(child))
 }
 
 #[cfg(not(windows))]
 fn launch_std_process(_request: &LaunchRequest) -> Result<StartedProgram, LaunchError> {
     Err(LaunchError::unsupported_platform())
+}
+
+#[cfg(windows)]
+fn cleanup_std_process(started: &mut StartedProgram) -> Result<(), LaunchError> {
+    let Some(child) = started.child.as_mut() else {
+        return Ok(());
+    };
+
+    if let Some(_status) = child
+        .try_wait()
+        .map_err(|error| LaunchError::from_io("检查宿主端程序退出状态失败", error))?
+    {
+        return Ok(());
+    }
+
+    child
+        .kill()
+        .map_err(|error| LaunchError::from_io("终止宿主端程序失败", error))?;
+    child
+        .wait()
+        .map_err(|error| LaunchError::from_io("等待宿主端程序退出失败", error))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn cleanup_std_process(_started: &mut StartedProgram) -> Result<(), LaunchError> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -151,7 +221,7 @@ mod tests {
     impl ProgramRunner for RecordingRunner {
         fn launch(&mut self, request: &LaunchRequest) -> Result<StartedProgram, LaunchError> {
             self.request = Some(request.clone());
-            Ok(StartedProgram { process_id: 4242 })
+            Ok(StartedProgram::from_process_id(4242))
         }
     }
 

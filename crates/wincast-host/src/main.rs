@@ -19,7 +19,7 @@ use wincast_capture::{
 };
 use wincast_protocol::{
     config::{CaptureMode, HostConfig},
-    frame::{read_message, write_message},
+    frame::{FrameError, read_message, write_message},
     handshake::accept_client_hello,
     input::InputEvent,
     message::{ControlMessage, ErrorCode},
@@ -83,9 +83,9 @@ fn run_host(path: &PathBuf) -> Result<String, String> {
     let listener = TcpListener::bind(&config.listen)
         .map_err(|error| format!("宿主端 TCP 监听失败: {error}"))?;
     let startup_message = runtime_not_implemented_message(&config);
-    let local_addr = run_control_listener_once(listener, &config)?;
+    let local_addr = run_control_listener(listener, &config)?;
     Ok(format!(
-        "{startup_message} 控制通道已处理一个客户端连接，实际监听 {local_addr}。"
+        "{startup_message} 控制通道已进入持续监听，实际监听 {local_addr}。"
     ))
 }
 
@@ -102,22 +102,34 @@ fn runtime_not_implemented_detail() -> &'static str {
     "运行时链路未实现：尚未实现编码传输。"
 }
 
-fn run_control_listener_once(
-    listener: TcpListener,
-    config: &HostConfig,
-) -> Result<SocketAddr, String> {
+fn run_control_listener(listener: TcpListener, config: &HostConfig) -> Result<SocketAddr, String> {
     let mut runner = StdProgramRunner;
     let mut locator = WindowsWindowLocator;
     let mut capture = StdCaptureStarter;
-    run_control_listener_once_with_runtime(
-        listener,
-        config,
-        &mut runner,
-        &mut locator,
-        &mut capture,
-    )
+    run_control_listener_with_runtime(listener, config, &mut runner, &mut locator, &mut capture)
 }
 
+fn run_control_listener_with_runtime(
+    listener: TcpListener,
+    config: &HostConfig,
+    runner: &mut impl ProgramRunner,
+    locator: &mut impl WindowLocator,
+    capture: &mut impl CaptureStarter,
+) -> Result<SocketAddr, String> {
+    let _local_addr = listener
+        .local_addr()
+        .map_err(|error| format!("读取宿主端监听地址失败: {error}"))?;
+    loop {
+        let (mut stream, peer_addr) = listener
+            .accept()
+            .map_err(|error| format!("接受客户端连接失败: {error}"))?;
+        if let Err(error) = handle_control_client(&mut stream, config, runner, locator, capture) {
+            eprintln!("客户端 {peer_addr} 会话结束: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
 fn run_control_listener_once_with_runtime(
     listener: TcpListener,
     config: &HostConfig,
@@ -135,6 +147,27 @@ fn run_control_listener_once_with_runtime(
     Ok(local_addr)
 }
 
+#[cfg(test)]
+fn run_control_listener_n_with_runtime(
+    listener: TcpListener,
+    config: &HostConfig,
+    runner: &mut impl ProgramRunner,
+    locator: &mut impl WindowLocator,
+    capture: &mut impl CaptureStarter,
+    sessions: usize,
+) -> Result<SocketAddr, String> {
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| format!("读取宿主端监听地址失败: {error}"))?;
+    for _ in 0..sessions {
+        let (mut stream, _peer_addr) = listener
+            .accept()
+            .map_err(|error| format!("接受客户端连接失败: {error}"))?;
+        handle_control_client(&mut stream, config, runner, locator, capture)?;
+    }
+    Ok(local_addr)
+}
+
 fn handle_control_client(
     stream: &mut TcpStream,
     config: &HostConfig,
@@ -149,7 +182,7 @@ fn handle_control_client(
 
     match read_message(stream).map_err(|error| format!("读取控制消息失败: {error}"))? {
         ControlMessage::StartSession => {
-            let started = launch_with_runner(config, runner).map_err(|error| {
+            let mut started = launch_with_runner(config, runner).map_err(|error| {
                 let message = format!("启动宿主端程序失败: {error}");
                 let _ = write_control_error(
                     &mut writer,
@@ -158,28 +191,19 @@ fn handle_control_client(
                 );
                 message
             })?;
-            let window = locate_started_window(config, &started, locator).map_err(|error| {
-                let message = format!("定位宿主端程序窗口失败: {error}");
-                let _ =
-                    write_control_error(&mut writer, ErrorCode::WindowNotFound, message.clone());
-                message
-            })?;
-            let (mut session, first_frame) = start_capture_session(config, &window, capture)
-                .map_err(|error| {
-                    let message = format!("初始化画面捕获失败: {error}");
-                    let _ =
-                        write_control_error(&mut writer, ErrorCode::CaptureFailed, message.clone());
-                    message
-                })?;
-            write_session_ready(&mut writer, &first_frame)?;
-            write_raw_bgra_stream(
-                &mut writer,
-                stream,
-                &first_frame,
-                session.as_mut(),
-                capture_input_bounds(config, &window, &first_frame),
-            )?;
-            Ok(())
+            let result =
+                run_started_session(&mut writer, stream, config, locator, capture, &started);
+            let cleanup_result = runner
+                .cleanup(&mut started)
+                .map_err(|error| format!("清理宿主端程序失败: {error}"));
+            match (result, cleanup_result) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(()), Err(error)) => Err(error),
+                (Err(session_error), Err(cleanup_error)) => {
+                    Err(format!("{session_error}；{cleanup_error}"))
+                }
+            }
         }
         message => {
             write_control_error(
@@ -190,6 +214,35 @@ fn handle_control_client(
             Err("控制消息顺序无效，期望 StartSession".to_owned())
         }
     }
+}
+
+fn run_started_session(
+    writer: &mut impl std::io::Write,
+    stream: &TcpStream,
+    config: &HostConfig,
+    locator: &mut impl WindowLocator,
+    capture: &mut impl CaptureStarter,
+    started: &StartedProgram,
+) -> Result<(), String> {
+    let window = locate_started_window(config, started, locator).map_err(|error| {
+        let message = format!("定位宿主端程序窗口失败: {error}");
+        let _ = write_control_error(writer, ErrorCode::WindowNotFound, message.clone());
+        message
+    })?;
+    let (mut session, first_frame) =
+        start_capture_session(config, &window, capture).map_err(|error| {
+            let message = format!("初始化画面捕获失败: {error}");
+            let _ = write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
+            message
+        })?;
+    write_session_ready(writer, &first_frame)?;
+    write_raw_bgra_stream(
+        writer,
+        stream,
+        &first_frame,
+        session.as_mut(),
+        capture_input_bounds(config, &window, &first_frame),
+    )
 }
 
 trait WindowLocator {
@@ -365,6 +418,7 @@ fn write_raw_bgra_stream_with_input_events(
         .map_err(|error| format!("写入视频就绪消息失败: {error}"))?;
     write_raw_bgra_frame_from_capture(writer, first_frame)?;
     if check_input_reader_events(input_events)? {
+        write_session_goodbye(writer)?;
         return Ok(());
     }
 
@@ -374,9 +428,11 @@ fn write_raw_bgra_stream_with_input_events(
             .map_err(|error| format!("读取后续 raw BGRA 捕获帧失败: {error}"))?
         else {
             if check_input_reader_events(input_events)? {
+                write_session_goodbye(writer)?;
                 return Ok(());
             }
             if !session.is_active() {
+                write_session_goodbye(writer)?;
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(16));
@@ -384,8 +440,17 @@ fn write_raw_bgra_stream_with_input_events(
         };
         write_raw_bgra_frame_from_capture(writer, &frame)?;
         if check_input_reader_events(input_events)? {
+            write_session_goodbye(writer)?;
             return Ok(());
         }
+    }
+}
+
+fn write_session_goodbye(writer: &mut impl std::io::Write) -> Result<(), String> {
+    match write_message(writer, &ControlMessage::Goodbye) {
+        Ok(()) => Ok(()),
+        Err(error) if is_control_stream_closed(&error) => Ok(()),
+        Err(error) => Err(format!("写入会话结束消息失败: {error}")),
     }
 }
 
@@ -442,9 +507,25 @@ fn read_input_events_until_stop(
                 return InputReaderEvent::Failed(format!("客户端输入事件消息无效: {message:?}"));
             }
             Err(error) => {
+                if is_control_stream_closed(&error) {
+                    return InputReaderEvent::StopSession;
+                }
                 return InputReaderEvent::Failed(format!("读取客户端输入事件失败: {error}"));
             }
         }
+    }
+}
+
+fn is_control_stream_closed(error: &FrameError) -> bool {
+    match error {
+        FrameError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+        ),
+        _ => false,
     }
 }
 
@@ -577,6 +658,139 @@ mod tests {
         );
         assert_eq!(lookups, vec![(42, None)]);
         assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
+    }
+
+    #[test]
+    fn host_accepts_two_clients_in_sequence_without_rebinding() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener addr should be available");
+        let config = host_config(endpoint.to_string());
+        let mut runner = RecordingProgramRunner::default();
+        let mut locator = RecordingWindowLocator::default();
+        let mut capture = RecordingCaptureStarter::default();
+        let host = thread::spawn(move || {
+            let result = run_control_listener_n_with_runtime(
+                listener,
+                &config,
+                &mut runner,
+                &mut locator,
+                &mut capture,
+                2,
+            );
+            (
+                result,
+                runner.launched,
+                runner.cleaned,
+                locator.lookups,
+                capture.targets,
+            )
+        });
+
+        let first = run_short_client_session(endpoint);
+        let second = run_short_client_session(endpoint);
+
+        assert_eq!(first.sequence_number, 0);
+        assert_eq!(second.sequence_number, 0);
+        let (host_result, launched, cleaned, lookups, capture_targets) =
+            host.join().expect("host thread should finish");
+        assert_eq!(
+            host_result.expect("host should handle two clients"),
+            endpoint
+        );
+        assert_eq!(launched.len(), 2);
+        assert_eq!(cleaned, vec![42, 43]);
+        assert_eq!(lookups, vec![(42, None), (43, None)]);
+        assert_eq!(
+            capture_targets,
+            vec![CaptureTarget::Desktop, CaptureTarget::Desktop]
+        );
+    }
+
+    #[test]
+    fn host_cleans_program_after_stop_session_and_waits_for_next_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener addr should be available");
+        let config = host_config(endpoint.to_string());
+        let mut runner = RecordingProgramRunner::default();
+        let mut locator = RecordingWindowLocator::default();
+        let mut capture = RecordingCaptureStarter::default();
+        let host = thread::spawn(move || {
+            let result = run_control_listener_n_with_runtime(
+                listener,
+                &config,
+                &mut runner,
+                &mut locator,
+                &mut capture,
+                2,
+            );
+            (result, runner.cleaned)
+        });
+
+        let mut first_client = connect_and_start_session(endpoint);
+        read_message(&mut first_client).expect("session ready should read");
+        read_message(&mut first_client).expect("video ready should read");
+        read_raw_bgra_frame(&mut first_client).expect("first raw frame should read");
+        write_message(&mut first_client, &ControlMessage::StopSession)
+            .expect("stop session should write");
+        assert_eq!(
+            read_message(&mut first_client).expect("goodbye should read after stop"),
+            ControlMessage::Goodbye
+        );
+
+        let second = run_short_client_session(endpoint);
+
+        assert_eq!(second.sequence_number, 0);
+        let (host_result, cleaned) = host.join().expect("host thread should finish");
+        assert_eq!(host_result.expect("host should keep listening"), endpoint);
+        assert_eq!(cleaned, vec![42, 43]);
+    }
+
+    #[test]
+    fn host_sends_goodbye_when_capture_session_finishes() {
+        let mut writer = Vec::new();
+        let mut session = RecordingCaptureRuntime {
+            frames: VecDeque::from([None]),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let (_sender, receiver) = mpsc::channel();
+
+        write_raw_bgra_stream_with_input_events(
+            &mut writer,
+            &captured_bgra_frame(),
+            &mut session,
+            &receiver,
+        )
+        .expect("capture end should be reported as a clean session end");
+
+        let mut reader = writer.as_slice();
+        assert_eq!(
+            read_message(&mut reader).expect("video ready should decode"),
+            ControlMessage::VideoReady
+        );
+        let frame = read_raw_bgra_frame(&mut reader).expect("first frame should decode");
+        assert_eq!(frame.sequence_number, 0);
+        assert_eq!(
+            read_message(&mut reader).expect("goodbye should decode"),
+            ControlMessage::Goodbye
+        );
+    }
+
+    #[test]
+    fn goodbye_write_ignores_already_closed_client_connection() {
+        let reader = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = reader
+            .local_addr()
+            .expect("listener addr should be available");
+        let client = TcpStream::connect(endpoint).expect("client should connect");
+        let (mut server, _) = reader.accept().expect("server should accept");
+        drop(client);
+
+        write_session_goodbye(&mut server)
+            .expect("closed client should still be treated as ended session");
     }
 
     #[test]
@@ -1046,6 +1260,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingProgramRunner {
         launched: Vec<(String, Vec<String>)>,
+        cleaned: Vec<u32>,
+        next_process_id: u32,
     }
 
     impl ProgramRunner for RecordingProgramRunner {
@@ -1055,7 +1271,23 @@ mod tests {
         ) -> Result<program::StartedProgram, program::LaunchError> {
             self.launched
                 .push((request.program.display().to_string(), request.args.clone()));
-            Ok(program::StartedProgram { process_id: 42 })
+            let process_id = if self.next_process_id == 0 {
+                self.next_process_id = 43;
+                42
+            } else {
+                let process_id = self.next_process_id;
+                self.next_process_id += 1;
+                process_id
+            };
+            Ok(program::StartedProgram::from_process_id(process_id))
+        }
+
+        fn cleanup(
+            &mut self,
+            started: &mut program::StartedProgram,
+        ) -> Result<(), program::LaunchError> {
+            self.cleaned.push(started.process_id);
+            Ok(())
         }
     }
 
@@ -1237,5 +1469,24 @@ mod tests {
             row_pitch: 5120,
             bytes: vec![0; 5120 * 720],
         }
+    }
+
+    fn connect_and_start_session(endpoint: SocketAddr) -> TcpStream {
+        let mut client = TcpStream::connect(endpoint).expect("client should connect");
+        send_client_hello(&mut client).expect("client hello should write");
+        assert_eq!(
+            read_message(&mut client).expect("host hello should read"),
+            ControlMessage::Hello { version: 1 }
+        );
+        write_message(&mut client, &ControlMessage::StartSession)
+            .expect("start session should write");
+        client
+    }
+
+    fn run_short_client_session(endpoint: SocketAddr) -> RawBgraFrame {
+        let mut client = connect_and_start_session(endpoint);
+        read_message(&mut client).expect("session ready should read");
+        read_message(&mut client).expect("video ready should read");
+        read_raw_bgra_frame(&mut client).expect("raw frame should read")
     }
 }
