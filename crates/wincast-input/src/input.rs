@@ -9,15 +9,15 @@ const SDL_KEY_0: u32 = b'0' as u32;
 const SDL_KEY_9: u32 = b'9' as u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CaptureInputBounds {
-    pub(crate) origin_x: i32,
-    pub(crate) origin_y: i32,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
+pub struct CaptureInputBounds {
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InputInjectionError {
+pub enum InputInjectionError {
     InvalidCaptureBounds,
     InvalidMouseCoordinate,
     UnsupportedKeyCode(u32),
@@ -56,29 +56,8 @@ impl fmt::Display for InputInjectionError {
 
 impl std::error::Error for InputInjectionError {}
 
-pub(crate) struct WindowsInputEventSink {
-    bounds: CaptureInputBounds,
-}
-
-impl WindowsInputEventSink {
-    pub(crate) fn new(bounds: CaptureInputBounds) -> Self {
-        Self { bounds }
-    }
-
-    pub(crate) fn inject(&mut self, event: InputEvent) -> Result<(), InputInjectionError> {
-        let actions = map_input_event_to_windows_actions(event, self.bounds)?;
-        inject_windows_actions(&actions)
-    }
-}
-
-impl crate::InputEventSink for WindowsInputEventSink {
-    fn handle_input_event(&mut self, event: InputEvent) -> Result<(), String> {
-        self.inject(event).map_err(|error| error.to_string())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WindowsInputAction {
+pub enum WindowsInputAction {
     MoveAbsolute {
         x: i32,
         y: i32,
@@ -100,7 +79,22 @@ pub(crate) enum WindowsInputAction {
     },
 }
 
-pub(crate) fn map_input_event_to_windows_actions(
+pub struct WindowsInputEventSink {
+    bounds: CaptureInputBounds,
+}
+
+impl WindowsInputEventSink {
+    pub fn new(bounds: CaptureInputBounds) -> Self {
+        Self { bounds }
+    }
+
+    pub fn inject(&mut self, event: InputEvent) -> Result<(), InputInjectionError> {
+        let actions = map_input_event_to_windows_actions(event, self.bounds)?;
+        inject_windows_actions(&actions)
+    }
+}
+
+pub fn map_input_event_to_windows_actions(
     event: InputEvent,
     bounds: CaptureInputBounds,
 ) -> Result<Vec<WindowsInputAction>, InputInjectionError> {

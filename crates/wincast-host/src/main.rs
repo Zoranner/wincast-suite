@@ -9,14 +9,13 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-mod input;
 mod program;
 
-use input::{CaptureInputBounds, WindowsInputEventSink};
 use program::{ProgramRunner, StartedProgram, StdProgramRunner, launch_with_runner};
 use wincast_capture::{
     CaptureError, CaptureSession, CaptureTarget, CapturedBgraFrame, wait_next_capture_result_with,
 };
+use wincast_input::{CaptureInputBounds, WindowsInputEventSink};
 use wincast_protocol::{
     config::{CaptureMode, HostConfig},
     frame::{FrameError, read_message, write_message},
@@ -280,6 +279,12 @@ trait CaptureRuntime {
 
 trait InputEventSink {
     fn handle_input_event(&mut self, event: InputEvent) -> Result<(), String>;
+}
+
+impl InputEventSink for WindowsInputEventSink {
+    fn handle_input_event(&mut self, event: InputEvent) -> Result<(), String> {
+        self.inject(event).map_err(|error| error.to_string())
+    }
 }
 
 struct StdCaptureStarter;

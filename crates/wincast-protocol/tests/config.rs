@@ -33,6 +33,81 @@ startup_timeout_ms = 15000
 }
 
 #[test]
+fn parses_host_config_with_raw_bgra_video_codec() {
+    let config = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "raw_bgra"
+bitrate_kbps = 4000
+
+[capture]
+mode = "desktop"
+startup_timeout_ms = 15000
+"#,
+    )
+    .expect("raw BGRA host config should parse");
+
+    assert_eq!(config.video.codec, VideoCodec::RawBgra);
+}
+
+#[test]
+fn parses_host_config_with_h264_video_codec() {
+    let config = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+
+[capture]
+mode = "desktop"
+startup_timeout_ms = 15000
+"#,
+    )
+    .expect("H.264 host config should parse");
+
+    assert_eq!(config.video.codec, VideoCodec::H264);
+}
+
+#[test]
+fn rejects_unknown_video_codec_as_invalid_toml() {
+    let err = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "vp9"
+bitrate_kbps = 4000
+
+[capture]
+mode = "desktop"
+startup_timeout_ms = 15000
+"#,
+    )
+    .expect_err("unknown codec should be rejected by TOML deserialization");
+
+    assert!(matches!(err, ConfigError::InvalidToml(_)));
+}
+
+#[test]
 fn parses_client_config_and_formats_endpoint() {
     let config = ClientConfig::from_toml_str(
         r#"

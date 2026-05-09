@@ -384,6 +384,15 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "wincast-capture",
+ "wincast-input",
+ "wincast-protocol",
+ "windows-sys",
+]
+
+[[package]]
+name = "wincast-input"
+version = "0.1.0"
+dependencies = [
  "wincast-protocol",
  "windows-sys",
 ]
