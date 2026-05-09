@@ -98,7 +98,7 @@ fn runtime_not_implemented_message(config: &HostConfig) -> String {
 }
 
 fn runtime_not_implemented_detail() -> &'static str {
-    "运行时链路未实现：尚未实现编码传输。"
+    "raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。"
 }
 
 fn run_control_listener(listener: TcpListener, config: &HostConfig) -> Result<SocketAddr, String> {
@@ -428,20 +428,25 @@ fn write_raw_bgra_stream_with_input_events(
     }
 
     loop {
-        let Some(frame) = session
-            .try_next_bgra_frame()
-            .map_err(|error| format!("读取后续 raw BGRA 捕获帧失败: {error}"))?
-        else {
-            if check_input_reader_events(input_events)? {
-                write_session_goodbye(writer)?;
-                return Ok(());
+        let frame = match session.try_next_bgra_frame() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                if check_input_reader_events(input_events)? {
+                    write_session_goodbye(writer)?;
+                    return Ok(());
+                }
+                if !session.is_active() {
+                    write_session_goodbye(writer)?;
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(16));
+                continue;
             }
-            if !session.is_active() {
-                write_session_goodbye(writer)?;
-                return Ok(());
+            Err(error) => {
+                let message = format!("读取后续 raw BGRA 捕获帧失败: {error}");
+                let _ = write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
+                return Err(message);
             }
-            thread::sleep(Duration::from_millis(16));
-            continue;
         };
         write_raw_bgra_frame_from_capture(writer, &frame)?;
         if check_input_reader_events(input_events)? {
@@ -592,19 +597,18 @@ mod tests {
     }
 
     #[test]
-    fn runtime_message_does_not_claim_runtime_chain_is_ready() {
+    fn runtime_message_reports_raw_bgra_ready_and_codec_transport_pending() {
         let config = host_config("0.0.0.0:7856".to_owned());
 
         let message = runtime_not_implemented_message(&config);
 
-        assert!(message.contains("运行时链路未实现"));
-        assert!(message.contains("尚未实现编码传输"));
-        assert!(!message.contains("尚未实现编码传输和输入注入"));
+        assert!(!message.contains("运行时链路未实现"));
+        assert!(message.contains("raw BGRA 画面链路已接入"));
+        assert!(message.contains("H.264/WebRTC 编码传输尚未接入"));
     }
 
     #[test]
-    fn host_accepts_one_tcp_control_handshake_and_launches_program_before_reporting_runtime_unimplemented()
-     {
+    fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_raw_bgra() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let endpoint = listener
             .local_addr()
@@ -781,6 +785,45 @@ mod tests {
         assert_eq!(
             read_message(&mut reader).expect("goodbye should decode"),
             ControlMessage::Goodbye
+        );
+        assert!(
+            read_message(&mut reader).is_err(),
+            "capture finish should not send an error after goodbye"
+        );
+    }
+
+    #[test]
+    fn host_reports_capture_error_before_returning_frame_read_failure() {
+        let mut writer = Vec::new();
+        let mut session = FrameReadFailingCaptureRuntime;
+        let (_sender, receiver) = mpsc::channel();
+
+        let error = write_raw_bgra_stream_with_input_events(
+            &mut writer,
+            &captured_bgra_frame(),
+            &mut session,
+            &receiver,
+        )
+        .expect_err("capture read failure should be returned to host");
+
+        assert!(error.contains("读取后续 raw BGRA 捕获帧失败"));
+        assert!(error.contains("D3D readback failed"));
+
+        let mut reader = writer.as_slice();
+        assert_eq!(
+            read_message(&mut reader).expect("video ready should decode"),
+            ControlMessage::VideoReady
+        );
+        let frame = read_raw_bgra_frame(&mut reader).expect("first frame should decode");
+        assert_eq!(frame.sequence_number, 0);
+        assert_eq!(
+            read_message(&mut reader).expect("capture error should decode"),
+            ControlMessage::Error {
+                code: ErrorCode::CaptureFailed,
+                message:
+                    "读取后续 raw BGRA 捕获帧失败: 读取 Windows 捕获帧失败: D3D readback failed"
+                        .to_string(),
+            }
         );
     }
 
@@ -1372,6 +1415,20 @@ mod tests {
         fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             Ok(self.frames.pop_front().flatten())
+        }
+    }
+
+    struct FrameReadFailingCaptureRuntime;
+
+    impl CaptureRuntime for FrameReadFailingCaptureRuntime {
+        fn is_active(&self) -> bool {
+            true
+        }
+
+        fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError> {
+            Err(CaptureError::windows_frame_read_failed(
+                "D3D readback failed",
+            ))
         }
     }
 

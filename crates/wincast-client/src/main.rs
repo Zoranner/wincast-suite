@@ -5,10 +5,10 @@ use std::{sync::mpsc, thread, time::Duration};
 use clap::{Parser, Subcommand};
 use wincast_protocol::{
     config::ClientConfig,
-    frame::read_message,
+    frame::{decode_message, read_message},
     handshake::{HandshakeError, read_host_hello, send_client_hello, send_start_session},
     message::{ControlMessage, ErrorCode, RawBgraReadbackFrame},
-    raw_frame::{RawBgraFrame, read_raw_bgra_frame},
+    raw_frame::{MAX_RAW_BGRA_FRAME_BYTES, RawBgraFrame},
 };
 
 const SUPPORTED_CLIENT_TARGETS: &[&str] =
@@ -177,7 +177,7 @@ fn read_raw_bgra_frames_with_renderer(
 #[cfg(any(test, target_os = "linux"))]
 fn read_raw_bgra_frames_until_renderer_quit(
     control_writer: &mut impl std::io::Write,
-    frames: &mpsc::Receiver<Result<RawBgraFrame, String>>,
+    frames: &mpsc::Receiver<RawBgraStreamEvent>,
     renderer: &mut impl wincast_render::RawBgraRenderer,
 ) -> Result<RawBgraReceiveSummary, String> {
     read_raw_bgra_frames_with_renderer_loop(control_writer, frames, None, renderer)
@@ -195,13 +195,21 @@ fn read_raw_bgra_frames_with_renderer_limit(
         if frame_limit.is_some_and(|limit| queued_frames == limit) {
             break;
         }
-        match read_raw_bgra_frame(stream) {
-            Ok(frame) => sender
-                .send(Ok(frame))
+        match read_raw_bgra_stream_item(stream) {
+            Ok(RawBgraStreamItem::Frame(frame)) => sender
+                .send(RawBgraStreamEvent::Frame(frame))
                 .map_err(|_| "raw BGRA 测试帧通道已关闭".to_owned())?,
+            Ok(RawBgraStreamItem::Goodbye) => {
+                sender
+                    .send(RawBgraStreamEvent::Goodbye)
+                    .map_err(|_| "raw BGRA 测试帧通道已关闭".to_owned())?;
+                break;
+            }
             Err(error) => {
                 sender
-                    .send(Err(format!("读取宿主端 raw BGRA 视频帧失败: {error}")))
+                    .send(RawBgraStreamEvent::Failed(format_raw_bgra_read_error(
+                        error,
+                    )))
                     .map_err(|_| "raw BGRA 测试帧通道已关闭".to_owned())?;
                 break;
             }
@@ -215,7 +223,7 @@ fn read_raw_bgra_frames_with_renderer_limit(
 #[cfg(any(test, target_os = "linux"))]
 fn read_raw_bgra_frames_with_renderer_loop(
     control_writer: &mut impl std::io::Write,
-    frame_receiver: &mpsc::Receiver<Result<RawBgraFrame, String>>,
+    frame_receiver: &mpsc::Receiver<RawBgraStreamEvent>,
     frame_limit: Option<usize>,
     renderer: &mut impl wincast_render::RawBgraRenderer,
 ) -> Result<RawBgraReceiveSummary, String> {
@@ -227,25 +235,24 @@ fn read_raw_bgra_frames_with_renderer_loop(
             break;
         }
 
-        while let Ok(frame) = frame_receiver.try_recv() {
-            let frame = frame?;
-            validate_raw_binary_frame(&frame)?;
-            if let Some(previous) = last_sequence_number
-                && frame.sequence_number < previous
-            {
-                return Err(format!(
-                    "宿主端 raw BGRA 视频帧序号回退: 上一帧 {previous}，当前帧 {}",
-                    frame.sequence_number
-                ));
-            }
-            renderer
-                .render_frame(&frame)
-                .map_err(|error| format!("渲染宿主端 raw BGRA 视频帧失败: {error}"))?;
-            last_sequence_number = Some(frame.sequence_number);
+        while let Ok(event) = frame_receiver.try_recv() {
+            let frame = match event {
+                RawBgraStreamEvent::Frame(frame) => frame,
+                RawBgraStreamEvent::Goodbye => {
+                    quit_requested = true;
+                    break;
+                }
+                RawBgraStreamEvent::Failed(error) => return Err(error),
+            };
+            render_raw_bgra_frame(renderer, &frame, &mut last_sequence_number)?;
             frame_count += 1;
             if frame_limit.is_some_and(|limit| frame_count == limit) {
                 break;
             }
+        }
+
+        if quit_requested {
+            break;
         }
 
         let render_loop = renderer
@@ -289,14 +296,17 @@ fn read_raw_bgra_frames_with_renderer_loop(
 #[cfg(target_os = "linux")]
 fn spawn_raw_bgra_frame_reader(
     mut reader: impl std::io::Read + Send + 'static,
-) -> mpsc::Receiver<Result<RawBgraFrame, String>> {
+) -> mpsc::Receiver<RawBgraStreamEvent> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         loop {
-            let result = read_raw_bgra_frame(&mut reader)
-                .map_err(|error| format!("读取宿主端 raw BGRA 视频帧失败: {error}"));
-            let should_stop = result.is_err();
-            if sender.send(result).is_err() || should_stop {
+            let event = match read_raw_bgra_stream_item(&mut reader) {
+                Ok(RawBgraStreamItem::Frame(frame)) => RawBgraStreamEvent::Frame(frame),
+                Ok(RawBgraStreamItem::Goodbye) => RawBgraStreamEvent::Goodbye,
+                Err(error) => RawBgraStreamEvent::Failed(format_raw_bgra_read_error(error)),
+            };
+            let should_stop = !matches!(event, RawBgraStreamEvent::Frame(_));
+            if sender.send(event).is_err() || should_stop {
                 break;
             }
         }
@@ -319,24 +329,26 @@ fn read_raw_bgra_frames(
     }
 
     let mut last_sequence_number = None;
+    let mut frames = 0;
     for _ in 0..frame_count {
-        let frame = read_raw_bgra_frame(reader)
-            .map_err(|error| format!("读取宿主端 raw BGRA 视频帧失败: {error}"))?;
-        validate_raw_binary_frame(&frame)?;
-        if let Some(previous) = last_sequence_number
-            && frame.sequence_number < previous
-        {
-            return Err(format!(
-                "宿主端 raw BGRA 视频帧序号回退: 上一帧 {previous}，当前帧 {}",
-                frame.sequence_number
-            ));
+        match read_raw_bgra_stream_item(reader).map_err(format_raw_bgra_read_error)? {
+            RawBgraStreamItem::Frame(frame) => {
+                validate_raw_frame_sequence(&frame, &mut last_sequence_number)?;
+                frames += 1;
+            }
+            RawBgraStreamItem::Goodbye => {
+                break;
+            }
         }
-        last_sequence_number = Some(frame.sequence_number);
     }
 
+    let Some(last_sequence_number) = last_sequence_number else {
+        return Err("未收到 raw BGRA 视频帧".to_owned());
+    };
+
     Ok(RawBgraReceiveSummary {
-        frames: frame_count,
-        last_sequence_number: last_sequence_number.expect("frame_count is non-zero"),
+        frames,
+        last_sequence_number,
     })
 }
 
@@ -350,6 +362,119 @@ fn validate_raw_binary_frame(frame: &RawBgraFrame) -> Result<(), String> {
     frame
         .validate()
         .map_err(|error| format!("宿主端 raw BGRA 视频帧无效: {error}"))
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn render_raw_bgra_frame(
+    renderer: &mut impl wincast_render::RawBgraRenderer,
+    frame: &RawBgraFrame,
+    last_sequence_number: &mut Option<u64>,
+) -> Result<(), String> {
+    validate_raw_frame_sequence(frame, last_sequence_number)?;
+    renderer
+        .render_frame(frame)
+        .map_err(|error| format!("渲染宿主端 raw BGRA 视频帧失败: {error}"))
+}
+
+fn validate_raw_frame_sequence(
+    frame: &RawBgraFrame,
+    last_sequence_number: &mut Option<u64>,
+) -> Result<(), String> {
+    validate_raw_binary_frame(frame)?;
+    if let Some(previous) = *last_sequence_number
+        && frame.sequence_number < previous
+    {
+        return Err(format!(
+            "宿主端 raw BGRA 视频帧序号回退: 上一帧 {previous}，当前帧 {}",
+            frame.sequence_number
+        ));
+    }
+    *last_sequence_number = Some(frame.sequence_number);
+    Ok(())
+}
+
+fn read_raw_bgra_stream_item(reader: &mut impl std::io::Read) -> Result<RawBgraStreamItem, String> {
+    let mut prefix = [0_u8; 4];
+    reader
+        .read_exact(&mut prefix)
+        .map_err(|error| error.to_string())?;
+
+    if &prefix == b"WCBG" {
+        return read_raw_bgra_frame_after_magic(reader).map(RawBgraStreamItem::Frame);
+    }
+
+    let len = u32::from_be_bytes(prefix) as usize;
+    if len > wincast_protocol::frame::MAX_FRAME_LEN {
+        return Err(format!(
+            "raw BGRA 帧 magic 无效且控制消息长度 {len} 超过限制 {}",
+            wincast_protocol::frame::MAX_FRAME_LEN
+        ));
+    }
+    let mut payload = vec![0_u8; len];
+    reader
+        .read_exact(&mut payload)
+        .map_err(|error| error.to_string())?;
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&prefix);
+    frame.extend_from_slice(&payload);
+
+    match decode_message(&frame).map_err(|error| error.to_string())? {
+        ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
+        ControlMessage::Goodbye => Ok(RawBgraStreamItem::Goodbye),
+        message => Err(format!("宿主端 raw BGRA 流中收到无效控制消息: {message:?}")),
+    }
+}
+
+fn read_raw_bgra_frame_after_magic(
+    reader: &mut impl std::io::Read,
+) -> Result<RawBgraFrame, String> {
+    let mut rest = [0_u8; 32];
+    reader
+        .read_exact(&mut rest)
+        .map_err(|error| error.to_string())?;
+
+    let payload_len = u32::from_be_bytes([rest[28], rest[29], rest[30], rest[31]]) as usize;
+    if payload_len > MAX_RAW_BGRA_FRAME_BYTES {
+        return Err(format!(
+            "raw BGRA 帧载荷 {payload_len} 超过限制 {MAX_RAW_BGRA_FRAME_BYTES}"
+        ));
+    }
+
+    let mut bytes = vec![0_u8; payload_len];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| error.to_string())?;
+
+    let frame = RawBgraFrame {
+        width: u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]),
+        height: u32::from_be_bytes([rest[4], rest[5], rest[6], rest[7]]),
+        row_pitch: u32::from_be_bytes([rest[8], rest[9], rest[10], rest[11]]),
+        sequence_number: u64::from_be_bytes([
+            rest[12], rest[13], rest[14], rest[15], rest[16], rest[17], rest[18], rest[19],
+        ]),
+        timestamp_ns: u64::from_be_bytes([
+            rest[20], rest[21], rest[22], rest[23], rest[24], rest[25], rest[26], rest[27],
+        ]),
+        bytes,
+    };
+    frame.validate().map_err(|error| error.to_string())?;
+    Ok(frame)
+}
+
+fn format_raw_bgra_read_error(error: impl std::fmt::Display) -> String {
+    format!("视频流中断: 读取宿主端 raw BGRA 视频帧失败: {error}")
+}
+
+enum RawBgraStreamItem {
+    Frame(RawBgraFrame),
+    Goodbye,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+enum RawBgraStreamEvent {
+    Frame(RawBgraFrame),
+    Goodbye,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,9 +518,13 @@ fn format_handshake_error(error: HandshakeError) -> String {
 fn format_host_error(code: ErrorCode, message: String) -> String {
     match code {
         ErrorCode::Busy => format!("宿主端忙碌: {message}"),
+        ErrorCode::InvalidConfig => format!("宿主端配置无效: {message}"),
+        ErrorCode::ProgramLaunchFailed => format!("宿主端程序启动失败: {message}"),
+        ErrorCode::WindowNotFound => format!("宿主端窗口定位失败: {message}"),
+        ErrorCode::CaptureFailed => format!("宿主端画面捕获失败: {message}"),
         ErrorCode::UnsupportedVersion => format!("协议版本不匹配: {message}"),
         ErrorCode::EncodingFailed => format!("宿主端视频编码失败: {message}"),
-        _ => format!("宿主端拒绝连接: {message}"),
+        ErrorCode::TransportFailed => format!("宿主端传输链路失败: {message}"),
     }
 }
 
@@ -513,7 +642,7 @@ mod tests {
         let error = run_client_with_config(&config).expect_err("runtime unimplemented should fail");
 
         host_thread.join().expect("host thread should finish");
-        assert!(error.contains("宿主端拒绝连接"));
+        assert!(error.contains("宿主端传输链路失败"));
         assert!(error.contains("运行时链路未实现"));
     }
 
@@ -526,6 +655,29 @@ mod tests {
 
         assert!(error.contains("宿主端视频编码失败"));
         assert!(error.contains("尚未接入 H.264 编码器"));
+    }
+
+    #[test]
+    fn client_formats_host_session_errors_with_specific_chinese_prefixes() {
+        let cases = [
+            (ErrorCode::Busy, "宿主端忙碌"),
+            (ErrorCode::WindowNotFound, "宿主端窗口定位失败"),
+            (ErrorCode::ProgramLaunchFailed, "宿主端程序启动失败"),
+            (ErrorCode::CaptureFailed, "宿主端画面捕获失败"),
+            (ErrorCode::TransportFailed, "宿主端传输链路失败"),
+            (ErrorCode::InvalidConfig, "宿主端配置无效"),
+        ];
+
+        for (code, expected_prefix) in cases {
+            let error = format_host_error(code, "测试错误详情".to_owned());
+
+            assert!(
+                error.starts_with(expected_prefix),
+                "{code:?} should start with {expected_prefix}, got {error}"
+            );
+            assert!(error.contains("测试错误详情"));
+            assert!(!error.contains("宿主端拒绝连接"));
+        }
     }
 
     #[test]
@@ -863,6 +1015,54 @@ mod tests {
     }
 
     #[test]
+    fn client_reports_raw_bgra_eof_as_video_stream_interruption() {
+        let bytes = Vec::new();
+
+        let error = read_raw_bgra_frames(&mut bytes.as_slice(), 1)
+            .expect_err("eof should fail the raw BGRA frame loop");
+
+        assert!(error.contains("视频流中断"));
+    }
+
+    #[test]
+    fn client_reports_host_error_inside_raw_bgra_stream() {
+        let mut bytes = Vec::new();
+        write_message(
+            &mut bytes,
+            &ControlMessage::Error {
+                code: ErrorCode::CaptureFailed,
+                message: "读取后续 raw BGRA 捕获帧失败".to_owned(),
+            },
+        )
+        .expect("host error should encode");
+
+        let error = read_raw_bgra_frames(&mut bytes.as_slice(), 1)
+            .expect_err("host error should fail the raw BGRA frame loop");
+
+        assert!(error.contains("宿主端画面捕获失败"));
+        assert!(error.contains("读取后续 raw BGRA 捕获帧失败"));
+    }
+
+    #[test]
+    fn client_treats_goodbye_inside_raw_bgra_stream_as_session_end() {
+        let mut bytes = Vec::new();
+        write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(7))
+            .expect("raw frame should encode");
+        write_message(&mut bytes, &ControlMessage::Goodbye).expect("goodbye should encode");
+
+        let summary = read_raw_bgra_frames(&mut bytes.as_slice(), 2)
+            .expect("goodbye should end the raw BGRA frame loop");
+
+        assert_eq!(
+            summary,
+            RawBgraReceiveSummary {
+                frames: 1,
+                last_sequence_number: 7,
+            }
+        );
+    }
+
+    #[test]
     fn parses_run_command_with_config_path() {
         let args =
             Args::try_parse_from(["wincast-client", "--config", "custom-client.toml", "run"])
@@ -982,10 +1182,12 @@ mod tests {
 
     fn queued_raw_bgra_frames(
         frames: impl IntoIterator<Item = RawBgraFrame>,
-    ) -> mpsc::Receiver<Result<RawBgraFrame, String>> {
+    ) -> mpsc::Receiver<RawBgraStreamEvent> {
         let (sender, receiver) = mpsc::channel();
         for frame in frames {
-            sender.send(Ok(frame)).expect("test frame should queue");
+            sender
+                .send(RawBgraStreamEvent::Frame(frame))
+                .expect("test frame should queue");
         }
         receiver
     }
