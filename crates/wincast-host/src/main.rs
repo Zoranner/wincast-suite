@@ -25,6 +25,23 @@ enum Command {
     Validate,
     /// 校验配置并进入宿主端运行入口
     Run,
+    /// 管理 Windows Service 入口
+    #[command(subcommand)]
+    Service(ServiceCommand),
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+enum ServiceCommand {
+    /// 安装 Windows Service
+    Install,
+    /// 卸载 Windows Service
+    Uninstall,
+    /// 启动 Windows Service
+    Start,
+    /// 停止 Windows Service
+    Stop,
+    /// 查看 Windows Service 状态
+    Status,
 }
 
 fn main() -> ExitCode {
@@ -34,10 +51,7 @@ fn main() -> ExitCode {
 }
 
 fn run(command: Command, config_path: &PathBuf) -> ExitCode {
-    let result = match command {
-        Command::Validate => validate_config(config_path),
-        Command::Run => run_host(config_path),
-    };
+    let result = execute_command(command, config_path);
 
     match result {
         Ok(message) => {
@@ -48,6 +62,31 @@ fn run(command: Command, config_path: &PathBuf) -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn execute_command(command: Command, config_path: &PathBuf) -> Result<String, String> {
+    match command {
+        Command::Validate => validate_config(config_path),
+        Command::Run => run_host(config_path),
+        Command::Service(command) => Ok(service_not_implemented_message(command)),
+    }
+}
+
+fn service_not_implemented_message(command: ServiceCommand) -> String {
+    format!(
+        "Windows Service 编排尚未实现，当前仍需使用前台 run 模式；未执行{}操作。",
+        service_command_label(command)
+    )
+}
+
+fn service_command_label(command: ServiceCommand) -> &'static str {
+    match command {
+        ServiceCommand::Install => "安装",
+        ServiceCommand::Uninstall => "卸载",
+        ServiceCommand::Start => "启动",
+        ServiceCommand::Stop => "停止",
+        ServiceCommand::Status => "状态查询",
     }
 }
 
@@ -115,6 +154,50 @@ mod tests {
 
         assert_eq!(args.config, PathBuf::from("custom-host.toml"));
         assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn parses_service_subcommands() {
+        for (name, expected) in [
+            ("install", ServiceCommand::Install),
+            ("uninstall", ServiceCommand::Uninstall),
+            ("start", ServiceCommand::Start),
+            ("stop", ServiceCommand::Stop),
+            ("status", ServiceCommand::Status),
+        ] {
+            let args = Args::try_parse_from(["wincast-host", "service", name])
+                .expect("service command should parse");
+
+            match args.command {
+                Some(Command::Service(actual)) => {
+                    assert_eq!(
+                        service_command_label(actual),
+                        service_command_label(expected)
+                    );
+                }
+                _ => panic!("service {name} should parse"),
+            }
+        }
+    }
+
+    #[test]
+    fn service_commands_report_explicitly_not_implemented() {
+        for command in [
+            ServiceCommand::Install,
+            ServiceCommand::Uninstall,
+            ServiceCommand::Start,
+            ServiceCommand::Stop,
+            ServiceCommand::Status,
+        ] {
+            let message = execute_command(Command::Service(command), &PathBuf::from("unused.toml"))
+                .expect("service command should return a user-facing message");
+
+            assert!(message.contains("Windows Service 编排尚未实现"));
+            assert!(message.contains("当前仍需使用前台 run 模式"));
+            assert!(message.contains("未执行"));
+            assert!(!message.contains("安装成功"));
+            assert!(!message.contains("Service 已安装"));
+        }
     }
 
     #[test]
