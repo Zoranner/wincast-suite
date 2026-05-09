@@ -5,10 +5,13 @@ use std::{sync::mpsc, thread, time::Duration};
 use clap::{Parser, Subcommand};
 use wincast_protocol::{
     config::ClientConfig,
-    frame::{decode_message, read_message},
+    frame::read_message,
     handshake::{HandshakeError, read_host_hello, send_client_hello, send_start_session},
     message::{ControlMessage, ErrorCode, RawBgraReadbackFrame},
-    raw_frame::{MAX_RAW_BGRA_FRAME_BYTES, RawBgraFrame},
+    raw_frame::{
+        RawBgraFrame, RawBgraStreamItem as ProtocolRawBgraStreamItem,
+        read_raw_bgra_stream_item as read_protocol_raw_bgra_stream_item,
+    },
 };
 
 const SUPPORTED_CLIENT_TARGETS: &[&str] =
@@ -394,71 +397,18 @@ fn validate_raw_frame_sequence(
 }
 
 fn read_raw_bgra_stream_item(reader: &mut impl std::io::Read) -> Result<RawBgraStreamItem, String> {
-    let mut prefix = [0_u8; 4];
-    reader
-        .read_exact(&mut prefix)
-        .map_err(|error| error.to_string())?;
-
-    if &prefix == b"WCBG" {
-        return read_raw_bgra_frame_after_magic(reader).map(RawBgraStreamItem::Frame);
+    match read_protocol_raw_bgra_stream_item(reader).map_err(|error| error.to_string())? {
+        ProtocolRawBgraStreamItem::Frame(frame) => Ok(RawBgraStreamItem::Frame(frame)),
+        ProtocolRawBgraStreamItem::Control(ControlMessage::Error { code, message }) => {
+            Err(format_host_error(code, message))
+        }
+        ProtocolRawBgraStreamItem::Control(ControlMessage::Goodbye) => {
+            Ok(RawBgraStreamItem::Goodbye)
+        }
+        ProtocolRawBgraStreamItem::Control(message) => {
+            Err(format!("宿主端 raw BGRA 流中收到无效控制消息: {message:?}"))
+        }
     }
-
-    let len = u32::from_be_bytes(prefix) as usize;
-    if len > wincast_protocol::frame::MAX_FRAME_LEN {
-        return Err(format!(
-            "raw BGRA 帧 magic 无效且控制消息长度 {len} 超过限制 {}",
-            wincast_protocol::frame::MAX_FRAME_LEN
-        ));
-    }
-    let mut payload = vec![0_u8; len];
-    reader
-        .read_exact(&mut payload)
-        .map_err(|error| error.to_string())?;
-    let mut frame = Vec::with_capacity(4 + payload.len());
-    frame.extend_from_slice(&prefix);
-    frame.extend_from_slice(&payload);
-
-    match decode_message(&frame).map_err(|error| error.to_string())? {
-        ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
-        ControlMessage::Goodbye => Ok(RawBgraStreamItem::Goodbye),
-        message => Err(format!("宿主端 raw BGRA 流中收到无效控制消息: {message:?}")),
-    }
-}
-
-fn read_raw_bgra_frame_after_magic(
-    reader: &mut impl std::io::Read,
-) -> Result<RawBgraFrame, String> {
-    let mut rest = [0_u8; 32];
-    reader
-        .read_exact(&mut rest)
-        .map_err(|error| error.to_string())?;
-
-    let payload_len = u32::from_be_bytes([rest[28], rest[29], rest[30], rest[31]]) as usize;
-    if payload_len > MAX_RAW_BGRA_FRAME_BYTES {
-        return Err(format!(
-            "raw BGRA 帧载荷 {payload_len} 超过限制 {MAX_RAW_BGRA_FRAME_BYTES}"
-        ));
-    }
-
-    let mut bytes = vec![0_u8; payload_len];
-    reader
-        .read_exact(&mut bytes)
-        .map_err(|error| error.to_string())?;
-
-    let frame = RawBgraFrame {
-        width: u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]),
-        height: u32::from_be_bytes([rest[4], rest[5], rest[6], rest[7]]),
-        row_pitch: u32::from_be_bytes([rest[8], rest[9], rest[10], rest[11]]),
-        sequence_number: u64::from_be_bytes([
-            rest[12], rest[13], rest[14], rest[15], rest[16], rest[17], rest[18], rest[19],
-        ]),
-        timestamp_ns: u64::from_be_bytes([
-            rest[20], rest[21], rest[22], rest[23], rest[24], rest[25], rest[26], rest[27],
-        ]),
-        bytes,
-    };
-    frame.validate().map_err(|error| error.to_string())?;
-    Ok(frame)
 }
 
 fn format_raw_bgra_read_error(error: impl std::fmt::Display) -> String {

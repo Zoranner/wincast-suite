@@ -2,6 +2,11 @@ use std::io::{Read, Write};
 
 use thiserror::Error;
 
+use crate::{
+    frame::{FrameError, MAX_FRAME_LEN},
+    message::ControlMessage,
+};
+
 const RAW_BGRA_MAGIC: [u8; 4] = *b"WCBG";
 const RAW_BGRA_HEADER_LEN: usize = 36;
 pub const MAX_RAW_BGRA_FRAME_BYTES: usize = 32 * 1024 * 1024;
@@ -14,6 +19,12 @@ pub struct RawBgraFrame {
     pub sequence_number: u64,
     pub timestamp_ns: u64,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawBgraStreamItem {
+    Frame(RawBgraFrame),
+    Control(ControlMessage),
 }
 
 impl RawBgraFrame {
@@ -56,6 +67,8 @@ impl RawBgraFrame {
 pub enum RawFrameError {
     #[error("raw BGRA 帧 magic 无效: {0:?}")]
     InvalidMagic([u8; 4]),
+    #[error("raw BGRA 帧 magic 无效且控制消息长度 {actual} 超过限制 {max}")]
+    InvalidMagicAndControlMessageTooLarge { actual: usize, max: usize },
     #[error("raw BGRA 帧尺寸无效")]
     InvalidDimensions,
     #[error("raw BGRA 帧 row pitch 无效")]
@@ -68,11 +81,14 @@ pub enum RawFrameError {
     SizeOverflow,
     #[error("raw BGRA 帧 IO 失败: {0}")]
     Io(std::io::Error),
+    #[error("{0}")]
+    ControlFrame(FrameError),
 }
 
 impl PartialEq for RawFrameError {
     fn eq(&self, other: &Self) -> bool {
         matches!((self, other), (Self::Io(_), Self::Io(_)))
+            || matches!((self, other), (Self::ControlFrame(left), Self::ControlFrame(right)) if left == right)
             || matches!(
                 (self, other),
                 (Self::InvalidMagic(left), Self::InvalidMagic(right)) if left == right
@@ -82,6 +98,19 @@ impl PartialEq for RawFrameError {
                 (Self::InvalidDimensions, Self::InvalidDimensions)
                     | (Self::InvalidRowPitch, Self::InvalidRowPitch)
                     | (Self::SizeOverflow, Self::SizeOverflow)
+            )
+            || matches!(
+                (self, other),
+                (
+                    Self::InvalidMagicAndControlMessageTooLarge {
+                        actual: left_actual,
+                        max: left_max,
+                    },
+                    Self::InvalidMagicAndControlMessageTooLarge {
+                        actual: right_actual,
+                        max: right_max,
+                    },
+                ) if left_actual == right_actual && left_max == right_max
             )
             || matches!(
                 (self, other),
@@ -120,6 +149,12 @@ impl From<std::io::Error> for RawFrameError {
     }
 }
 
+impl From<FrameError> for RawFrameError {
+    fn from(error: FrameError) -> Self {
+        Self::ControlFrame(error)
+    }
+}
+
 pub fn write_raw_bgra_frame(
     writer: &mut impl Write,
     frame: &RawBgraFrame,
@@ -141,15 +176,44 @@ pub fn write_raw_bgra_frame(
 }
 
 pub fn read_raw_bgra_frame(reader: &mut impl Read) -> Result<RawBgraFrame, RawFrameError> {
-    let mut header = [0_u8; RAW_BGRA_HEADER_LEN];
-    reader.read_exact(&mut header)?;
-
-    let magic = [header[0], header[1], header[2], header[3]];
+    let mut magic = [0_u8; 4];
+    reader.read_exact(&mut magic)?;
     if magic != RAW_BGRA_MAGIC {
         return Err(RawFrameError::InvalidMagic(magic));
     }
 
-    let payload_len = u32::from_be_bytes([header[32], header[33], header[34], header[35]]) as usize;
+    read_raw_bgra_frame_after_magic(reader)
+}
+
+pub fn read_raw_bgra_stream_item(
+    reader: &mut impl Read,
+) -> Result<RawBgraStreamItem, RawFrameError> {
+    let mut prefix = [0_u8; 4];
+    reader.read_exact(&mut prefix)?;
+
+    if prefix == RAW_BGRA_MAGIC {
+        return read_raw_bgra_frame_after_magic(reader).map(RawBgraStreamItem::Frame);
+    }
+
+    let len = u32::from_be_bytes(prefix) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(RawFrameError::InvalidMagicAndControlMessageTooLarge {
+            actual: len,
+            max: MAX_FRAME_LEN,
+        });
+    }
+
+    let mut payload = vec![0_u8; len];
+    reader.read_exact(&mut payload)?;
+    let message = serde_json::from_slice(&payload).map_err(FrameError::Decode)?;
+    Ok(RawBgraStreamItem::Control(message))
+}
+
+fn read_raw_bgra_frame_after_magic(reader: &mut impl Read) -> Result<RawBgraFrame, RawFrameError> {
+    let mut rest = [0_u8; RAW_BGRA_HEADER_LEN - 4];
+    reader.read_exact(&mut rest)?;
+
+    let payload_len = u32::from_be_bytes([rest[28], rest[29], rest[30], rest[31]]) as usize;
     if payload_len > MAX_RAW_BGRA_FRAME_BYTES {
         return Err(RawFrameError::PayloadTooLarge {
             actual: payload_len,
@@ -161,16 +225,14 @@ pub fn read_raw_bgra_frame(reader: &mut impl Read) -> Result<RawBgraFrame, RawFr
     reader.read_exact(&mut bytes)?;
 
     let frame = RawBgraFrame {
-        width: u32::from_be_bytes([header[4], header[5], header[6], header[7]]),
-        height: u32::from_be_bytes([header[8], header[9], header[10], header[11]]),
-        row_pitch: u32::from_be_bytes([header[12], header[13], header[14], header[15]]),
+        width: u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]),
+        height: u32::from_be_bytes([rest[4], rest[5], rest[6], rest[7]]),
+        row_pitch: u32::from_be_bytes([rest[8], rest[9], rest[10], rest[11]]),
         sequence_number: u64::from_be_bytes([
-            header[16], header[17], header[18], header[19], header[20], header[21], header[22],
-            header[23],
+            rest[12], rest[13], rest[14], rest[15], rest[16], rest[17], rest[18], rest[19],
         ]),
         timestamp_ns: u64::from_be_bytes([
-            header[24], header[25], header[26], header[27], header[28], header[29], header[30],
-            header[31],
+            rest[20], rest[21], rest[22], rest[23], rest[24], rest[25], rest[26], rest[27],
         ]),
         bytes,
     };

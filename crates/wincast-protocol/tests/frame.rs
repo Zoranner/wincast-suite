@@ -177,6 +177,60 @@ fn raw_bgra_binary_frame_reads_consecutive_frames_from_same_stream() {
 }
 
 #[test]
+fn raw_bgra_stream_item_reads_binary_frame_without_json_control_envelope() {
+    let frame = RawBgraFrame {
+        width: 2,
+        height: 2,
+        row_pitch: 8,
+        sequence_number: 3,
+        timestamp_ns: 30,
+        bytes: vec![3; 16],
+    };
+    let mut bytes = Vec::new();
+    write_raw_bgra_frame(&mut bytes, &frame).expect("raw frame should encode");
+
+    let item = wincast_protocol::raw_frame::read_raw_bgra_stream_item(&mut Cursor::new(bytes))
+        .expect("stream item should decode");
+
+    assert_eq!(
+        item,
+        wincast_protocol::raw_frame::RawBgraStreamItem::Frame(frame)
+    );
+}
+
+#[test]
+fn raw_bgra_stream_item_reads_interleaved_control_message() {
+    let message = ControlMessage::Goodbye;
+    let mut bytes = Vec::new();
+    write_message(&mut bytes, &message).expect("control message should encode");
+
+    let item = wincast_protocol::raw_frame::read_raw_bgra_stream_item(&mut Cursor::new(bytes))
+        .expect("stream item should decode");
+
+    assert_eq!(
+        item,
+        wincast_protocol::raw_frame::RawBgraStreamItem::Control(message)
+    );
+}
+
+#[test]
+fn raw_bgra_stream_item_rejects_oversized_control_message_after_unknown_magic() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&((MAX_FRAME_LEN + 1) as u32).to_be_bytes());
+
+    let err = wincast_protocol::raw_frame::read_raw_bgra_stream_item(&mut Cursor::new(bytes))
+        .expect_err("oversized control message should fail");
+
+    assert_eq!(
+        err,
+        RawFrameError::InvalidMagicAndControlMessageTooLarge {
+            actual: MAX_FRAME_LEN + 1,
+            max: MAX_FRAME_LEN,
+        }
+    );
+}
+
+#[test]
 fn raw_bgra_binary_frame_rejects_invalid_payload_shape() {
     let frame = RawBgraFrame {
         width: 2,
