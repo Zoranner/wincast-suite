@@ -18,11 +18,57 @@ use wincast_protocol::{
     frame::{FrameError, read_message, write_message},
     handshake::{accept_client_hello, reject_busy_client},
     input::InputEvent,
+    ipc::SessionEndReason,
     message::{ControlMessage, ErrorCode},
     raw_frame::{RawBgraFrame, write_raw_bgra_frame},
 };
 
 const SESSION_RECLAIM_GRACE: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostSessionEndReason {
+    StopSession,
+    CaptureInactive,
+    ClientDisconnected,
+    CaptureFailed,
+    InputFailed,
+    TransportFailed,
+}
+
+impl HostSessionEndReason {
+    fn service_reason(self) -> SessionEndReason {
+        match self {
+            Self::StopSession => SessionEndReason::ServiceRequested,
+            Self::CaptureInactive | Self::ClientDisconnected => {
+                SessionEndReason::DesktopUnavailable
+            }
+            Self::CaptureFailed | Self::InputFailed | Self::TransportFailed => {
+                SessionEndReason::SessionFailed
+            }
+        }
+    }
+}
+
+impl From<HostSessionEndReason> for SessionEndReason {
+    fn from(reason: HostSessionEndReason) -> Self {
+        reason.service_reason()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostSessionError {
+    reason: HostSessionEndReason,
+    message: String,
+}
+
+impl HostSessionError {
+    fn new(reason: HostSessionEndReason, message: impl Into<String>) -> Self {
+        Self {
+            reason,
+            message: message.into(),
+        }
+    }
+}
 
 pub(crate) fn run_control_listener(
     listener: TcpListener,
@@ -163,7 +209,7 @@ where
     C: CaptureStarter + Send + 'scope,
 {
     if session_finished.try_recv().is_ok() {
-        join_finished_session(state)
+        join_reported_finished_session(state)
     } else {
         state
     }
@@ -181,10 +227,42 @@ where
 {
     match state {
         ListenerSessionState::Busy(session) => match session_finished.recv_timeout(timeout) {
-            Ok(SessionFinished) => join_finished_session(ListenerSessionState::Busy(session)),
+            Ok(SessionFinished) => {
+                join_reported_finished_session(ListenerSessionState::Busy(session))
+            }
             Err(_) => ListenerSessionState::Busy(session),
         },
         state => state,
+    }
+}
+
+fn join_reported_finished_session<'scope, R, L, C>(
+    state: ListenerSessionState<'scope, R, L, C>,
+) -> ListenerSessionState<'scope, R, L, C>
+where
+    R: ProgramRunner + Send + 'scope,
+    L: WindowLocator + Send + 'scope,
+    C: CaptureStarter + Send + 'scope,
+{
+    match state {
+        ListenerSessionState::Idle {
+            runner,
+            locator,
+            capture,
+        } => ListenerSessionState::Idle {
+            runner,
+            locator,
+            capture,
+        },
+        ListenerSessionState::Busy(session) => {
+            let (_peer_addr, _result, runner, locator, capture) =
+                log_session_result(session.join());
+            ListenerSessionState::Idle {
+                runner,
+                locator,
+                capture,
+            }
+        }
     }
 }
 
@@ -286,11 +364,17 @@ fn handle_control_client(
                 .cleanup(&mut started)
                 .map_err(|error| format!("清理宿主端程序失败: {error}"));
             match (result, cleanup_result) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Err(error), Ok(())) => Err(error),
-                (Ok(()), Err(error)) => Err(error),
+                (Ok(reason), Ok(())) => {
+                    let _ = SessionEndReason::from(reason);
+                    Ok(())
+                }
+                (Err(error), Ok(())) => Err(error.message),
+                (Ok(reason), Err(error)) => {
+                    let _ = SessionEndReason::from(reason);
+                    Err(error)
+                }
                 (Err(session_error), Err(cleanup_error)) => {
-                    Err(format!("{session_error}；{cleanup_error}"))
+                    Err(format!("{}；{cleanup_error}", session_error.message))
                 }
             }
         }
@@ -312,19 +396,20 @@ fn run_started_session(
     locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
     started: &StartedProgram,
-) -> Result<(), String> {
+) -> Result<HostSessionEndReason, HostSessionError> {
     let window = locate_started_window(config, started, locator).map_err(|error| {
         let message = format!("定位宿主端程序窗口失败: {error}");
         let _ = write_control_error(writer, ErrorCode::WindowNotFound, message.clone());
-        message
+        HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
     })?;
     let (mut session, first_frame) =
         start_capture_session(config, &window, capture).map_err(|error| {
             let message = format!("初始化画面捕获失败: {error}");
             let _ = write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
-            message
+            HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
         })?;
-    write_session_ready(writer, &first_frame)?;
+    write_session_ready(writer, &first_frame)
+        .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
     write_raw_bgra_stream(
         writer,
         stream,
@@ -495,10 +580,13 @@ fn write_raw_bgra_stream(
     first_frame: &CapturedBgraFrame,
     session: &mut dyn CaptureRuntime,
     input_bounds: CaptureInputBounds,
-) -> Result<(), String> {
-    let input_stream = input_reader
-        .try_clone()
-        .map_err(|error| format!("克隆客户端输入事件读取端失败: {error}"))?;
+) -> Result<HostSessionEndReason, HostSessionError> {
+    let input_stream = input_reader.try_clone().map_err(|error| {
+        HostSessionError::new(
+            HostSessionEndReason::TransportFailed,
+            format!("克隆客户端输入事件读取端失败: {error}"),
+        )
+    })?;
     let input_events = spawn_input_event_reader(input_stream, input_bounds);
     write_raw_bgra_stream_with_input_events(writer, first_frame, session, &input_events)
 }
@@ -508,26 +596,37 @@ fn write_raw_bgra_stream_with_input_events(
     first_frame: &CapturedBgraFrame,
     session: &mut dyn CaptureRuntime,
     input_events: &mpsc::Receiver<InputReaderEvent>,
-) -> Result<(), String> {
-    write_message(writer, &ControlMessage::VideoReady)
-        .map_err(|error| format!("写入视频就绪消息失败: {error}"))?;
-    write_raw_bgra_frame_from_capture(writer, first_frame)?;
-    if check_input_reader_events(input_events)? {
-        write_session_goodbye(writer)?;
-        return Ok(());
+) -> Result<HostSessionEndReason, HostSessionError> {
+    write_message(writer, &ControlMessage::VideoReady).map_err(|error| {
+        HostSessionError::new(
+            HostSessionEndReason::TransportFailed,
+            format!("写入视频就绪消息失败: {error}"),
+        )
+    })?;
+    write_raw_bgra_frame_from_capture(writer, first_frame)
+        .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
+    if let Some(reason) = check_input_reader_events(input_events)? {
+        write_session_goodbye(writer).map_err(|message| {
+            HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+        })?;
+        return Ok(reason);
     }
 
     loop {
         let frame = match session.try_next_bgra_frame() {
             Ok(Some(frame)) => frame,
             Ok(None) => {
-                if check_input_reader_events(input_events)? {
-                    write_session_goodbye(writer)?;
-                    return Ok(());
+                if let Some(reason) = check_input_reader_events(input_events)? {
+                    write_session_goodbye(writer).map_err(|message| {
+                        HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+                    })?;
+                    return Ok(reason);
                 }
                 if !session.is_active() {
-                    write_session_goodbye(writer)?;
-                    return Ok(());
+                    write_session_goodbye(writer).map_err(|message| {
+                        HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+                    })?;
+                    return Ok(HostSessionEndReason::CaptureInactive);
                 }
                 thread::sleep(Duration::from_millis(16));
                 continue;
@@ -535,13 +634,20 @@ fn write_raw_bgra_stream_with_input_events(
             Err(error) => {
                 let message = format!("读取后续 raw BGRA 捕获帧失败: {error}");
                 let _ = write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
-                return Err(message);
+                return Err(HostSessionError::new(
+                    HostSessionEndReason::CaptureFailed,
+                    message,
+                ));
             }
         };
-        write_raw_bgra_frame_from_capture(writer, &frame)?;
-        if check_input_reader_events(input_events)? {
-            write_session_goodbye(writer)?;
-            return Ok(());
+        write_raw_bgra_frame_from_capture(writer, &frame).map_err(|message| {
+            HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+        })?;
+        if let Some(reason) = check_input_reader_events(input_events)? {
+            write_session_goodbye(writer).map_err(|message| {
+                HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+            })?;
+            return Ok(reason);
         }
     }
 }
@@ -573,6 +679,7 @@ fn write_raw_bgra_frame_from_capture(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InputReaderEvent {
     StopSession,
+    Disconnected,
     Failed(String),
 }
 
@@ -608,7 +715,7 @@ fn read_input_events_until_stop(
             }
             Err(error) => {
                 if is_control_stream_closed(&error) {
-                    return InputReaderEvent::StopSession;
+                    return InputReaderEvent::Disconnected;
                 }
                 return InputReaderEvent::Failed(format!("读取客户端输入事件失败: {error}"));
             }
@@ -629,11 +736,19 @@ fn is_control_stream_closed(error: &FrameError) -> bool {
     }
 }
 
-fn check_input_reader_events(receiver: &mpsc::Receiver<InputReaderEvent>) -> Result<bool, String> {
+fn check_input_reader_events(
+    receiver: &mpsc::Receiver<InputReaderEvent>,
+) -> Result<Option<HostSessionEndReason>, HostSessionError> {
     match receiver.try_recv() {
-        Ok(InputReaderEvent::StopSession) | Err(mpsc::TryRecvError::Disconnected) => Ok(true),
-        Ok(InputReaderEvent::Failed(error)) => Err(error),
-        Err(mpsc::TryRecvError::Empty) => Ok(false),
+        Ok(InputReaderEvent::StopSession) => Ok(Some(HostSessionEndReason::StopSession)),
+        Ok(InputReaderEvent::Disconnected) | Err(mpsc::TryRecvError::Disconnected) => {
+            Ok(Some(HostSessionEndReason::ClientDisconnected))
+        }
+        Ok(InputReaderEvent::Failed(error)) => Err(HostSessionError::new(
+            HostSessionEndReason::InputFailed,
+            error,
+        )),
+        Err(mpsc::TryRecvError::Empty) => Ok(None),
     }
 }
 
@@ -919,13 +1034,19 @@ mod tests {
         };
         let (_sender, receiver) = mpsc::channel();
 
-        write_raw_bgra_stream_with_input_events(
+        let reason = write_raw_bgra_stream_with_input_events(
             &mut writer,
             &captured_bgra_frame(),
             &mut session,
             &receiver,
         )
         .expect("capture end should be reported as a clean session end");
+
+        assert_eq!(reason, HostSessionEndReason::CaptureInactive);
+        assert_eq!(
+            SessionEndReason::from(reason),
+            SessionEndReason::DesktopUnavailable
+        );
 
         let mut reader = writer.as_slice();
         assert_eq!(
@@ -958,8 +1079,13 @@ mod tests {
         )
         .expect_err("capture read failure should be returned to host");
 
-        assert!(error.contains("读取后续 raw BGRA 捕获帧失败"));
-        assert!(error.contains("D3D readback failed"));
+        assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
+        assert_eq!(
+            SessionEndReason::from(error.reason),
+            SessionEndReason::SessionFailed
+        );
+        assert!(error.message.contains("读取后续 raw BGRA 捕获帧失败"));
+        assert!(error.message.contains("D3D readback failed"));
 
         let mut reader = writer.as_slice();
         assert_eq!(
@@ -1440,13 +1566,19 @@ mod tests {
             .send(InputReaderEvent::StopSession)
             .expect("input stop should send");
 
-        write_raw_bgra_stream_with_input_events(
+        let reason = write_raw_bgra_stream_with_input_events(
             &mut writer,
             &captured_bgra_frame(),
             &mut session,
             &receiver,
         )
         .expect("stop session should end raw stream without error");
+
+        assert_eq!(reason, HostSessionEndReason::StopSession);
+        assert_eq!(
+            SessionEndReason::from(reason),
+            SessionEndReason::ServiceRequested
+        );
 
         let mut reader = writer.as_slice();
         assert_eq!(
@@ -1747,7 +1879,7 @@ mod tests {
     }
 
     fn run_short_client_session(endpoint: SocketAddr) -> RawBgraFrame {
-        let mut client = connect_and_start_session(endpoint);
+        let mut client = connect_and_start_session_when_ready(endpoint);
         read_message(&mut client).expect("session ready should read");
         read_message(&mut client).expect("video ready should read");
         let frame = read_raw_bgra_frame(&mut client).expect("raw frame should read");
@@ -1758,5 +1890,34 @@ mod tests {
             ControlMessage::Goodbye
         );
         frame
+    }
+
+    fn connect_and_start_session_when_ready(endpoint: SocketAddr) -> TcpStream {
+        let mut last_error = None;
+        for _ in 0..50 {
+            let mut client = TcpStream::connect(endpoint).expect("client should connect");
+            send_client_hello(&mut client).expect("client hello should write");
+            match read_message(&mut client).expect("host hello or busy should read") {
+                ControlMessage::Hello { version: 1 } => {
+                    write_message(&mut client, &ControlMessage::StartSession)
+                        .expect("start session should write");
+                    return client;
+                }
+                ControlMessage::Error {
+                    code: ErrorCode::Busy,
+                    message,
+                } => {
+                    last_error = Some(message);
+                    thread::sleep(Duration::from_millis(20));
+                }
+                message => {
+                    panic!("unexpected host response while waiting for session: {message:?}")
+                }
+            }
+        }
+        panic!(
+            "host should accept a new session after previous cleanup, last busy: {:?}",
+            last_error
+        );
     }
 }
