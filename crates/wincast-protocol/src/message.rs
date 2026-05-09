@@ -116,6 +116,9 @@ pub enum RawBgraReadbackFrameError {
 pub enum ErrorCode {
     Busy,
     InvalidConfig,
+    NoUserLoggedIn,
+    SessionLocked,
+    AgentUnavailable,
     ProgramLaunchFailed,
     WindowNotFound,
     CaptureFailed,

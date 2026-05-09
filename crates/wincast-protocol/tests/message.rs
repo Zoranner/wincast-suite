@@ -1,11 +1,32 @@
 use wincast_protocol::{
     config::VideoCodec,
+    frame::{decode_message, encode_message},
     input::{ButtonState, InputEvent, Modifiers},
     message::{
-        ControlMessage, EncodedVideoFrame, EncodedVideoFrameError, MAX_ENCODED_VIDEO_FRAME_BYTES,
-        MAX_RAW_BGRA_READBACK_BYTES, RawBgraReadbackFrame, RawBgraReadbackFrameError,
+        ControlMessage, EncodedVideoFrame, EncodedVideoFrameError, ErrorCode,
+        MAX_ENCODED_VIDEO_FRAME_BYTES, MAX_RAW_BGRA_READBACK_BYTES, RawBgraReadbackFrame,
+        RawBgraReadbackFrameError,
     },
 };
+
+#[test]
+fn session_state_error_codes_round_trip_in_error_messages() {
+    for code in [
+        ErrorCode::NoUserLoggedIn,
+        ErrorCode::SessionLocked,
+        ErrorCode::AgentUnavailable,
+    ] {
+        let message = ControlMessage::Error {
+            code,
+            message: "宿主端会话状态不可用".to_owned(),
+        };
+
+        let frame = encode_message(&message).expect("error message should encode");
+        let decoded = decode_message(&frame).expect("error message should decode");
+
+        assert_eq!(decoded, message);
+    }
+}
 
 #[test]
 fn input_event_message_keeps_keyboard_state() {
