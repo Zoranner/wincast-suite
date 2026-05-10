@@ -5,7 +5,10 @@ use wincast_protocol::{
     frame::{FrameError, MAX_FRAME_LEN, decode_message, read_message, write_message},
     input::{ButtonState, InputEvent, Modifiers},
     message::{ControlMessage, EncodedVideoFrame, ErrorCode, RawBgraReadbackFrame},
-    raw_frame::{RawBgraFrame, RawFrameError, read_raw_bgra_frame, write_raw_bgra_frame},
+    raw_frame::{
+        MAX_RAW_BGRA_FRAME_BYTES, RawBgraFrame, RawFrameError, read_raw_bgra_frame,
+        write_raw_bgra_frame,
+    },
 };
 
 #[test]
@@ -177,6 +180,52 @@ fn raw_bgra_binary_frame_reads_consecutive_frames_from_same_stream() {
 }
 
 #[test]
+fn raw_bgra_stream_item_reads_raw_and_control_messages_from_same_stream() {
+    let first = RawBgraFrame {
+        width: 2,
+        height: 2,
+        row_pitch: 8,
+        sequence_number: 1,
+        timestamp_ns: 10,
+        bytes: vec![1; 16],
+    };
+    let message = ControlMessage::Goodbye;
+    let second = RawBgraFrame {
+        width: 1,
+        height: 1,
+        row_pitch: 4,
+        sequence_number: 2,
+        timestamp_ns: 20,
+        bytes: vec![2; 4],
+    };
+    let mut bytes = Vec::new();
+    write_raw_bgra_frame(&mut bytes, &first).expect("first raw frame should encode");
+    write_message(&mut bytes, &message).expect("control message should encode");
+    write_raw_bgra_frame(&mut bytes, &second).expect("second raw frame should encode");
+
+    let mut cursor = Cursor::new(bytes);
+    let decoded_first = wincast_protocol::raw_frame::read_raw_bgra_stream_item(&mut cursor)
+        .expect("first stream item should decode");
+    let decoded_message = wincast_protocol::raw_frame::read_raw_bgra_stream_item(&mut cursor)
+        .expect("control stream item should decode");
+    let decoded_second = wincast_protocol::raw_frame::read_raw_bgra_stream_item(&mut cursor)
+        .expect("second stream item should decode");
+
+    assert_eq!(
+        decoded_first,
+        wincast_protocol::raw_frame::RawBgraStreamItem::Frame(first)
+    );
+    assert_eq!(
+        decoded_message,
+        wincast_protocol::raw_frame::RawBgraStreamItem::Control(message)
+    );
+    assert_eq!(
+        decoded_second,
+        wincast_protocol::raw_frame::RawBgraStreamItem::Frame(second)
+    );
+}
+
+#[test]
 fn raw_bgra_stream_item_reads_binary_frame_without_json_control_envelope() {
     let frame = RawBgraFrame {
         width: 2,
@@ -231,6 +280,35 @@ fn raw_bgra_stream_item_rejects_oversized_control_message_after_unknown_magic() 
 }
 
 #[test]
+fn raw_bgra_stream_item_allows_control_message_at_length_limit_until_payload_read() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(MAX_FRAME_LEN as u32).to_be_bytes());
+
+    let err = wincast_protocol::raw_frame::read_raw_bgra_stream_item(&mut Cursor::new(bytes))
+        .expect_err("missing max-sized control payload should fail while reading payload");
+
+    assert_eq!(
+        err,
+        RawFrameError::Io(std::io::ErrorKind::UnexpectedEof.into())
+    );
+}
+
+#[test]
+fn raw_bgra_stream_item_wraps_invalid_control_payload_after_unknown_magic() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&4_u32.to_be_bytes());
+    bytes.extend_from_slice(b"nope");
+
+    let err = wincast_protocol::raw_frame::read_raw_bgra_stream_item(&mut Cursor::new(bytes))
+        .expect_err("invalid JSON control payload should fail");
+
+    assert!(matches!(
+        err,
+        RawFrameError::ControlFrame(FrameError::Decode(_))
+    ));
+}
+
+#[test]
 fn raw_bgra_binary_frame_rejects_invalid_payload_shape() {
     let frame = RawBgraFrame {
         width: 2,
@@ -247,6 +325,95 @@ fn raw_bgra_binary_frame_rejects_invalid_payload_shape() {
             actual: 15,
             expected: 16,
         })
+    );
+}
+
+#[test]
+fn raw_bgra_binary_frame_rejects_payload_above_limit_before_reading_payload() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"WCBG");
+    bytes.extend_from_slice(&1_u32.to_be_bytes());
+    bytes.extend_from_slice(&((MAX_RAW_BGRA_FRAME_BYTES / 4 + 1) as u32).to_be_bytes());
+    bytes.extend_from_slice(&4_u32.to_be_bytes());
+    bytes.extend_from_slice(&9_u64.to_be_bytes());
+    bytes.extend_from_slice(&123_456_u64.to_be_bytes());
+    bytes.extend_from_slice(&((MAX_RAW_BGRA_FRAME_BYTES + 4) as u32).to_be_bytes());
+
+    let err = read_raw_bgra_frame(&mut Cursor::new(bytes))
+        .expect_err("oversized raw payload should fail before payload read");
+
+    assert_eq!(
+        err,
+        RawFrameError::PayloadTooLarge {
+            actual: MAX_RAW_BGRA_FRAME_BYTES + 4,
+            max: MAX_RAW_BGRA_FRAME_BYTES,
+        }
+    );
+}
+
+#[test]
+fn raw_bgra_binary_frame_rejects_row_pitch_smaller_than_bgra_width() {
+    let frame = RawBgraFrame {
+        width: 2,
+        height: 1,
+        row_pitch: 7,
+        sequence_number: 1,
+        timestamp_ns: 10,
+        bytes: vec![0; 7],
+    };
+
+    assert_eq!(frame.validate(), Err(RawFrameError::InvalidRowPitch));
+}
+
+#[test]
+fn raw_bgra_binary_frame_rejects_width_to_bgra_row_pitch_overflow() {
+    let frame = RawBgraFrame {
+        width: u32::MAX,
+        height: 1,
+        row_pitch: u32::MAX,
+        sequence_number: 1,
+        timestamp_ns: 10,
+        bytes: Vec::new(),
+    };
+
+    assert_eq!(frame.validate(), Err(RawFrameError::SizeOverflow));
+}
+
+#[test]
+fn raw_bgra_binary_frame_rejects_row_pitch_height_overflow() {
+    let frame = RawBgraFrame {
+        width: 1,
+        height: u32::MAX,
+        row_pitch: u32::MAX,
+        sequence_number: 1,
+        timestamp_ns: 10,
+        bytes: Vec::new(),
+    };
+
+    assert_eq!(frame.validate(), Err(RawFrameError::SizeOverflow));
+}
+
+#[test]
+fn raw_bgra_binary_frame_rejects_length_mismatch_after_payload_read() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"WCBG");
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
+    bytes.extend_from_slice(&8_u32.to_be_bytes());
+    bytes.extend_from_slice(&9_u64.to_be_bytes());
+    bytes.extend_from_slice(&123_456_u64.to_be_bytes());
+    bytes.extend_from_slice(&15_u32.to_be_bytes());
+    bytes.extend_from_slice(&[0_u8; 15]);
+
+    let err = read_raw_bgra_frame(&mut Cursor::new(bytes))
+        .expect_err("payload length inconsistent with shape should fail");
+
+    assert_eq!(
+        err,
+        RawFrameError::InvalidPayloadLength {
+            actual: 15,
+            expected: 16,
+        }
     );
 }
 
