@@ -45,6 +45,12 @@ Host 侧还提供最小 TCP loopback transport，可把现有 `ServiceIpcEndpoin
 cargo test -p wincast-host service_ipc::tests::loopback_transport_round_trips_service_and_agent_messages
 ```
 
-这仍不代表已经接入命名管道权限模型、Service 拉起 Agent、重连、心跳超时或消息投递重试策略。
+Service 侧还提供最小 Agent 状态查询 coordinator，可验证 `QueryStatus` / `StatusChanged` 的编排语义：
+
+```powershell
+cargo test -p wincast-host service_agent
+```
+
+这仍不代表已经接入命名管道权限模型、Service 拉起 Agent、重连、心跳超时、完整会话命令编排或消息投递重试策略。
 
 `wincast-host service` 子命令当前通过可测试的 `ServiceManager` 占位抽象固定安装、卸载、启动、停止和状态查询的 CLI 边界。它仍不会执行真实 Windows Service 操作；验证时应把结果理解为管理抽象占位行为，而不是系统服务已安装或已运行。

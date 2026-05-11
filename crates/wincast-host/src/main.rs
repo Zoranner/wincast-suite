@@ -7,6 +7,7 @@ mod agent;
 mod agent_runtime;
 mod program;
 mod service;
+pub mod service_agent;
 pub mod service_ipc;
 pub mod session_events;
 pub mod session_state;

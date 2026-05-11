@@ -106,7 +106,7 @@ docs/
 
 当前 `wincast-host` 与 `wincast-client` 已在配置读取、配置校验和 TCP 控制通道握手基础上接入 raw BGRA 捕获传输、SDL2 渲染和基础输入回传。若宿主端提示编码传输未实现，应理解为 H.264/WebRTC 等编码传输路线尚未接入，不代表当前 raw BGRA 链路不可用；当前 `run` 的默认可用画面链路就是 raw BGRA。
 
-会话状态与 Service/Agent 分层当前仍是底座能力：`wincast-host` 已新增纯状态机，用于表达未登录、已登录、锁屏、Agent 可用、会话运行、会话暂停和错误状态之间的转换，并补齐平台事件到状态机事件的映射边界；`wincast-protocol` 已新增 Service 与 Host Agent 的 IPC 消息模型和长度前缀 JSON frame 编解码，用于表达 Agent 在线状态、启动会话、结束会话、锁屏通知和错误上报；`wincast-host` 已有可测试的通用 Read/Write IPC endpoint，并新增最小 TCP loopback transport，用于复用上述 frame 完成 Service/Agent 双向 round-trip；前台 Host Agent 运行入口也已从 CLI 命令分发中抽出，便于后续 Service 复用。上述能力目前只约束内存状态、可序列化消息、通用 frame 传输、本机 loopback 连接和 Agent runtime 边界，不代表已经实现 Windows API 监听、真实 Windows Service 或 Service 拉起 Host Agent。
+会话状态与 Service/Agent 分层当前仍是底座能力：`wincast-host` 已新增纯状态机，用于表达未登录、已登录、锁屏、Agent 可用、会话运行、会话暂停和错误状态之间的转换，并补齐平台事件到状态机事件的映射边界；`wincast-protocol` 已新增 Service 与 Host Agent 的 IPC 消息模型和长度前缀 JSON frame 编解码，用于表达 Agent 在线状态、启动会话、结束会话、锁屏通知和错误上报；`wincast-host` 已有可测试的通用 Read/Write IPC endpoint，并新增最小 TCP loopback transport，用于复用上述 frame 完成 Service/Agent 双向 round-trip；Service 侧已具备最小 Agent 状态查询 coordinator，可通过 `QueryStatus` 获取 Agent 上报状态；前台 Host Agent 运行入口也已从 CLI 命令分发中抽出，便于后续 Service 复用。上述能力目前只约束内存状态、可序列化消息、通用 frame 传输、本机 loopback 连接、状态查询 coordinator 和 Agent runtime 边界，不代表已经实现 Windows API 监听、真实 Windows Service 或 Service 拉起 Host Agent。
 
 宿主端 CLI：
 
@@ -155,7 +155,7 @@ Host Agent 负责：
 
 Service 不直接做窗口捕获和输入注入，避免 Session 0 与交互桌面隔离导致能力不可用或行为不可预测。
 
-当前尚未实现 Windows Service 安装、卸载、启动、停止和开机自启，也尚未实现 Service 拉起 Host Agent、Agent 保活、命名管道权限模型、重连心跳或 Service 侧端口编排。现有 IPC 类型、长度前缀 JSON frame 和最小 TCP loopback transport 只是 Service 与 Agent 之间通信的底座，ServiceManager 也仍是可测试占位抽象。
+当前尚未实现 Windows Service 安装、卸载、启动、停止和开机自启，也尚未实现 Service 拉起 Host Agent、Agent 保活、命名管道权限模型、重连心跳或 Service 侧端口编排。现有 IPC 类型、长度前缀 JSON frame、最小 TCP loopback transport 和 Agent 状态查询 coordinator 只是 Service 与 Agent 之间通信的底座，ServiceManager 也仍是可测试占位抽象。
 
 宿主端启动流程：
 
@@ -265,7 +265,7 @@ Host -> Client: Goodbye
 
 当前 raw BGRA 阶段不需要 SDP offer/answer 或 ICE candidate。后续接入 WebRTC 时，控制通道再承载 SDP offer/answer 和 ICE candidate，信令过程隐藏在 `StartSession` 到 `VideoReady` 之间。
 
-Service 与 Host Agent 的本机 IPC 消息模型已经独立放在协议 crate 中，覆盖 Service 向 Agent 发起会话启动、停止、锁屏通知，以及 Agent 向 Service 上报在线状态、会话已启动、会话已结束和错误。当前已补齐长度前缀 JSON frame 编解码，并在 Host 侧增加通用 Read/Write endpoint 和最小 TCP loopback transport，便于后续继续替换或扩展到命名管道、Unix domain socket 等通道；现阶段还没有定义重连、心跳超时和消息投递重试策略。
+Service 与 Host Agent 的本机 IPC 消息模型已经独立放在协议 crate 中，覆盖 Service 向 Agent 发起会话启动、停止、锁屏通知，以及 Agent 向 Service 上报在线状态、会话已启动、会话已结束和错误。当前已补齐长度前缀 JSON frame 编解码，并在 Host 侧增加通用 Read/Write endpoint、最小 TCP loopback transport 和 Service 侧 Agent 状态查询 coordinator，便于后续继续替换或扩展到命名管道、Unix domain socket 等通道；现阶段还没有定义重连、心跳超时和消息投递重试策略，也尚未实现完整会话启动/停止编排。
 
 ## 配置设计
 
@@ -384,7 +384,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 - 当前 raw BGRA 主线已形成可用画面链路；客户端 `run` 已支持启动连接阶段的 `--retries` 和 `--retry-delay-ms` 有限重试；继续补齐资源释放、会话中断恢复、窗口关闭和错误上报，先让前台 Host Agent 形态稳定。
 - 会话状态纯模型、平台事件映射边界和 Windows 会话通知注册/注销边界已完成；后续补齐消息循环、活动会话检测和桌面锁定事件分发，把登录、锁屏、解锁和注销事件转换为现有状态机事件。
-- Service 与 Host Agent 的 IPC 消息模型、长度前缀 JSON frame 底座、Host 侧通用 endpoint 和最小 TCP loopback transport 已完成；后续继续处理连接建立、断开、超时、错误传播和权限边界。
+- Service 与 Host Agent 的 IPC 消息模型、长度前缀 JSON frame 底座、Host 侧通用 endpoint、最小 TCP loopback transport 和 Agent 状态查询 coordinator 已完成；后续继续处理连接建立、断开、超时、错误传播、权限边界和完整会话命令编排。
 - Host Agent 运行核心已从 CLI 入口中剥离，网络会话、程序生命周期、捕获和输入编排已有可复用 runtime 边界；后续由 Service 拉起时复用该边界。
 - `service` 命令已具备可测试的 ServiceManager 占位抽象；后续把该抽象接到真实 Windows Service 安装、卸载、启动、停止和开机自启，Service 只负责编排，不直接捕获和注入输入。
 - 接入 Service 拉起 Host Agent 的流程，并把 Agent 在线状态、桌面可用状态和会话状态通过 IPC 回传给 Service。
