@@ -7,6 +7,7 @@ use std::{
 
 use crate::{
     program::{ProgramRunner, StartedProgram},
+    session_state::RemoteSessionStatus,
     window::{WindowCandidate, WindowLookupError, find_main_window},
 };
 use wincast_capture::{
@@ -341,6 +342,25 @@ fn handle_control_client(
     locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
 ) -> Result<(), String> {
+    let mut session_gate = ForegroundRunSessionGate;
+    handle_control_client_with_session_gate(
+        stream,
+        config,
+        runner,
+        locator,
+        capture,
+        &mut session_gate,
+    )
+}
+
+fn handle_control_client_with_session_gate(
+    stream: &mut TcpStream,
+    config: &HostConfig,
+    runner: &mut impl ProgramRunner,
+    locator: &mut impl WindowLocator,
+    capture: &mut impl CaptureStarter,
+    session_gate: &mut impl SessionGate,
+) -> Result<(), String> {
     let mut writer = stream
         .try_clone()
         .map_err(|error| format!("克隆控制连接写入端失败: {error}"))?;
@@ -348,6 +368,7 @@ fn handle_control_client(
 
     match read_message(stream).map_err(|error| format!("读取控制消息失败: {error}"))? {
         ControlMessage::StartSession => {
+            ensure_remote_session_allowed(&mut writer, session_gate)?;
             let mut started =
                 crate::program::launch_with_runner(config, runner).map_err(|error| {
                     let message = format!("启动宿主端程序失败: {error}");
@@ -386,6 +407,31 @@ fn handle_control_client(
             )?;
             Err("控制消息顺序无效，期望 StartSession".to_owned())
         }
+    }
+}
+
+trait SessionGate {
+    fn remote_session_status(&mut self) -> RemoteSessionStatus;
+}
+
+struct ForegroundRunSessionGate;
+
+impl SessionGate for ForegroundRunSessionGate {
+    fn remote_session_status(&mut self) -> RemoteSessionStatus {
+        RemoteSessionStatus::Allowed
+    }
+}
+
+fn ensure_remote_session_allowed(
+    writer: &mut impl std::io::Write,
+    session_gate: &mut impl SessionGate,
+) -> Result<(), String> {
+    match session_gate.remote_session_status().to_protocol_error() {
+        Some((code, message)) => {
+            write_control_error(writer, code, message.to_owned())?;
+            Err(message.to_owned())
+        }
+        None => Ok(()),
     }
 }
 
@@ -771,6 +817,32 @@ fn run_control_listener_once_with_runtime(
 }
 
 #[cfg(test)]
+fn run_control_listener_once_with_runtime_and_session_gate(
+    listener: TcpListener,
+    config: &HostConfig,
+    runner: &mut impl ProgramRunner,
+    locator: &mut impl WindowLocator,
+    capture: &mut impl CaptureStarter,
+    session_gate: &mut impl SessionGate,
+) -> Result<SocketAddr, String> {
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| format!("读取宿主端监听地址失败: {error}"))?;
+    let (mut stream, _peer_addr) = listener
+        .accept()
+        .map_err(|error| format!("接受客户端连接失败: {error}"))?;
+    handle_control_client_with_session_gate(
+        &mut stream,
+        config,
+        runner,
+        locator,
+        capture,
+        session_gate,
+    )?;
+    Ok(local_addr)
+}
+
+#[cfg(test)]
 fn run_control_listener_n_with_runtime(
     listener: TcpListener,
     config: &HostConfig,
@@ -799,6 +871,7 @@ fn run_control_listener_n_with_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_state::{ClientSessionErrorCode, RemoteSessionStatus};
     use crate::{program, window};
     use std::{
         collections::VecDeque,
@@ -981,6 +1054,65 @@ mod tests {
         assert_eq!(host_result.expect("host should keep listening"), endpoint);
         assert_eq!(launched.len(), 2);
         assert_eq!(cleaned, vec![42, 43]);
+    }
+
+    #[test]
+    fn host_rejects_start_session_when_remote_session_is_locked_before_launching_program() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("listener addr should be available");
+        let config = host_config(endpoint.to_string());
+        let mut runner = RecordingProgramRunner::default();
+        let mut locator = RecordingWindowLocator::default();
+        let mut capture = RecordingCaptureStarter::default();
+        let mut session_gate = FixedSessionGate(RemoteSessionStatus::Rejected {
+            code: ClientSessionErrorCode::SessionLocked,
+            message: "Windows 会话已锁定，请先解锁后再启动远程会话。",
+        });
+        let host = thread::spawn(move || {
+            let result = run_control_listener_once_with_runtime_and_session_gate(
+                listener,
+                &config,
+                &mut runner,
+                &mut locator,
+                &mut capture,
+                &mut session_gate,
+            );
+            (
+                result,
+                runner.launched,
+                runner.cleaned,
+                locator.lookups,
+                capture.targets,
+            )
+        });
+
+        let mut client = TcpStream::connect(endpoint).expect("client should connect");
+        send_client_hello(&mut client).expect("client hello should write");
+        assert_eq!(
+            read_message(&mut client).expect("host hello should read"),
+            ControlMessage::Hello { version: 1 }
+        );
+        write_message(&mut client, &ControlMessage::StartSession)
+            .expect("start session should write");
+
+        assert_eq!(
+            read_message(&mut client).expect("session rejection should read"),
+            ControlMessage::Error {
+                code: ErrorCode::SessionLocked,
+                message: "Windows 会话已锁定，请先解锁后再启动远程会话。".to_owned(),
+            }
+        );
+
+        let (host_result, launched, cleaned, lookups, capture_targets) =
+            host.join().expect("host thread should finish");
+        let error = host_result.expect_err("host should report session rejection");
+        assert!(error.contains("Windows 会话已锁定"));
+        assert!(launched.is_empty());
+        assert!(cleaned.is_empty());
+        assert!(lookups.is_empty());
+        assert!(capture_targets.is_empty());
     }
 
     #[test]
@@ -1687,6 +1819,14 @@ mod tests {
                 attempts: self.attempts.clone(),
                 block_after_empty: self.block_after_empty.clone(),
             }))
+        }
+    }
+
+    struct FixedSessionGate(RemoteSessionStatus);
+
+    impl SessionGate for FixedSessionGate {
+        fn remote_session_status(&mut self) -> RemoteSessionStatus {
+            self.0
         }
     }
 

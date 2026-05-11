@@ -6,13 +6,14 @@ use wincast_protocol::config::HostConfig;
 mod agent;
 mod program;
 mod service;
+pub mod session_events;
 pub mod session_state;
 mod window;
 
 use program::StdProgramRunner;
 #[cfg(test)]
 use service::ServiceStatus;
-use service::{PendingServiceManager, ServiceManager};
+use service::{DefaultServiceManager, ServiceManager};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "WinCast Windows 宿主端")]
@@ -70,7 +71,7 @@ fn run(command: Command, config_path: &PathBuf) -> ExitCode {
 }
 
 fn execute_command(command: Command, config_path: &PathBuf) -> Result<String, String> {
-    let mut service_manager = PendingServiceManager;
+    let mut service_manager = DefaultServiceManager::default();
     execute_command_with_service_manager(command, config_path, &mut service_manager)
 }
 
@@ -240,7 +241,7 @@ mod tests {
 
     #[test]
     fn pending_service_status_reports_clear_pending_state() {
-        let mut manager = PendingServiceManager;
+        let mut manager = DefaultServiceManager::default();
         let message = execute_command_with_service_manager(
             Command::Service(ServiceCommand::Status),
             &PathBuf::from("unused.toml"),
