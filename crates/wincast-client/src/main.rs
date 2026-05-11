@@ -1,6 +1,6 @@
-use std::{fs, net::TcpStream, path::PathBuf, process::ExitCode};
+use std::{fs, net::TcpStream, path::PathBuf, process::ExitCode, time::Duration};
 #[cfg(any(test, target_os = "linux"))]
-use std::{sync::mpsc, thread, time::Duration};
+use std::{sync::mpsc, thread};
 
 use clap::{Parser, Subcommand};
 use wincast_protocol::{
@@ -32,21 +32,40 @@ enum Command {
     /// 校验客户端配置文件
     Validate,
     /// 校验配置并进入客户端运行入口
-    Run,
+    Run {
+        /// 宿主端可恢复状态或连接失败后的重试次数
+        #[arg(long, default_value_t = 0)]
+        retries: u32,
+        /// 每次重试前等待的毫秒数
+        #[arg(long, default_value_t = 1_000)]
+        retry_delay_ms: u64,
+    },
     /// 输出客户端支持的 Linux 目标平台
     Targets,
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let command = args.command.unwrap_or(Command::Run);
+    let command = args.command.unwrap_or(Command::Run {
+        retries: 0,
+        retry_delay_ms: 1_000,
+    });
     run(command, &args.config)
 }
 
 fn run(command: Command, config_path: &PathBuf) -> ExitCode {
     let result = match command {
         Command::Validate => validate_config(config_path),
-        Command::Run => run_client(config_path),
+        Command::Run {
+            retries,
+            retry_delay_ms,
+        } => run_client(
+            config_path,
+            RetryOptions {
+                retries,
+                retry_delay: Duration::from_millis(retry_delay_ms),
+            },
+        ),
         Command::Targets => Ok(supported_targets_message()),
     };
 
@@ -71,36 +90,130 @@ fn validate_config(path: &PathBuf) -> Result<String, String> {
     ))
 }
 
-fn run_client(path: &PathBuf) -> Result<String, String> {
+fn run_client(path: &PathBuf, retry_options: RetryOptions) -> Result<String, String> {
     let config = load_config(path)?;
-    run_client_with_config(&config)
+    run_with_retry(
+        &retry_options,
+        || run_client_attempt(&config),
+        std::thread::sleep,
+    )
 }
 
-fn run_client_with_config(config: &ClientConfig) -> Result<String, String> {
+fn run_client_attempt(config: &ClientConfig) -> Result<String, ClientRunError> {
     let endpoint = config.endpoint();
-    let mut stream = TcpStream::connect(&endpoint)
-        .map_err(|error| format!("无法连接宿主端 {endpoint}: {error}"))?;
+    let mut stream = TcpStream::connect(&endpoint).map_err(|error| {
+        ClientRunError::Connection(format!("无法连接宿主端 {endpoint}: {error}"))
+    })?;
 
-    send_client_hello(&mut stream).map_err(format_handshake_error)?;
-    read_host_hello(&mut stream).map_err(format_handshake_error)?;
-    send_start_session(&mut stream).map_err(format_handshake_error)?;
+    send_client_hello(&mut stream).map_err(ClientRunError::Handshake)?;
+    read_host_hello(&mut stream).map_err(ClientRunError::Handshake)?;
+    send_start_session(&mut stream).map_err(ClientRunError::Handshake)?;
     let render_mode = ClientRenderMode::for_current_platform();
     read_session_start_response(&mut stream, render_mode)?;
 
     Ok(control_channel_ready_message(config))
 }
 
+#[cfg(test)]
+fn run_client_with_config(config: &ClientConfig) -> Result<String, String> {
+    run_client_attempt(config).map_err(ClientRunError::into_message)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RetryOptions {
+    retries: u32,
+    retry_delay: Duration,
+}
+
+#[derive(Debug)]
+enum ClientRunError {
+    Connection(String),
+    Handshake(HandshakeError),
+    HostStatus { code: ErrorCode, message: String },
+    Fatal(String),
+}
+
+impl ClientRunError {
+    #[cfg(test)]
+    fn host_status(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::HostStatus {
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn is_retriable(&self) -> bool {
+        match self {
+            Self::Connection(_) => true,
+            Self::Handshake(HandshakeError::HostRejected { code, .. })
+            | Self::HostStatus { code, .. } => is_retriable_host_status(*code),
+            Self::Handshake(_) | Self::Fatal(_) => false,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            Self::Connection(message) | Self::Fatal(message) => message,
+            Self::Handshake(error) => format_handshake_error(error),
+            Self::HostStatus { code, message } => format_host_error(code, message),
+        }
+    }
+}
+
+fn run_with_retry(
+    options: &RetryOptions,
+    mut attempt: impl FnMut() -> Result<String, ClientRunError>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<String, String> {
+    let max_attempts = options.retries.saturating_add(1);
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match attempt() {
+            Ok(message) => return Ok(message),
+            Err(error) => {
+                let should_retry = error.is_retriable() && attempts < max_attempts;
+                if !should_retry {
+                    if max_attempts == 1 {
+                        return Err(error.into_message());
+                    }
+                    return Err(format!(
+                        "客户端运行尝试 {attempts} 次后失败，最后原因: {}",
+                        error.into_message()
+                    ));
+                }
+                sleep(options.retry_delay);
+            }
+        }
+    }
+}
+
+fn is_retriable_host_status(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Busy
+            | ErrorCode::NoUserLoggedIn
+            | ErrorCode::SessionLocked
+            | ErrorCode::AgentUnavailable
+    )
+}
+
 fn read_session_start_response(
     stream: &mut TcpStream,
     render_mode: ClientRenderMode,
-) -> Result<(), String> {
-    match read_message(stream).map_err(|error| format!("读取宿主端会话响应失败: {error}"))?
+) -> Result<(), ClientRunError> {
+    match read_message(stream)
+        .map_err(|error| ClientRunError::Fatal(format!("读取宿主端会话响应失败: {error}")))?
     {
         ControlMessage::SessionReady { width, height } => {
             read_first_readback_frame(stream, render_mode, width, height)
         }
-        ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
-        message => Err(format!("宿主端会话响应无效: {message:?}")),
+        ControlMessage::Error { code, message } => {
+            Err(ClientRunError::HostStatus { code, message })
+        }
+        message => Err(ClientRunError::Fatal(format!(
+            "宿主端会话响应无效: {message:?}"
+        ))),
     }
 }
 
@@ -109,14 +222,23 @@ fn read_first_readback_frame(
     render_mode: ClientRenderMode,
     width: u32,
     height: u32,
-) -> Result<(), String> {
-    match read_message(stream).map_err(|error| format!("读取宿主端首帧失败: {error}"))? {
-        ControlMessage::RawBgraReadbackFrame(frame) => validate_readback_frame(&frame),
+) -> Result<(), ClientRunError> {
+    match read_message(stream)
+        .map_err(|error| ClientRunError::Fatal(format!("读取宿主端首帧失败: {error}")))?
+    {
+        ControlMessage::RawBgraReadbackFrame(frame) => {
+            validate_readback_frame(&frame).map_err(ClientRunError::Fatal)
+        }
         ControlMessage::VideoReady => {
             read_first_raw_binary_frame(stream, render_mode, width, height)
+                .map_err(ClientRunError::Fatal)
         }
-        ControlMessage::Error { code, message } => Err(format_host_error(code, message)),
-        message => Err(format!("宿主端首帧消息无效: {message:?}")),
+        ControlMessage::Error { code, message } => {
+            Err(ClientRunError::HostStatus { code, message })
+        }
+        message => Err(ClientRunError::Fatal(format!(
+            "宿主端首帧消息无效: {message:?}"
+        ))),
     }
 }
 
@@ -1026,8 +1148,156 @@ mod tests {
 
         assert_eq!(args.config, PathBuf::from("custom-client.toml"));
         match args.command {
-            Some(Command::Run) => {}
+            Some(Command::Run {
+                retries,
+                retry_delay_ms,
+            }) => {
+                assert_eq!(retries, 0);
+                assert_eq!(retry_delay_ms, 1_000);
+            }
             _ => panic!("run command should parse"),
+        }
+    }
+
+    #[test]
+    fn default_retry_policy_does_not_retry() {
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let options = RetryOptions {
+            retries: 0,
+            retry_delay: Duration::from_millis(10),
+        };
+
+        let error = run_with_retry(
+            &options,
+            || {
+                attempts += 1;
+                Err(ClientRunError::host_status(
+                    ErrorCode::Busy,
+                    "宿主端已有客户端连接",
+                ))
+            },
+            |delay| sleeps.push(delay),
+        )
+        .expect_err("default retry policy should fail after one attempt");
+
+        assert_eq!(attempts, 1);
+        assert!(sleeps.is_empty());
+        assert!(error.contains("宿主端忙碌"));
+        assert!(!error.contains("尝试 1 次后失败"));
+    }
+
+    #[test]
+    fn retry_policy_succeeds_after_busy_status_recovers() {
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let options = RetryOptions {
+            retries: 2,
+            retry_delay: Duration::from_millis(25),
+        };
+
+        let message = run_with_retry(
+            &options,
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(ClientRunError::host_status(
+                        ErrorCode::Busy,
+                        "宿主端已有客户端连接",
+                    ))
+                } else {
+                    Ok("已连接".to_owned())
+                }
+            },
+            |delay| sleeps.push(delay),
+        )
+        .expect("busy status should be retried and recover");
+
+        assert_eq!(message, "已连接");
+        assert_eq!(attempts, 2);
+        assert_eq!(sleeps, vec![Duration::from_millis(25)]);
+    }
+
+    #[test]
+    fn retry_policy_reports_last_session_locked_error_after_limit() {
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let options = RetryOptions {
+            retries: 2,
+            retry_delay: Duration::from_millis(15),
+        };
+
+        let error = run_with_retry(
+            &options,
+            || {
+                attempts += 1;
+                Err(ClientRunError::host_status(
+                    ErrorCode::SessionLocked,
+                    format!("第 {attempts} 次仍锁屏"),
+                ))
+            },
+            |delay| sleeps.push(delay),
+        )
+        .expect_err("session locked should fail after retry limit");
+
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            sleeps,
+            vec![Duration::from_millis(15), Duration::from_millis(15)]
+        );
+        assert!(error.contains("尝试 3 次后失败"));
+        assert!(error.contains("宿主端 Windows 会话已锁屏"));
+        assert!(error.contains("第 3 次仍锁屏"));
+    }
+
+    #[test]
+    fn retry_policy_does_not_retry_unsupported_version() {
+        let mut attempts = 0;
+        let options = RetryOptions {
+            retries: 3,
+            retry_delay: Duration::from_millis(10),
+        };
+
+        let error = run_with_retry(
+            &options,
+            || {
+                attempts += 1;
+                Err(ClientRunError::Handshake(
+                    HandshakeError::UnsupportedVersion,
+                ))
+            },
+            |_| panic!("unsupported version should not sleep"),
+        )
+        .expect_err("unsupported version should not retry");
+
+        assert_eq!(attempts, 1);
+        assert!(error.contains("尝试 1 次后失败"));
+        assert!(error.contains("协议版本不匹配"));
+    }
+
+    #[test]
+    fn parses_run_command_retry_options() {
+        let args = Args::try_parse_from([
+            "wincast-client",
+            "--config",
+            "custom-client.toml",
+            "run",
+            "--retries",
+            "3",
+            "--retry-delay-ms",
+            "250",
+        ])
+        .expect("args should parse");
+
+        match args.command {
+            Some(Command::Run {
+                retries,
+                retry_delay_ms,
+            }) => {
+                assert_eq!(retries, 3);
+                assert_eq!(retry_delay_ms, 250);
+            }
+            _ => panic!("run command with retry options should parse"),
         }
     }
 

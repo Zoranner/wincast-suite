@@ -5,10 +5,14 @@ use wincast_protocol::config::HostConfig;
 
 mod agent;
 mod program;
+mod service;
 pub mod session_state;
 mod window;
 
 use program::StdProgramRunner;
+#[cfg(test)]
+use service::ServiceStatus;
+use service::{PendingServiceManager, ServiceManager};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "WinCast Windows 宿主端")]
@@ -30,7 +34,7 @@ enum Command {
     Service(ServiceCommand),
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 enum ServiceCommand {
     /// 安装 Windows Service
     Install,
@@ -66,27 +70,34 @@ fn run(command: Command, config_path: &PathBuf) -> ExitCode {
 }
 
 fn execute_command(command: Command, config_path: &PathBuf) -> Result<String, String> {
+    let mut service_manager = PendingServiceManager;
+    execute_command_with_service_manager(command, config_path, &mut service_manager)
+}
+
+fn execute_command_with_service_manager(
+    command: Command,
+    config_path: &PathBuf,
+    service_manager: &mut impl ServiceManager,
+) -> Result<String, String> {
     match command {
         Command::Validate => validate_config(config_path),
         Command::Run => run_host(config_path),
-        Command::Service(command) => Ok(service_not_implemented_message(command)),
+        Command::Service(command) => execute_service_command(command, service_manager),
     }
 }
 
-fn service_not_implemented_message(command: ServiceCommand) -> String {
-    format!(
-        "Windows Service 编排尚未实现，当前仍需使用前台 run 模式；未执行{}操作。",
-        service_command_label(command)
-    )
-}
-
-fn service_command_label(command: ServiceCommand) -> &'static str {
+fn execute_service_command(
+    command: ServiceCommand,
+    service_manager: &mut impl ServiceManager,
+) -> Result<String, String> {
     match command {
-        ServiceCommand::Install => "安装",
-        ServiceCommand::Uninstall => "卸载",
-        ServiceCommand::Start => "启动",
-        ServiceCommand::Stop => "停止",
-        ServiceCommand::Status => "状态查询",
+        ServiceCommand::Install => service_manager.install(),
+        ServiceCommand::Uninstall => service_manager.uninstall(),
+        ServiceCommand::Start => service_manager.start(),
+        ServiceCommand::Stop => service_manager.stop(),
+        ServiceCommand::Status => service_manager
+            .status()
+            .map(|status| status.message().to_owned()),
     }
 }
 
@@ -170,10 +181,7 @@ mod tests {
 
             match args.command {
                 Some(Command::Service(actual)) => {
-                    assert_eq!(
-                        service_command_label(actual),
-                        service_command_label(expected)
-                    );
+                    assert_eq!(actual, expected);
                 }
                 _ => panic!("service {name} should parse"),
             }
@@ -190,14 +198,61 @@ mod tests {
             ServiceCommand::Status,
         ] {
             let message = execute_command(Command::Service(command), &PathBuf::from("unused.toml"))
-                .expect("service command should return a user-facing message");
+                .unwrap_or_else(|error| error);
 
-            assert!(message.contains("Windows Service 编排尚未实现"));
+            assert!(message.contains("Windows Service"));
+            assert!(message.contains("未实现"));
             assert!(message.contains("当前仍需使用前台 run 模式"));
-            assert!(message.contains("未执行"));
+            if !matches!(command, ServiceCommand::Status) {
+                assert!(message.contains("未执行真实系统服务操作"));
+            }
             assert!(!message.contains("安装成功"));
             assert!(!message.contains("Service 已安装"));
+            assert!(!message.contains("已启动"));
         }
+    }
+
+    #[test]
+    fn service_commands_are_dispatched_through_manager() {
+        for (command, expected_call) in [
+            (ServiceCommand::Install, "install"),
+            (ServiceCommand::Uninstall, "uninstall"),
+            (ServiceCommand::Start, "start"),
+            (ServiceCommand::Stop, "stop"),
+            (ServiceCommand::Status, "status"),
+        ] {
+            let mut manager = RecordingServiceManager::default();
+            let message = execute_command_with_service_manager(
+                Command::Service(command),
+                &PathBuf::from("unused.toml"),
+                &mut manager,
+            )
+            .expect("service command should return manager message");
+
+            assert_eq!(manager.calls, vec![expected_call]);
+            if matches!(command, ServiceCommand::Status) {
+                assert!(message.contains("未实现"));
+            } else {
+                assert!(message.contains(expected_call));
+            }
+        }
+    }
+
+    #[test]
+    fn pending_service_status_reports_clear_pending_state() {
+        let mut manager = PendingServiceManager;
+        let message = execute_command_with_service_manager(
+            Command::Service(ServiceCommand::Status),
+            &PathBuf::from("unused.toml"),
+            &mut manager,
+        )
+        .expect("status should return a user-facing message");
+
+        assert!(message.contains("未实现"));
+        assert!(message.contains("未安装"));
+        assert!(message.contains("当前仍需使用前台 run 模式"));
+        assert!(!message.contains("安装成功"));
+        assert!(!message.contains("已启动"));
     }
 
     #[test]
@@ -229,6 +284,38 @@ mod tests {
                 window_title_contains: String::new(),
                 startup_timeout_ms: 15000,
             },
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingServiceManager {
+        calls: Vec<&'static str>,
+    }
+
+    impl ServiceManager for RecordingServiceManager {
+        fn install(&mut self) -> Result<String, String> {
+            self.calls.push("install");
+            Ok("install dispatched".to_owned())
+        }
+
+        fn uninstall(&mut self) -> Result<String, String> {
+            self.calls.push("uninstall");
+            Ok("uninstall dispatched".to_owned())
+        }
+
+        fn start(&mut self) -> Result<String, String> {
+            self.calls.push("start");
+            Ok("start dispatched".to_owned())
+        }
+
+        fn stop(&mut self) -> Result<String, String> {
+            self.calls.push("stop");
+            Ok("stop dispatched".to_owned())
+        }
+
+        fn status(&mut self) -> Result<ServiceStatus, String> {
+            self.calls.push("status");
+            Ok(ServiceStatus::PendingImplementation)
         }
     }
 }
