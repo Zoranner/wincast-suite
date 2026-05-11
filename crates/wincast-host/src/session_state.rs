@@ -1,3 +1,5 @@
+use wincast_protocol::message::ErrorCode;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
     NoUserLoggedIn,
@@ -17,6 +19,29 @@ pub enum SessionEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostDesktopEvent {
+    UserLoggedIn,
+    Locked,
+    Unlocked,
+    LoggedOut,
+    AgentStarted,
+    AgentExited,
+}
+
+impl From<HostDesktopEvent> for SessionEvent {
+    fn from(event: HostDesktopEvent) -> Self {
+        match event {
+            HostDesktopEvent::UserLoggedIn => Self::UserLoggedIn,
+            HostDesktopEvent::Locked => Self::SessionLocked,
+            HostDesktopEvent::Unlocked => Self::SessionUnlocked,
+            HostDesktopEvent::LoggedOut => Self::UserLoggedOut,
+            HostDesktopEvent::AgentStarted => Self::AgentStarted,
+            HostDesktopEvent::AgentExited => Self::AgentExited,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientSessionErrorCode {
     NoUserLoggedIn,
     SessionLocked,
@@ -30,6 +55,25 @@ pub enum RemoteSessionStatus {
         code: ClientSessionErrorCode,
         message: &'static str,
     },
+}
+
+impl ClientSessionErrorCode {
+    pub fn to_protocol_error_code(self) -> ErrorCode {
+        match self {
+            Self::NoUserLoggedIn => ErrorCode::NoUserLoggedIn,
+            Self::SessionLocked => ErrorCode::SessionLocked,
+            Self::AgentUnavailable => ErrorCode::AgentUnavailable,
+        }
+    }
+}
+
+impl RemoteSessionStatus {
+    pub fn to_protocol_error(self) -> Option<(ErrorCode, &'static str)> {
+        match self {
+            Self::Allowed => None,
+            Self::Rejected { code, message } => Some((code.to_protocol_error_code(), message)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +129,10 @@ impl SessionStateMachine {
         }
     }
 
+    pub fn apply_host_desktop_event(&mut self, event: HostDesktopEvent) {
+        self.apply(event.into());
+    }
+
     pub fn remote_session_status(&self) -> RemoteSessionStatus {
         match (self.state, self.agent_running) {
             (SessionState::Unlocked, true) => RemoteSessionStatus::Allowed,
@@ -115,6 +163,7 @@ impl SessionStateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wincast_protocol::message::ErrorCode;
 
     #[test]
     fn denies_remote_session_when_no_user_is_logged_in() {
@@ -220,5 +269,74 @@ mod tests {
             RemoteSessionStatus::Allowed
         );
         assert!(!machine.should_start_agent());
+    }
+
+    #[test]
+    fn maps_locked_desktop_event_to_session_locked_rejection() {
+        let mut machine = SessionStateMachine::new();
+
+        machine.apply_host_desktop_event(HostDesktopEvent::UserLoggedIn);
+        machine.apply_host_desktop_event(HostDesktopEvent::AgentStarted);
+        machine.apply_host_desktop_event(HostDesktopEvent::Locked);
+
+        assert_eq!(
+            machine.remote_session_status().to_protocol_error(),
+            Some((
+                ErrorCode::SessionLocked,
+                "Windows 会话已锁定，请先解锁后再启动远程会话。"
+            ))
+        );
+    }
+
+    #[test]
+    fn maps_logged_out_desktop_event_to_no_user_rejection() {
+        let mut machine = SessionStateMachine::new();
+
+        machine.apply_host_desktop_event(HostDesktopEvent::UserLoggedIn);
+        machine.apply_host_desktop_event(HostDesktopEvent::AgentStarted);
+        machine.apply_host_desktop_event(HostDesktopEvent::LoggedOut);
+
+        assert_eq!(
+            machine.remote_session_status().to_protocol_error(),
+            Some((
+                ErrorCode::NoUserLoggedIn,
+                "当前没有 Windows 用户登录，无法启动远程会话。"
+            ))
+        );
+    }
+
+    #[test]
+    fn maps_agent_exit_desktop_event_to_agent_unavailable_rejection() {
+        let mut machine = SessionStateMachine::new();
+
+        machine.apply_host_desktop_event(HostDesktopEvent::UserLoggedIn);
+        machine.apply_host_desktop_event(HostDesktopEvent::AgentStarted);
+        machine.apply_host_desktop_event(HostDesktopEvent::AgentExited);
+
+        assert_eq!(
+            machine.remote_session_status().to_protocol_error(),
+            Some((
+                ErrorCode::AgentUnavailable,
+                "宿主端 Agent 不可用，正在等待重新拉起。"
+            ))
+        );
+    }
+
+    #[test]
+    fn unlocked_and_agent_started_desktop_events_restore_allowed_status() {
+        let mut machine = SessionStateMachine::new();
+
+        machine.apply_host_desktop_event(HostDesktopEvent::UserLoggedIn);
+        machine.apply_host_desktop_event(HostDesktopEvent::AgentStarted);
+        machine.apply_host_desktop_event(HostDesktopEvent::Locked);
+        machine.apply_host_desktop_event(HostDesktopEvent::AgentExited);
+        machine.apply_host_desktop_event(HostDesktopEvent::Unlocked);
+        machine.apply_host_desktop_event(HostDesktopEvent::AgentStarted);
+
+        assert_eq!(
+            machine.remote_session_status(),
+            RemoteSessionStatus::Allowed
+        );
+        assert_eq!(machine.remote_session_status().to_protocol_error(), None);
     }
 }
