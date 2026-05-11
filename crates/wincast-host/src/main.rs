@@ -1,9 +1,10 @@
-use std::{fs, net::TcpListener, path::PathBuf, process::ExitCode};
+use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
 use wincast_protocol::config::HostConfig;
 
 mod agent;
+mod agent_runtime;
 mod program;
 mod service;
 pub mod service_ipc;
@@ -11,7 +12,7 @@ pub mod session_events;
 pub mod session_state;
 mod window;
 
-use program::StdProgramRunner;
+use agent_runtime::{HostAgentRuntime, StdHostAgentRuntime};
 #[cfg(test)]
 use service::ServiceStatus;
 use service::{DefaultServiceManager, ServiceManager};
@@ -112,12 +113,17 @@ fn validate_config(path: &PathBuf) -> Result<String, String> {
 }
 
 fn run_host(path: &PathBuf) -> Result<String, String> {
+    let mut runtime = StdHostAgentRuntime;
+    run_host_with_runtime(path, &mut runtime)
+}
+
+fn run_host_with_runtime(
+    path: &PathBuf,
+    runtime: &mut impl HostAgentRuntime,
+) -> Result<String, String> {
     let config = load_config(path)?;
-    let listener = TcpListener::bind(&config.listen)
-        .map_err(|error| format!("宿主端 TCP 监听失败: {error}"))?;
     let startup_message = runtime_not_implemented_message(&config);
-    let mut runner = StdProgramRunner;
-    let local_addr = agent::run_control_listener(listener, &config, &mut runner)?;
+    let local_addr = runtime.run(&config)?;
     Ok(format!(
         "{startup_message} 控制通道已进入持续监听，实际监听 {local_addr}。"
     ))
@@ -268,6 +274,46 @@ mod tests {
         assert!(message.contains("H.264/WebRTC 编码传输尚未接入"));
     }
 
+    #[test]
+    fn run_command_loads_config_and_delegates_host_agent_runtime() {
+        let config_path = temp_host_config_path("run-delegates-runtime");
+        fs::write(
+            &config_path,
+            r#"
+listen = "127.0.0.1:0"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+args = ["--profile", "demo"]
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+
+[capture]
+mode = "desktop"
+window_title_contains = ""
+startup_timeout_ms = 15000
+"#,
+        )
+        .expect("host config should be written");
+        let mut runtime = RecordingHostAgentRuntime::default();
+
+        let message = run_host_with_runtime(&config_path, &mut runtime)
+            .expect("run command should delegate to runtime");
+
+        assert_eq!(runtime.calls.len(), 1);
+        assert_eq!(runtime.calls[0].listen, "127.0.0.1:0");
+        assert_eq!(
+            message,
+            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
+        );
+
+        fs::remove_file(config_path).expect("temp host config should be removed");
+    }
+
     fn host_config(listen: String) -> HostConfig {
         HostConfig {
             listen,
@@ -319,5 +365,29 @@ mod tests {
             self.calls.push("status");
             Ok(ServiceStatus::PendingImplementation)
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingHostAgentRuntime {
+        calls: Vec<HostConfig>,
+    }
+
+    impl HostAgentRuntime for RecordingHostAgentRuntime {
+        fn run(&mut self, config: &HostConfig) -> Result<std::net::SocketAddr, String> {
+            self.calls.push(config.clone());
+            Ok("127.0.0.1:49152".parse().expect("test addr should parse"))
+        }
+    }
+
+    fn temp_host_config_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "wincast-host-{name}-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
     }
 }

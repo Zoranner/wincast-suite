@@ -106,7 +106,7 @@ docs/
 
 当前 `wincast-host` 与 `wincast-client` 已在配置读取、配置校验和 TCP 控制通道握手基础上接入 raw BGRA 捕获传输、SDL2 渲染和基础输入回传。若宿主端提示编码传输未实现，应理解为 H.264/WebRTC 等编码传输路线尚未接入，不代表当前 raw BGRA 链路不可用；当前 `run` 的默认可用画面链路就是 raw BGRA。
 
-会话状态与 Service/Agent 分层当前仍是底座能力：`wincast-host` 已新增纯状态机，用于表达未登录、已登录、锁屏、Agent 可用、会话运行、会话暂停和错误状态之间的转换，并补齐平台事件到状态机事件的映射边界；`wincast-protocol` 已新增 Service 与 Host Agent 的 IPC 消息模型和长度前缀 JSON frame 编解码，用于表达 Agent 在线状态、启动会话、结束会话、锁屏通知和错误上报；`wincast-host` 已有可测试的通用 Read/Write IPC endpoint，并新增最小 TCP loopback transport，用于复用上述 frame 完成 Service/Agent 双向 round-trip。上述能力目前只约束内存状态、可序列化消息、通用 frame 传输和本机 loopback 连接，不代表已经实现 Windows API 监听、真实 Windows Service 或 Service 拉起 Host Agent。
+会话状态与 Service/Agent 分层当前仍是底座能力：`wincast-host` 已新增纯状态机，用于表达未登录、已登录、锁屏、Agent 可用、会话运行、会话暂停和错误状态之间的转换，并补齐平台事件到状态机事件的映射边界；`wincast-protocol` 已新增 Service 与 Host Agent 的 IPC 消息模型和长度前缀 JSON frame 编解码，用于表达 Agent 在线状态、启动会话、结束会话、锁屏通知和错误上报；`wincast-host` 已有可测试的通用 Read/Write IPC endpoint，并新增最小 TCP loopback transport，用于复用上述 frame 完成 Service/Agent 双向 round-trip；前台 Host Agent 运行入口也已从 CLI 命令分发中抽出，便于后续 Service 复用。上述能力目前只约束内存状态、可序列化消息、通用 frame 传输、本机 loopback 连接和 Agent runtime 边界，不代表已经实现 Windows API 监听、真实 Windows Service 或 Service 拉起 Host Agent。
 
 宿主端 CLI：
 
@@ -131,7 +131,7 @@ wincast-client --config wincast-client.toml run --retries 3 --retry-delay-ms 100
 wincast-client targets
 ```
 
-不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后监听一次 TCP 连接，接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 并持续写入 raw BGRA 二进制帧；`service` 子命令当前通过可测试的 `ServiceManager` 管理抽象返回占位结果，用于先固定 CLI 与管理边界，不会执行真实 Windows Service 安装、卸载、启动、停止或状态查询。Linux 客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，创建 SDL2 窗口持续渲染 raw BGRA 帧，轮询 SDL2 基础键鼠事件并写回控制连接，窗口退出时发送 `StopSession`；`--retries` 和 `--retry-delay-ms` 只覆盖启动连接阶段的有限重试，不改变会话中断后的恢复语义，也不代表 Service/Agent 自动恢复已经完成。宿主端使用阻塞输入读取线程处理客户端输入事件，避免在非阻塞单次 `read_message` 中丢失半包状态，并通过 Windows SendInput 注入基础鼠标、滚轮和键盘事件。非 Linux 开发环境只执行协议校验路径，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady`、Service/Agent IPC 长度前缀 JSON frame 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback；`wincast-render` 已提供 SDL2 raw BGRA 窗口后端。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
+不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后进入持续 TCP 监听，同一时间只处理一个客户端会话；空闲时接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 并持续写入 raw BGRA 二进制帧；已有会话运行时，新的客户端连接会收到忙碌错误。`service` 子命令当前通过可测试的 `ServiceManager` 管理抽象返回占位结果，用于先固定 CLI 与管理边界，不会执行真实 Windows Service 安装、卸载、启动、停止或状态查询。Linux 客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，创建 SDL2 窗口持续渲染 raw BGRA 帧，轮询 SDL2 基础键鼠事件并写回控制连接，窗口退出时发送 `StopSession`；`--retries` 和 `--retry-delay-ms` 只覆盖启动连接阶段的有限重试，不改变会话中断后的恢复语义，也不代表 Service/Agent 自动恢复已经完成。宿主端使用阻塞输入读取线程处理客户端输入事件，避免在非阻塞单次 `read_message` 中丢失半包状态，并通过 Windows SendInput 注入基础鼠标、滚轮和键盘事件。非 Linux 开发环境只执行协议校验路径，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady`、Service/Agent IPC 长度前缀 JSON frame 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback；`wincast-render` 已提供 SDL2 raw BGRA 窗口后端。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
 
 ## 宿主端设计
 
@@ -384,8 +384,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 - 当前 raw BGRA 主线已形成可用画面链路；客户端 `run` 已支持启动连接阶段的 `--retries` 和 `--retry-delay-ms` 有限重试；继续补齐资源释放、会话中断恢复、窗口关闭和错误上报，先让前台 Host Agent 形态稳定。
 - 会话状态纯模型、平台事件映射边界和 Windows 会话通知注册/注销边界已完成；后续补齐消息循环、活动会话检测和桌面锁定事件分发，把登录、锁屏、解锁和注销事件转换为现有状态机事件。
-- Service 与 Host Agent 的 IPC 消息模型、长度前缀 JSON frame 底座和 Host 侧通用 endpoint 已完成；后续选择并实现本机 IPC 传输通道，处理连接建立、断开、超时和错误传播。
-- 抽出 Host Agent 运行核心，把网络会话、程序生命周期、捕获和输入编排从 CLI 入口中剥离出来，便于后续由 Service 拉起。
+- Service 与 Host Agent 的 IPC 消息模型、长度前缀 JSON frame 底座、Host 侧通用 endpoint 和最小 TCP loopback transport 已完成；后续继续处理连接建立、断开、超时、错误传播和权限边界。
+- Host Agent 运行核心已从 CLI 入口中剥离，网络会话、程序生命周期、捕获和输入编排已有可复用 runtime 边界；后续由 Service 拉起时复用该边界。
 - `service` 命令已具备可测试的 ServiceManager 占位抽象；后续把该抽象接到真实 Windows Service 安装、卸载、启动、停止和开机自启，Service 只负责编排，不直接捕获和注入输入。
 - 接入 Service 拉起 Host Agent 的流程，并把 Agent 在线状态、桌面可用状态和会话状态通过 IPC 回传给 Service。
 - 在客户端展示宿主机未登录、已锁屏、Agent 不在线等状态，并实现可控重连。
