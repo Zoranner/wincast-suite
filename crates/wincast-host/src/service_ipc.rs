@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fmt,
     io::{Read, Write},
+    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
 };
 
 use wincast_protocol::ipc::{
@@ -10,22 +11,62 @@ use wincast_protocol::ipc::{
 };
 
 #[derive(Debug)]
-pub(crate) struct ServiceIpcEndpoint<T> {
+pub struct ServiceIpcEndpoint<T> {
     transport: T,
 }
 
 impl<T> ServiceIpcEndpoint<T> {
-    pub(crate) fn new(transport: T) -> Self {
+    pub fn new(transport: T) -> Self {
         Self { transport }
     }
 
-    pub(crate) fn into_inner(self) -> T {
+    pub fn into_inner(self) -> T {
         self.transport
     }
 }
 
+impl ServiceIpcEndpoint<TcpStream> {
+    pub fn connect_loopback(
+        endpoint: SocketAddr,
+    ) -> Result<ServiceIpcEndpoint<TcpStream>, std::io::Error> {
+        TcpStream::connect(endpoint).map(Self::new)
+    }
+}
+
+#[derive(Debug)]
+pub struct ServiceIpcLoopbackListener {
+    listener: TcpListener,
+}
+
+impl ServiceIpcLoopbackListener {
+    pub fn bind_localhost_ephemeral() -> Result<Self, std::io::Error> {
+        Self::bind_loopback(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+    }
+
+    pub fn bind_loopback(addr: SocketAddr) -> Result<Self, std::io::Error> {
+        if !addr.ip().is_loopback() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Service IPC loopback transport 只能绑定本机 loopback 地址",
+            ));
+        }
+
+        let listener = TcpListener::bind(addr)?;
+        Ok(Self { listener })
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.listener.local_addr()
+    }
+
+    pub fn accept(&self) -> Result<ServiceIpcEndpoint<TcpStream>, std::io::Error> {
+        let (stream, _) = self.listener.accept()?;
+        Ok(ServiceIpcEndpoint::new(stream))
+    }
+}
+
 impl<T: Write> ServiceIpcEndpoint<T> {
-    pub(crate) fn send_service_message(
+    pub fn send_service_message(
         &mut self,
         message: &ServiceToAgent,
     ) -> Result<(), ServiceIpcError> {
@@ -33,29 +74,26 @@ impl<T: Write> ServiceIpcEndpoint<T> {
             .map_err(|source| ServiceIpcError::frame("发送 ServiceToAgent 消息失败", source))
     }
 
-    pub(crate) fn send_agent_message(
-        &mut self,
-        message: &AgentToService,
-    ) -> Result<(), ServiceIpcError> {
+    pub fn send_agent_message(&mut self, message: &AgentToService) -> Result<(), ServiceIpcError> {
         write_agent_to_service(&mut self.transport, message)
             .map_err(|source| ServiceIpcError::frame("发送 AgentToService 消息失败", source))
     }
 }
 
 impl<T: Read> ServiceIpcEndpoint<T> {
-    pub(crate) fn read_service_message(&mut self) -> Result<ServiceToAgent, ServiceIpcError> {
+    pub fn read_service_message(&mut self) -> Result<ServiceToAgent, ServiceIpcError> {
         read_service_to_agent(&mut self.transport)
             .map_err(|source| ServiceIpcError::frame("读取 ServiceToAgent 消息失败", source))
     }
 
-    pub(crate) fn read_agent_message(&mut self) -> Result<AgentToService, ServiceIpcError> {
+    pub fn read_agent_message(&mut self) -> Result<AgentToService, ServiceIpcError> {
         read_agent_to_service(&mut self.transport)
             .map_err(|source| ServiceIpcError::frame("读取 AgentToService 消息失败", source))
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct ServiceIpcError {
+pub struct ServiceIpcError {
     action: &'static str,
     source: IpcFrameError,
 }
@@ -81,7 +119,7 @@ impl Error for ServiceIpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{error::Error, io::Cursor};
+    use std::{error::Error, io::Cursor, thread};
 
     use wincast_protocol::ipc::{
         AgentStatus, AgentToService, IpcFrameError, ServiceToAgent, SessionEndReason,
@@ -123,6 +161,70 @@ mod tests {
             .expect("service should read agent status");
 
         assert_eq!(received, status);
+    }
+
+    #[test]
+    fn loopback_transport_round_trips_service_and_agent_messages() {
+        let listener = ServiceIpcLoopbackListener::bind_localhost_ephemeral()
+            .expect("loopback listener should bind");
+        let endpoint = listener
+            .local_addr()
+            .expect("loopback listener should expose local address");
+        assert!(endpoint.ip().is_loopback());
+
+        let service_thread = thread::spawn(move || {
+            let mut service = listener
+                .accept()
+                .expect("service should accept agent connection");
+            let command = ServiceToAgent::QueryStatus;
+
+            service
+                .send_service_message(&command)
+                .expect("service command should write to loopback transport");
+
+            let status = service
+                .read_agent_message()
+                .expect("service should read agent status from loopback transport");
+
+            assert_eq!(
+                status,
+                AgentToService::StatusChanged {
+                    status: AgentStatus::Ready
+                }
+            );
+        });
+
+        let mut agent = ServiceIpcEndpoint::connect_loopback(endpoint)
+            .expect("agent should connect to loopback listener");
+
+        let received = agent
+            .read_service_message()
+            .expect("agent should read service command from loopback transport");
+        assert_eq!(received, ServiceToAgent::QueryStatus);
+
+        agent
+            .send_agent_message(&AgentToService::StatusChanged {
+                status: AgentStatus::Ready,
+            })
+            .expect("agent status should write to loopback transport");
+
+        service_thread
+            .join()
+            .expect("service loopback round-trip should complete");
+    }
+
+    #[test]
+    fn loopback_listener_rejects_non_loopback_bind_address() {
+        let error =
+            ServiceIpcLoopbackListener::bind_loopback(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+                .expect_err("wildcard address should not be accepted for loopback IPC");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("Service IPC loopback transport 只能绑定本机 loopback 地址")
+        );
     }
 
     #[test]

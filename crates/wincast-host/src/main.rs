@@ -6,6 +6,7 @@ use wincast_protocol::config::HostConfig;
 mod agent;
 mod program;
 mod service;
+pub mod service_ipc;
 pub mod session_events;
 pub mod session_state;
 mod window;

@@ -1,7 +1,3 @@
-#[cfg(test)]
-#[path = "service_ipc.rs"]
-mod service_ipc;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceStatus {
     PendingImplementation,
