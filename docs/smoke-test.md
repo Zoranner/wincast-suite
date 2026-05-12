@@ -11,33 +11,24 @@
 
 ## 配置
 
-Windows host 使用窗口捕获和 raw BGRA：
+配置文件以仓库内 `examples/` 目录为准，烟测时复制示例文件到执行目录后按现场环境调整，避免在清单里维护第二份 TOML：
 
-```toml
-listen = "0.0.0.0:7856"
-program = "C:\\Program Files\\SomeApp\\app.exe"
-args = []
-work_dir = "C:\\Program Files\\SomeApp"
+- Windows host 复制 `examples/wincast-host.toml` 为 `wincast-host.toml`。
+- Linux client 复制 `examples/wincast-client.toml` 为 `wincast-client.toml`。
 
-[video]
-width = 1280
-height = 720
-fps = 30
-codec = "raw_bgra"
-bitrate_kbps = 4000
+Windows host 保持窗口捕获和 raw BGRA，重点核对以下字段：
 
-[capture]
-mode = "window"
-window_title_contains = "SomeApp"
-startup_timeout_ms = 15000
-```
+- `listen`：Host 监听地址，默认端口需与 Client 的 `port` 一致。
+- `program`、`args`、`work_dir`：待捕获应用的启动命令和工作目录。
+- `video.codec`：稳定版烟测使用 `raw_bgra`。
+- `capture.mode`：稳定版烟测使用 `window`，不要改成 `desktop`。
+- `capture.window_title_contains`：必须匹配目标应用窗口标题。
+- `capture.startup_timeout_ms`：目标应用启动和窗口出现的等待时间。
 
-Linux client 指向 Windows host：
+Linux client 指向 Windows host，重点核对以下字段：
 
-```toml
-host = "192.168.10.25"
-port = 7856
-```
+- `host`：Windows host 的可达 IP 或主机名。
+- `port`：必须与 Host 配置中的 `listen` 端口一致。
 
 ## 执行步骤
 
