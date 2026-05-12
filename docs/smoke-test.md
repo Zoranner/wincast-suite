@@ -11,10 +11,10 @@
 
 ## 配置
 
-配置文件以仓库内 `examples/` 目录为准，烟测时复制示例文件到执行目录后按现场环境调整，避免在清单里维护第二份 TOML：
+配置文件以仓库内 `examples/` 目录为准，烟测时复制示例文件到默认用户配置目录后按现场环境调整，避免在清单里维护第二份 TOML。日常运行不需要每次传 `--config`；`--config` 仅用于临时调试或一次性验证时覆盖默认路径。
 
-- Windows host 复制 `examples/wincast-host.toml` 为 `wincast-host.toml`。
-- Linux client 复制 `examples/wincast-client.toml` 为 `wincast-client.toml`。
+- Windows host 复制 `examples/wincast-host.toml` 为 `%APPDATA%\WinCast\wincast-host.toml`。
+- Linux client 复制 `examples/wincast-client.toml` 为 `$XDG_CONFIG_HOME/wincast/wincast-client.toml`；未设置 `$XDG_CONFIG_HOME` 时复制到 `$HOME/.config/wincast/wincast-client.toml`。
 
 Windows host 保持窗口捕获和 raw BGRA，重点核对以下字段：
 
@@ -32,10 +32,10 @@ Linux client 指向 Windows host，重点核对以下字段：
 
 ## 执行步骤
 
-- 在 Windows host 上执行 `wincast-host --config wincast-host.toml validate`，确认配置有效；如果提示 `desktop 捕获尚未实现`，改回 `capture.mode = "window"`。
-- 在 Windows host 上执行 `wincast-host --config wincast-host.toml run`，确认控制通道进入持续监听。
-- 在 Linux client 上执行 `wincast-client --config wincast-client.toml validate`，确认目标地址正确。
-- 在 Linux client 上执行 `wincast-client --config wincast-client.toml run --retries 3 --retry-delay-ms 1000`，确认能建立连接并打开 SDL2 窗口。
+- 在 Windows host 上执行 `wincast-host validate`，确认配置有效；如果提示 `desktop 捕获尚未实现`，改回 `capture.mode = "window"`。
+- 在 Windows host 上执行 `wincast-host run`，确认控制通道进入持续监听。
+- 在 Linux client 上执行 `wincast-client validate`，确认目标地址正确。
+- 在 Linux client 上执行 `wincast-client run --retries 3 --retry-delay-ms 1000`，确认能建立连接并打开 SDL2 窗口。
 - 观察客户端窗口，确认能看到 Windows 目标应用窗口画面，且窗口移动或目标应用内容变化后客户端画面随之更新。
 - 在客户端窗口内移动鼠标、点击、滚轮滚动，并在目标应用可输入区域敲入普通字符，确认 Windows 目标应用收到鼠标和键盘输入。
 - 关闭 Linux 客户端 SDL2 窗口，确认客户端退出时发送 `StopSession`，Windows host 结束当前会话并清理捕获/输入链路。

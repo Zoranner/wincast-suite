@@ -111,9 +111,9 @@ docs/
 宿主端 CLI：
 
 ```text
-wincast-host --config wincast-host.toml
-wincast-host --config wincast-host.toml validate
-wincast-host --config wincast-host.toml run
+wincast-host
+wincast-host validate
+wincast-host run
 wincast-host service install
 wincast-host service uninstall
 wincast-host service start
@@ -124,14 +124,14 @@ wincast-host service status
 客户端 CLI：
 
 ```text
-wincast-client --config wincast-client.toml
-wincast-client --config wincast-client.toml validate
-wincast-client --config wincast-client.toml run
-wincast-client --config wincast-client.toml run --retries 3 --retry-delay-ms 1000
+wincast-client
+wincast-client validate
+wincast-client run
+wincast-client run --retries 3 --retry-delay-ms 1000
 wincast-client targets
 ```
 
-不带子命令时默认进入 `run`。宿主端 `run` 在配置校验通过后进入持续 TCP 监听，同一时间只处理一个客户端会话；空闲时接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 并持续写入 raw BGRA 二进制帧；已有会话运行时，新的客户端连接会收到忙碌错误。`service` 子命令当前通过可测试的 `ServiceManager` 管理抽象返回占位结果，用于先固定 CLI 与管理边界，不会执行真实 Windows Service 安装、卸载、启动、停止或状态查询。Linux 客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，创建 SDL2 窗口持续渲染 raw BGRA 帧，轮询 SDL2 基础键鼠事件并写回控制连接，窗口退出时发送 `StopSession`；`--retries` 和 `--retry-delay-ms` 只覆盖启动连接阶段的有限重试，不改变会话中断后的恢复语义，也不代表 Service/Agent 自动恢复已经完成。宿主端使用阻塞输入读取线程处理客户端输入事件，避免在非阻塞单次 `read_message` 中丢失半包状态，并通过 Windows SendInput 注入基础鼠标、滚轮和键盘事件。非 Linux 开发环境只执行协议校验路径，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady`、Service/Agent IPC 长度前缀 JSON frame 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback；`wincast-render` 已提供 SDL2 raw BGRA 窗口后端。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
+不带子命令时默认进入 `run`。Host 与 Client 默认从用户配置目录读取配置：Windows host 默认读取 `%APPDATA%\WinCast\wincast-host.toml`，Linux client 默认读取 `$XDG_CONFIG_HOME/wincast/wincast-client.toml`，未设置 `$XDG_CONFIG_HOME` 时读取 `$HOME/.config/wincast/wincast-client.toml`；`--config` 仅用于临时调试或一次性验证时覆盖默认路径。宿主端 `run` 在配置校验通过后进入持续 TCP 监听，同一时间只处理一个客户端会话；空闲时接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 并持续写入 raw BGRA 二进制帧；已有会话运行时，新的客户端连接会收到忙碌错误。`service` 子命令当前通过可测试的 `ServiceManager` 管理抽象返回占位结果，用于先固定 CLI 与管理边界，不会执行真实 Windows Service 安装、卸载、启动、停止或状态查询。Linux 客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，创建 SDL2 窗口持续渲染 raw BGRA 帧，轮询 SDL2 基础键鼠事件并写回控制连接，窗口退出时发送 `StopSession`；`--retries` 和 `--retry-delay-ms` 只覆盖启动连接阶段的有限重试，不改变会话中断后的恢复语义，也不代表 Service/Agent 自动恢复已经完成。宿主端使用阻塞输入读取线程处理客户端输入事件，避免在非阻塞单次 `read_message` 中丢失半包状态，并通过 Windows SendInput 注入基础鼠标、滚轮和键盘事件。非 Linux 开发环境只执行协议校验路径，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady`、Service/Agent IPC 长度前缀 JSON frame 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback；`wincast-render` 已提供 SDL2 raw BGRA 窗口后端。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
 
 ## 宿主端设计
 

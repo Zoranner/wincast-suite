@@ -38,10 +38,12 @@ cargo clippy -p wincast-protocol -p wincast-client --all-targets --all-features 
 
 稳定版真机烟测流程见 [稳定版真机烟测清单](smoke-test.md)。
 
+Host 与 Client 默认从用户配置目录读取配置，日常运行不需要每次传 `--config`。Windows host 默认读取 `%APPDATA%\WinCast\wincast-host.toml`；Linux client 默认读取 `$XDG_CONFIG_HOME/wincast/wincast-client.toml`，未设置 `$XDG_CONFIG_HOME` 时读取 `$HOME/.config/wincast/wincast-client.toml`。`--config` 仅用于临时调试或一次性验证时覆盖默认路径。
+
 客户端 `run` 支持启动连接阶段的有限重试，便于宿主端前台进程刚启动或端口短暂不可用时验证连接恢复：
 
 ```powershell
-cargo run -p wincast-client -- --config wincast-client.toml run --retries 3 --retry-delay-ms 1000
+cargo run -p wincast-client -- run --retries 3 --retry-delay-ms 1000
 ```
 
 该重试只覆盖初始连接，不等同于会话中断后的自动恢复，也不代表 Service/Agent 编排已经完成。
