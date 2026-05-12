@@ -4,7 +4,9 @@ use std::{
     io::{Read, Write},
 };
 
-use wincast_protocol::ipc::{AgentStatus, AgentToService, ServiceToAgent};
+use wincast_protocol::ipc::{
+    AgentErrorReason, AgentStatus, AgentToService, ServiceToAgent, SessionEndReason,
+};
 
 use crate::service_ipc::{ServiceIpcEndpoint, ServiceIpcError};
 
@@ -39,13 +41,106 @@ impl<T: Read + Write> ServiceAgentCoordinator<T> {
             response => Err(ServiceAgentError::unexpected_status_response(response)),
         }
     }
+
+    pub fn start_session(&mut self, session_id: u64) -> Result<u64, ServiceAgentError> {
+        self.endpoint
+            .send_service_message(&ServiceToAgent::StartSession { session_id })
+            .map_err(ServiceAgentError::start_write)?;
+
+        match self
+            .endpoint
+            .read_agent_message()
+            .map_err(ServiceAgentError::start_read)?
+        {
+            AgentToService::SessionStarted {
+                session_id: confirmed_id,
+            } if confirmed_id == session_id => Ok(confirmed_id),
+            AgentToService::SessionStarted { session_id: actual } => Err(
+                ServiceAgentError::mismatched_start_session_id(session_id, actual),
+            ),
+            AgentToService::Error { reason, message } => {
+                Err(ServiceAgentError::start_agent_error(reason, message))
+            }
+            response => Err(ServiceAgentError::unexpected_start_response(response)),
+        }
+    }
+
+    pub fn stop_session(
+        &mut self,
+        session_id: u64,
+        reason: SessionEndReason,
+    ) -> Result<SessionEndReason, ServiceAgentError> {
+        self.endpoint
+            .send_service_message(&ServiceToAgent::StopSession { session_id, reason })
+            .map_err(ServiceAgentError::stop_write)?;
+
+        match self
+            .endpoint
+            .read_agent_message()
+            .map_err(ServiceAgentError::stop_read)?
+        {
+            AgentToService::SessionEnded {
+                session_id: confirmed_id,
+                reason,
+            } if confirmed_id == session_id => Ok(reason),
+            AgentToService::SessionEnded {
+                session_id: actual, ..
+            } => Err(ServiceAgentError::mismatched_stop_session_id(
+                session_id, actual,
+            )),
+            AgentToService::Error { reason, message } => {
+                Err(ServiceAgentError::stop_agent_error(reason, message))
+            }
+            response => Err(ServiceAgentError::unexpected_stop_response(response)),
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum ServiceAgentError {
-    QueryWrite { source: ServiceIpcError },
-    QueryRead { source: ServiceIpcError },
-    UnexpectedStatusResponse { response: AgentToService },
+    QueryWrite {
+        source: ServiceIpcError,
+    },
+    QueryRead {
+        source: ServiceIpcError,
+    },
+    UnexpectedStatusResponse {
+        response: AgentToService,
+    },
+    StartWrite {
+        source: ServiceIpcError,
+    },
+    StartRead {
+        source: ServiceIpcError,
+    },
+    UnexpectedStartResponse {
+        response: AgentToService,
+    },
+    MismatchedStartSessionId {
+        expected: u64,
+        actual: u64,
+    },
+    StartAgentError {
+        reason: AgentErrorReason,
+        message: String,
+    },
+    StopWrite {
+        source: ServiceIpcError,
+    },
+    StopRead {
+        source: ServiceIpcError,
+    },
+    UnexpectedStopResponse {
+        response: AgentToService,
+    },
+    MismatchedStopSessionId {
+        expected: u64,
+        actual: u64,
+    },
+    StopAgentError {
+        reason: AgentErrorReason,
+        message: String,
+    },
 }
 
 impl ServiceAgentError {
@@ -59,6 +154,46 @@ impl ServiceAgentError {
 
     fn unexpected_status_response(response: AgentToService) -> Self {
         Self::UnexpectedStatusResponse { response }
+    }
+
+    fn start_write(source: ServiceIpcError) -> Self {
+        Self::StartWrite { source }
+    }
+
+    fn start_read(source: ServiceIpcError) -> Self {
+        Self::StartRead { source }
+    }
+
+    fn unexpected_start_response(response: AgentToService) -> Self {
+        Self::UnexpectedStartResponse { response }
+    }
+
+    fn mismatched_start_session_id(expected: u64, actual: u64) -> Self {
+        Self::MismatchedStartSessionId { expected, actual }
+    }
+
+    fn start_agent_error(reason: AgentErrorReason, message: String) -> Self {
+        Self::StartAgentError { reason, message }
+    }
+
+    fn stop_write(source: ServiceIpcError) -> Self {
+        Self::StopWrite { source }
+    }
+
+    fn stop_read(source: ServiceIpcError) -> Self {
+        Self::StopRead { source }
+    }
+
+    fn unexpected_stop_response(response: AgentToService) -> Self {
+        Self::UnexpectedStopResponse { response }
+    }
+
+    fn mismatched_stop_session_id(expected: u64, actual: u64) -> Self {
+        Self::MismatchedStopSessionId { expected, actual }
+    }
+
+    fn stop_agent_error(reason: AgentErrorReason, message: String) -> Self {
+        Self::StopAgentError { reason, message }
     }
 }
 
@@ -75,6 +210,40 @@ impl fmt::Display for ServiceAgentError {
                 formatter,
                 "Agent 状态查询响应类型错误：期望 StatusChanged，实际收到 {response:?}"
             ),
+            Self::StartWrite { source } => {
+                write!(formatter, "发送 Agent 会话启动命令失败：{source}")
+            }
+            Self::StartRead { source } => {
+                write!(formatter, "读取 Agent 会话启动响应失败：{source}")
+            }
+            Self::UnexpectedStartResponse { response } => write!(
+                formatter,
+                "Agent 会话启动响应类型错误：期望 SessionStarted，实际收到 {response:?}"
+            ),
+            Self::MismatchedStartSessionId { expected, actual } => write!(
+                formatter,
+                "Agent 会话启动确认 session_id 不一致：期望 {expected}，实际 {actual}"
+            ),
+            Self::StartAgentError { reason, message } => {
+                write!(formatter, "Agent 会话启动失败：{reason:?}：{message}")
+            }
+            Self::StopWrite { source } => {
+                write!(formatter, "发送 Agent 会话停止命令失败：{source}")
+            }
+            Self::StopRead { source } => {
+                write!(formatter, "读取 Agent 会话停止响应失败：{source}")
+            }
+            Self::UnexpectedStopResponse { response } => write!(
+                formatter,
+                "Agent 会话停止响应类型错误：期望 SessionEnded，实际收到 {response:?}"
+            ),
+            Self::MismatchedStopSessionId { expected, actual } => write!(
+                formatter,
+                "Agent 会话停止确认 session_id 不一致：期望 {expected}，实际 {actual}"
+            ),
+            Self::StopAgentError { reason, message } => {
+                write!(formatter, "Agent 会话停止失败：{reason:?}：{message}")
+            }
         }
     }
 }
@@ -82,8 +251,19 @@ impl fmt::Display for ServiceAgentError {
 impl Error for ServiceAgentError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::QueryWrite { source } | Self::QueryRead { source } => Some(source),
-            Self::UnexpectedStatusResponse { .. } => None,
+            Self::QueryWrite { source }
+            | Self::QueryRead { source }
+            | Self::StartWrite { source }
+            | Self::StartRead { source }
+            | Self::StopWrite { source }
+            | Self::StopRead { source } => Some(source),
+            Self::UnexpectedStatusResponse { .. }
+            | Self::UnexpectedStartResponse { .. }
+            | Self::MismatchedStartSessionId { .. }
+            | Self::StartAgentError { .. }
+            | Self::UnexpectedStopResponse { .. }
+            | Self::MismatchedStopSessionId { .. }
+            | Self::StopAgentError { .. } => None,
         }
     }
 }
@@ -92,7 +272,9 @@ impl Error for ServiceAgentError {
 mod tests {
     use std::{error::Error, io::Cursor, net::TcpStream, thread, time::Duration};
 
-    use wincast_protocol::ipc::{AgentStatus, AgentToService, ServiceToAgent};
+    use wincast_protocol::ipc::{
+        AgentErrorReason, AgentStatus, AgentToService, ServiceToAgent, SessionEndReason,
+    };
 
     use crate::{
         service_agent::ServiceAgentCoordinator,
@@ -157,6 +339,211 @@ mod tests {
             .expect_err("empty response should fail status query");
 
         assert!(error.to_string().contains("读取 Agent 状态响应失败"));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn start_session_sends_command_and_returns_confirmed_session_id() {
+        let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+            DuplexTransport::with_response(&AgentToService::SessionStarted { session_id: 42 }),
+        ));
+
+        let session_id = coordinator
+            .start_session(42)
+            .expect("session start should return confirmed session id");
+
+        assert_eq!(session_id, 42);
+        let sent_bytes = coordinator.into_endpoint().into_inner().written;
+        let mut agent_reader = ServiceIpcEndpoint::new(Cursor::new(sent_bytes));
+        assert_eq!(
+            agent_reader.read_service_message().unwrap(),
+            ServiceToAgent::StartSession { session_id: 42 }
+        );
+    }
+
+    #[test]
+    fn stop_session_sends_command_and_returns_confirmed_reason() {
+        let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+            DuplexTransport::with_response(&AgentToService::SessionEnded {
+                session_id: 42,
+                reason: SessionEndReason::ServiceRequested,
+            }),
+        ));
+
+        let reason = coordinator
+            .stop_session(42, SessionEndReason::ServiceRequested)
+            .expect("session stop should return confirmed end reason");
+
+        assert_eq!(reason, SessionEndReason::ServiceRequested);
+        let sent_bytes = coordinator.into_endpoint().into_inner().written;
+        let mut agent_reader = ServiceIpcEndpoint::new(Cursor::new(sent_bytes));
+        assert_eq!(
+            agent_reader.read_service_message().unwrap(),
+            ServiceToAgent::StopSession {
+                session_id: 42,
+                reason: SessionEndReason::ServiceRequested
+            }
+        );
+    }
+
+    #[test]
+    fn start_session_rejects_unexpected_agent_response() {
+        let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+            DuplexTransport::with_response(&AgentToService::StatusChanged {
+                status: AgentStatus::Ready,
+            }),
+        ));
+
+        let error = coordinator
+            .start_session(42)
+            .expect_err("non-session-start response should fail");
+
+        assert!(error.to_string().contains("Agent 会话启动响应类型错误"));
+        assert!(error.to_string().contains("StatusChanged"));
+    }
+
+    #[test]
+    fn stop_session_rejects_unexpected_agent_response() {
+        let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+            DuplexTransport::with_response(&AgentToService::StatusChanged {
+                status: AgentStatus::Ready,
+            }),
+        ));
+
+        let error = coordinator
+            .stop_session(42, SessionEndReason::ServiceRequested)
+            .expect_err("non-session-ended response should fail");
+
+        assert!(error.to_string().contains("Agent 会话停止响应类型错误"));
+        assert!(error.to_string().contains("StatusChanged"));
+    }
+
+    #[test]
+    fn start_session_rejects_mismatched_session_id() {
+        let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+            DuplexTransport::with_response(&AgentToService::SessionStarted { session_id: 7 }),
+        ));
+
+        let error = coordinator
+            .start_session(42)
+            .expect_err("mismatched session id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Agent 会话启动确认 session_id 不一致")
+        );
+        assert!(error.to_string().contains("期望 42"));
+        assert!(error.to_string().contains("实际 7"));
+    }
+
+    #[test]
+    fn stop_session_rejects_mismatched_session_id() {
+        let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+            DuplexTransport::with_response(&AgentToService::SessionEnded {
+                session_id: 7,
+                reason: SessionEndReason::ServiceRequested,
+            }),
+        ));
+
+        let error = coordinator
+            .stop_session(42, SessionEndReason::ServiceRequested)
+            .expect_err("mismatched session id should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Agent 会话停止确认 session_id 不一致")
+        );
+        assert!(error.to_string().contains("期望 42"));
+        assert!(error.to_string().contains("实际 7"));
+    }
+
+    #[test]
+    fn start_session_returns_agent_error_response_with_reason_and_message() {
+        let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+            DuplexTransport::with_response(&AgentToService::Error {
+                reason: AgentErrorReason::Locked,
+                message: "桌面已锁定".to_owned(),
+            }),
+        ));
+
+        let error = coordinator
+            .start_session(42)
+            .expect_err("agent error response should fail");
+
+        assert!(error.to_string().contains("Agent 会话启动失败"));
+        assert!(error.to_string().contains("Locked"));
+        assert!(error.to_string().contains("桌面已锁定"));
+    }
+
+    #[test]
+    fn stop_session_returns_agent_error_response_with_reason_and_message() {
+        let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+            DuplexTransport::with_response(&AgentToService::Error {
+                reason: AgentErrorReason::AgentFailed,
+                message: "Agent 内部失败".to_owned(),
+            }),
+        ));
+
+        let error = coordinator
+            .stop_session(42, SessionEndReason::ServiceRequested)
+            .expect_err("agent error response should fail");
+
+        assert!(error.to_string().contains("Agent 会话停止失败"));
+        assert!(error.to_string().contains("AgentFailed"));
+        assert!(error.to_string().contains("Agent 内部失败"));
+    }
+
+    #[test]
+    fn start_session_wraps_ipc_write_error_with_context() {
+        let mut coordinator =
+            ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(FailingTransport::fail_write()));
+
+        let error = coordinator
+            .start_session(42)
+            .expect_err("write failure should fail session start");
+
+        assert!(error.to_string().contains("发送 Agent 会话启动命令失败"));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn stop_session_wraps_ipc_write_error_with_context() {
+        let mut coordinator =
+            ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(FailingTransport::fail_write()));
+
+        let error = coordinator
+            .stop_session(42, SessionEndReason::ServiceRequested)
+            .expect_err("write failure should fail session stop");
+
+        assert!(error.to_string().contains("发送 Agent 会话停止命令失败"));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn start_session_wraps_ipc_read_error_with_context() {
+        let mut coordinator =
+            ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(Cursor::new(Vec::new())));
+
+        let error = coordinator
+            .start_session(42)
+            .expect_err("empty response should fail session start");
+
+        assert!(error.to_string().contains("读取 Agent 会话启动响应失败"));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn stop_session_wraps_ipc_read_error_with_context() {
+        let mut coordinator =
+            ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(Cursor::new(Vec::new())));
+
+        let error = coordinator
+            .stop_session(42, SessionEndReason::ServiceRequested)
+            .expect_err("empty response should fail session stop");
+
+        assert!(error.to_string().contains("读取 Agent 会话停止响应失败"));
         assert!(error.source().is_some());
     }
 
