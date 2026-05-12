@@ -36,6 +36,8 @@ cargo clippy -p wincast-protocol -p wincast-client --all-targets --all-features 
 
 ## 运行与占位边界
 
+稳定版真机烟测流程见 [稳定版真机烟测清单](smoke-test.md)。
+
 客户端 `run` 支持启动连接阶段的有限重试，便于宿主端前台进程刚启动或端口短暂不可用时验证连接恢复：
 
 ```powershell
