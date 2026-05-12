@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::{Parser, Subcommand};
 use wincast_protocol::config::{CaptureMode, HostConfig, VideoCodec};
@@ -21,8 +25,8 @@ use service::{DefaultServiceManager, ServiceManager};
 #[derive(Debug, Parser)]
 #[command(author, version, about = "WinCast Windows 宿主端")]
 struct Args {
-    #[arg(short, long, global = true, default_value = "wincast-host.toml")]
-    config: PathBuf,
+    #[arg(short, long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -54,11 +58,44 @@ enum ServiceCommand {
 
 fn main() -> ExitCode {
     let args = Args::parse();
+    let config_path = args.config_path();
     let command = args.command.unwrap_or(Command::Run);
-    run(command, &args.config)
+    run(command, &config_path)
 }
 
-fn run(command: Command, config_path: &PathBuf) -> ExitCode {
+impl Args {
+    fn config_path(&self) -> PathBuf {
+        self.config.clone().unwrap_or_else(default_host_config_path)
+    }
+}
+
+fn default_host_config_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = env::var_os("APPDATA") {
+            return PathBuf::from(appdata)
+                .join("WinCast")
+                .join("wincast-host.toml");
+        }
+    }
+
+    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(config_home)
+            .join("wincast")
+            .join("wincast-host.toml");
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("wincast")
+            .join("wincast-host.toml");
+    }
+
+    PathBuf::from("wincast-host.toml")
+}
+
+fn run(command: Command, config_path: &Path) -> ExitCode {
     let result = execute_command(command, config_path);
 
     match result {
@@ -73,14 +110,14 @@ fn run(command: Command, config_path: &PathBuf) -> ExitCode {
     }
 }
 
-fn execute_command(command: Command, config_path: &PathBuf) -> Result<String, String> {
+fn execute_command(command: Command, config_path: &Path) -> Result<String, String> {
     let mut service_manager = DefaultServiceManager::default();
     execute_command_with_service_manager(command, config_path, &mut service_manager)
 }
 
 fn execute_command_with_service_manager(
     command: Command,
-    config_path: &PathBuf,
+    config_path: &Path,
     service_manager: &mut impl ServiceManager,
 ) -> Result<String, String> {
     match command {
@@ -105,7 +142,7 @@ fn execute_service_command(
     }
 }
 
-fn validate_config(path: &PathBuf) -> Result<String, String> {
+fn validate_config(path: &Path) -> Result<String, String> {
     let config = load_config(path)?;
     validate_stable_capture_support(&config)?;
     Ok(format!(
@@ -117,13 +154,13 @@ fn validate_config(path: &PathBuf) -> Result<String, String> {
     ))
 }
 
-fn run_host(path: &PathBuf) -> Result<String, String> {
+fn run_host(path: &Path) -> Result<String, String> {
     let mut runtime = StdHostAgentRuntime;
     run_host_with_runtime(path, &mut runtime)
 }
 
 fn run_host_with_runtime(
-    path: &PathBuf,
+    path: &Path,
     runtime: &mut impl HostAgentRuntime,
 ) -> Result<String, String> {
     let config = load_config(path)?;
@@ -148,9 +185,9 @@ fn runtime_not_implemented_detail() -> &'static str {
     "raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。"
 }
 
-fn load_config(path: &PathBuf) -> Result<HostConfig, String> {
-    let source =
-        fs::read_to_string(path).map_err(|error| format!("读取宿主端配置失败: {error}"))?;
+fn load_config(path: &Path) -> Result<HostConfig, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("读取宿主端配置失败（{}）: {error}", path.display()))?;
     HostConfig::from_toml_str(&source).map_err(|error| error.to_string())
 }
 
@@ -190,7 +227,7 @@ mod tests {
             Args::try_parse_from(["wincast-host", "--config", "custom-host.toml", "validate"])
                 .expect("args should parse");
 
-        assert_eq!(args.config, PathBuf::from("custom-host.toml"));
+        assert_eq!(args.config_path(), PathBuf::from("custom-host.toml"));
         match args.command {
             Some(Command::Validate) => {}
             _ => panic!("validate command should parse"),
@@ -199,10 +236,9 @@ mod tests {
 
     #[test]
     fn parses_default_run_with_config_path() {
-        let args = Args::try_parse_from(["wincast-host", "--config", "custom-host.toml"])
-            .expect("args should parse");
+        let args = Args::try_parse_from(["wincast-host"]).expect("args should parse");
 
-        assert_eq!(args.config, PathBuf::from("custom-host.toml"));
+        assert_eq!(args.config_path(), expected_default_config_path());
         assert!(args.command.is_none());
     }
 
@@ -382,6 +418,16 @@ startup_timeout_ms = 15000
         assert!(!message.contains("work_dir"));
 
         fs::remove_file(config_path).expect("temp host config should be removed");
+    }
+
+    #[test]
+    fn validate_command_reports_config_path_when_read_fails() {
+        let config_path = temp_host_config_path("validate-missing-config");
+
+        let error = validate_config(&config_path).expect_err("missing config should be reported");
+
+        assert!(error.contains("读取宿主端配置失败"));
+        assert!(error.contains(&config_path.display().to_string()));
     }
 
     #[test]
@@ -566,5 +612,28 @@ startup_timeout_ms = 15000
                 .as_nanos()
         );
         std::env::temp_dir().join(unique)
+    }
+
+    fn expected_default_config_path() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(std::env::var_os("APPDATA").expect("APPDATA should be set"))
+                .join("WinCast")
+                .join("wincast-host.toml")
+        }
+
+        #[cfg(not(windows))]
+        {
+            if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+                return PathBuf::from(config_home)
+                    .join("wincast")
+                    .join("wincast-host.toml");
+            }
+
+            PathBuf::from(std::env::var_os("HOME").expect("HOME should be set"))
+                .join(".config")
+                .join("wincast")
+                .join("wincast-host.toml")
+        }
     }
 }
