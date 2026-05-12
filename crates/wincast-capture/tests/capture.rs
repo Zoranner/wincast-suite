@@ -106,7 +106,7 @@ fn wait_next_capture_result_supports_texture_metadata() {
 fn capture_errors_have_clear_chinese_messages() {
     assert_eq!(
         CaptureError::windows_capture_not_implemented().to_string(),
-        "Windows 画面捕获实现未完成：尚未接入帧获取循环"
+        "桌面捕获尚未实现：当前稳定版仅接入 Windows 窗口捕获"
     );
     assert_eq!(
         CaptureError::windows_graphics_capture_unsupported().to_string(),
@@ -133,11 +133,15 @@ fn capture_errors_have_clear_chinese_messages() {
 
 #[cfg(windows)]
 #[test]
-fn windows_start_returns_capture_not_implemented() {
+fn windows_start_returns_desktop_capture_not_implemented() {
     let error = CaptureSession::start(CaptureTarget::Desktop)
-        .expect_err("windows capture should be explicit pending work");
+        .expect_err("desktop capture should be explicit pending work");
 
     assert_eq!(error, CaptureError::windows_capture_not_implemented());
+    assert_eq!(
+        error.to_string(),
+        "桌面捕获尚未实现：当前稳定版仅接入 Windows 窗口捕获"
+    );
 }
 
 #[cfg(not(windows))]
