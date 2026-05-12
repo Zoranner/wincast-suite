@@ -14,8 +14,8 @@ use crate::{
 };
 
 pub(crate) fn load_config(path: &PathBuf) -> Result<ClientConfig, String> {
-    let source =
-        fs::read_to_string(path).map_err(|error| format!("读取客户端配置失败: {error}"))?;
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("读取客户端配置失败 {}: {error}", path.display()))?;
     ClientConfig::from_toml_str(&source).map_err(|error| error.to_string())
 }
 

@@ -10,7 +10,7 @@ const SUPPORTED_CLIENT_TARGETS: &[&str] =
 #[derive(Debug, Parser)]
 #[command(author, version, about = "WinCast Linux 客户端")]
 pub(crate) struct Args {
-    #[arg(short, long, global = true, default_value = "wincast-client.toml")]
+    #[arg(short, long, global = true, default_value_os_t = default_config_path())]
     pub(crate) config: PathBuf,
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
@@ -86,6 +86,37 @@ fn supported_targets_message() -> String {
     )
 }
 
+fn default_config_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("AppData")
+                    .join("Roaming")
+            })
+            .join("WinCast")
+            .join("wincast-client.toml")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".config")
+            })
+            .join("wincast")
+            .join("wincast-client.toml")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -93,7 +124,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, Command, supported_targets_message, validate_config};
+    use super::{Args, Command, default_config_path, supported_targets_message, validate_config};
 
     #[test]
     fn parses_run_command_with_config_path() {
@@ -150,6 +181,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_default_config_path_from_user_config_dir() {
+        let args = Args::try_parse_from(["wincast-client", "validate"]).expect("args should parse");
+
+        assert_eq!(args.config, default_config_path());
+        assert_ne!(args.config, PathBuf::from("wincast-client.toml"));
+    }
+
+    #[test]
     fn targets_message_lists_x86_64_and_arm64_linux() {
         let message = supported_targets_message();
 
@@ -179,6 +218,17 @@ port = 7856
         assert!(message.contains("aarch64-unknown-linux-gnu"));
 
         fs::remove_file(config_path).expect("temp client config should be removed");
+    }
+
+    #[test]
+    fn load_config_error_reports_actual_config_path() {
+        let config_path = temp_client_config_path("missing-load-config");
+
+        let error = crate::runtime::load_config(&config_path)
+            .expect_err("missing client config should fail");
+
+        assert!(error.contains("读取客户端配置失败"));
+        assert!(error.contains(&config_path.display().to_string()));
     }
 
     fn temp_client_config_path(name: &str) -> PathBuf {
