@@ -1,0 +1,375 @@
+use std::{net::TcpListener, sync::mpsc, thread, time::Duration};
+
+use wincast_protocol::{
+    config::ClientConfig,
+    frame::{read_message, write_message},
+    handshake::{HandshakeError, send_client_hello},
+    message::{ControlMessage, ErrorCode},
+    raw_frame::write_raw_bgra_frame,
+};
+
+use crate::{
+    errors::format_host_error,
+    runtime::{
+        ClientRunError, RetryOptions, control_channel_ready_message, run_client_with_config,
+        run_with_retry,
+    },
+    test_support::{raw_bgra_frame, raw_binary_frame},
+};
+
+#[test]
+fn client_run_performs_tcp_control_handshake() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+    let (observed_messages_tx, observed_messages_rx) = mpsc::channel();
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        let hello = read_message(&mut stream).expect("client hello should decode");
+        send_client_hello(&mut stream).expect("host hello should encode");
+        let start_session = read_message(&mut stream).expect("start session should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::SessionReady {
+                width: 2,
+                height: 2,
+            },
+        )
+        .expect("session ready should encode");
+        write_message(&mut stream, &ControlMessage::VideoReady).expect("video ready should encode");
+        write_raw_bgra_frame(&mut stream, &raw_binary_frame())
+            .expect("raw binary frame should encode");
+        observed_messages_tx
+            .send((hello, start_session))
+            .expect("observed messages should send");
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let message = run_client_with_config(&config).expect("client run should complete handshake");
+
+    let observed_messages = observed_messages_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host should observe client control messages");
+    host_thread.join().expect("host thread should finish");
+    assert_eq!(
+        observed_messages,
+        (
+            ControlMessage::Hello {
+                version: wincast_protocol::handshake::PROTOCOL_VERSION,
+            },
+            ControlMessage::StartSession,
+        )
+    );
+    assert!(message.contains("已建立宿主端控制通道"));
+    assert!(message.contains(&config.endpoint()));
+    assert!(!message.contains("运行时链路未实现"));
+}
+
+#[test]
+fn client_run_reports_runtime_unimplemented_response_from_host() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        read_message(&mut stream).expect("client hello should decode");
+        send_client_hello(&mut stream).expect("host hello should encode");
+        read_message(&mut stream).expect("start session should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::Error {
+                code: ErrorCode::TransportFailed,
+                message: "运行时链路未实现：尚未启动程序生命周期、画面捕获、编码传输和输入注入。"
+                    .to_owned(),
+            },
+        )
+        .expect("runtime error should encode");
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let error = run_client_with_config(&config).expect_err("runtime unimplemented should fail");
+
+    host_thread.join().expect("host thread should finish");
+    assert!(error.contains("宿主端传输链路失败"));
+    assert!(error.contains("运行时链路未实现"));
+}
+
+#[test]
+fn client_reports_encoding_failure_in_chinese() {
+    let error = format_host_error(
+        ErrorCode::EncodingFailed,
+        "Windows 视频编码器未实现：尚未接入 H.264 编码器。".to_owned(),
+    );
+
+    assert!(error.contains("宿主端视频编码失败"));
+    assert!(error.contains("尚未接入 H.264 编码器"));
+}
+
+#[test]
+fn client_formats_host_session_errors_with_specific_chinese_prefixes() {
+    let cases = [
+        (ErrorCode::Busy, "宿主端忙碌"),
+        (ErrorCode::WindowNotFound, "宿主端窗口定位失败"),
+        (ErrorCode::ProgramLaunchFailed, "宿主端程序启动失败"),
+        (ErrorCode::CaptureFailed, "宿主端画面捕获失败"),
+        (ErrorCode::TransportFailed, "宿主端传输链路失败"),
+        (ErrorCode::InvalidConfig, "宿主端配置无效"),
+        (ErrorCode::NoUserLoggedIn, "宿主端未登录 Windows 用户"),
+        (ErrorCode::SessionLocked, "宿主端 Windows 会话已锁屏"),
+        (ErrorCode::AgentUnavailable, "宿主端 Agent 不可用或不在线"),
+    ];
+
+    for (code, expected_prefix) in cases {
+        let error = format_host_error(code, "测试错误详情".to_owned());
+
+        assert!(
+            error.starts_with(expected_prefix),
+            "{code:?} should start with {expected_prefix}, got {error}"
+        );
+        assert!(error.contains("测试错误详情"));
+        assert!(!error.contains("宿主端拒绝连接"));
+    }
+}
+
+#[test]
+fn client_rejects_invalid_raw_bgra_frame_from_host() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        read_message(&mut stream).expect("client hello should decode");
+        send_client_hello(&mut stream).expect("host hello should encode");
+        read_message(&mut stream).expect("start session should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::SessionReady {
+                width: 2,
+                height: 2,
+            },
+        )
+        .expect("session ready should encode");
+        let mut frame = raw_bgra_frame();
+        frame.bytes.pop();
+        write_message(&mut stream, &ControlMessage::RawBgraReadbackFrame(frame))
+            .expect("raw frame should encode");
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let error = run_client_with_config(&config).expect_err("invalid frame should fail");
+
+    host_thread.join().expect("host thread should finish");
+    assert!(error.contains("首帧 BGRA readback 无效"));
+}
+
+#[test]
+fn client_rejects_invalid_message_after_video_ready() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        read_message(&mut stream).expect("client hello should decode");
+        send_client_hello(&mut stream).expect("host hello should encode");
+        read_message(&mut stream).expect("start session should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::SessionReady {
+                width: 2,
+                height: 2,
+            },
+        )
+        .expect("session ready should encode");
+        write_message(&mut stream, &ControlMessage::VideoReady).expect("video ready should encode");
+        write_message(&mut stream, &ControlMessage::Heartbeat).expect("heartbeat should encode");
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let error = run_client_with_config(&config).expect_err("invalid message should fail");
+
+    host_thread.join().expect("host thread should finish");
+    assert!(error.contains("raw BGRA 视频帧失败"));
+}
+
+#[test]
+fn default_retry_policy_does_not_retry() {
+    let mut attempts = 0;
+    let mut sleeps = Vec::new();
+    let options = RetryOptions {
+        retries: 0,
+        retry_delay: Duration::from_millis(10),
+    };
+
+    let error = run_with_retry(
+        &options,
+        || {
+            attempts += 1;
+            Err(ClientRunError::host_status(
+                ErrorCode::Busy,
+                "宿主端已有客户端连接",
+            ))
+        },
+        |delay| sleeps.push(delay),
+    )
+    .expect_err("default retry policy should fail after one attempt");
+
+    assert_eq!(attempts, 1);
+    assert!(sleeps.is_empty());
+    assert!(error.contains("宿主端忙碌"));
+    assert!(!error.contains("尝试 1 次后失败"));
+}
+
+#[test]
+fn retry_policy_succeeds_after_busy_status_recovers() {
+    let mut attempts = 0;
+    let mut sleeps = Vec::new();
+    let options = RetryOptions {
+        retries: 2,
+        retry_delay: Duration::from_millis(25),
+    };
+
+    let message = run_with_retry(
+        &options,
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(ClientRunError::host_status(
+                    ErrorCode::Busy,
+                    "宿主端已有客户端连接",
+                ))
+            } else {
+                Ok("已连接".to_owned())
+            }
+        },
+        |delay| sleeps.push(delay),
+    )
+    .expect("busy status should be retried and recover");
+
+    assert_eq!(message, "已连接");
+    assert_eq!(attempts, 2);
+    assert_eq!(sleeps, vec![Duration::from_millis(25)]);
+}
+
+#[test]
+fn retry_policy_reports_last_session_locked_error_after_limit() {
+    let mut attempts = 0;
+    let mut sleeps = Vec::new();
+    let options = RetryOptions {
+        retries: 2,
+        retry_delay: Duration::from_millis(15),
+    };
+
+    let error = run_with_retry(
+        &options,
+        || {
+            attempts += 1;
+            Err(ClientRunError::host_status(
+                ErrorCode::SessionLocked,
+                format!("第 {attempts} 次仍锁屏"),
+            ))
+        },
+        |delay| sleeps.push(delay),
+    )
+    .expect_err("session locked should fail after retry limit");
+
+    assert_eq!(attempts, 3);
+    assert_eq!(
+        sleeps,
+        vec![Duration::from_millis(15), Duration::from_millis(15)]
+    );
+    assert!(error.contains("尝试 3 次后失败"));
+    assert!(error.contains("宿主端 Windows 会话已锁屏"));
+    assert!(error.contains("第 3 次仍锁屏"));
+}
+
+#[test]
+fn retry_policy_does_not_retry_unsupported_version() {
+    let mut attempts = 0;
+    let options = RetryOptions {
+        retries: 3,
+        retry_delay: Duration::from_millis(10),
+    };
+
+    let error = run_with_retry(
+        &options,
+        || {
+            attempts += 1;
+            Err(ClientRunError::Handshake(
+                HandshakeError::UnsupportedVersion,
+            ))
+        },
+        |_| panic!("unsupported version should not sleep"),
+    )
+    .expect_err("unsupported version should not retry");
+
+    assert_eq!(attempts, 1);
+    assert!(error.contains("尝试 1 次后失败"));
+    assert!(error.contains("协议版本不匹配"));
+}
+
+#[test]
+fn client_run_reports_host_error_in_chinese() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        read_message(&mut stream).expect("client hello should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::Error {
+                code: ErrorCode::Busy,
+                message: "宿主端已有客户端连接".to_owned(),
+            },
+        )
+        .expect("host error should encode");
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let error = run_client_with_config(&config).expect_err("host error should fail client run");
+
+    host_thread.join().expect("host thread should finish");
+    assert!(error.contains("宿主端忙碌"));
+    assert!(error.contains("宿主端已有客户端连接"));
+}
+
+#[test]
+fn run_message_does_not_claim_runtime_chain_is_ready() {
+    let config = ClientConfig {
+        host: "192.168.10.25".to_owned(),
+        port: 7856,
+    };
+
+    let message = control_channel_ready_message(&config);
+
+    assert!(message.contains("已建立宿主端控制通道"));
+    assert!(message.contains("Linux 客户端已接入 raw BGRA 窗口渲染和输入事件回传"));
+    assert!(message.contains("宿主端已接入基础 Windows 输入注入"));
+    assert!(message.contains("H.264/WebRTC 编码传输尚未实现"));
+    assert!(!message.contains("视频解码渲染和输入事件链路尚未实现"));
+}
