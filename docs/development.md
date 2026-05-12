@@ -12,7 +12,7 @@ cargo test --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-## 客户端 ARM64 目标
+## 客户端目标平台
 
 客户端需要覆盖 Linux x86_64 与 Linux aarch64/ARM64：
 
@@ -21,7 +21,18 @@ rustup target add aarch64-unknown-linux-gnu
 cargo check -p wincast-client --target aarch64-unknown-linux-gnu
 ```
 
-当前客户端使用 SDL2 创建 Linux 窗口并显示 raw BGRA 帧，这是当前默认可用的画面链路。协议与配置层虽然已经预留 `video.codec = "h264"`、`EncodedVideoFrame` 等扩展点，但这部分目前仅用于协议边界和后续扩展预留，运行期还没有接入 H.264 编码传输或 WebRTC。银河麒麟 V10 等目标机需要安装 SDL2 开发包后再执行 Linux 目标构建；H.264/WebRTC 仍应按后续性能优化方向理解，当前 Windows 开发机上的 workspace 验证只能证明非 Linux 占位路径和协议逻辑可编译，不能替代目标系统真机构建。
+当前客户端使用 SDL2 创建 Linux 窗口并显示 raw BGRA 帧，这是当前默认可用的画面链路。协议与配置层虽然已经预留 `video.codec = "h264"`、`EncodedVideoFrame` 等扩展点，但这部分目前仅用于协议边界和后续扩展预留，运行期还没有接入 H.264 编码传输或 WebRTC。
+
+Windows 开发机上的 workspace 验证只能证明非 Linux 占位路径和协议逻辑可编译，不能替代目标系统真机构建。客户端稳定版收口时，必须在目标 Linux 机器上安装 SDL2 开发包后分别验证：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y pkg-config libsdl2-dev
+cargo test -p wincast-protocol -p wincast-client
+cargo clippy -p wincast-protocol -p wincast-client --all-targets --all-features -- -D warnings
+```
+
+在银河麒麟 V10 等不使用 `apt` 的系统上，应改用系统对应包管理器安装 `pkg-config` 和 SDL2 开发包，再执行同一组 Cargo 命令。x86_64 目标机和 aarch64/ARM64 目标机都需要完成这组验证；CI 中的 aarch64 `cargo check --target aarch64-unknown-linux-gnu` 只能确认 Rust 交叉编译边界，不能替代 ARM64 目标机上的 SDL2 链接和窗口运行验证。
 
 ## 运行与占位边界
 
