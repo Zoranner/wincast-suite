@@ -45,6 +45,24 @@ fn query_status_rejects_unexpected_agent_response() {
 }
 
 #[test]
+fn query_status_returns_agent_error_response_with_reason_and_message() {
+    let mut coordinator = ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(
+        DuplexTransport::with_response(&AgentToService::Error {
+            reason: AgentErrorReason::AgentFailed,
+            message: "Agent 状态采集失败".to_owned(),
+        }),
+    ));
+
+    let error = coordinator
+        .query_status()
+        .expect_err("agent error response should fail status query");
+
+    assert!(error.to_string().contains("Agent 状态查询失败"));
+    assert!(error.to_string().contains("AgentFailed"));
+    assert!(error.to_string().contains("Agent 状态采集失败"));
+}
+
+#[test]
 fn query_status_wraps_ipc_write_error_with_context() {
     let mut coordinator =
         ServiceAgentCoordinator::new(ServiceIpcEndpoint::new(FailingTransport::fail_write()));

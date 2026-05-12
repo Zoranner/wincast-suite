@@ -38,6 +38,9 @@ impl<T: Read + Write> ServiceAgentCoordinator<T> {
             .map_err(ServiceAgentError::query_read)?
         {
             AgentToService::StatusChanged { status } => Ok(status),
+            AgentToService::Error { reason, message } => {
+                Err(ServiceAgentError::query_agent_error(reason, message))
+            }
             response => Err(ServiceAgentError::unexpected_status_response(response)),
         }
     }
@@ -107,6 +110,10 @@ pub enum ServiceAgentError {
     UnexpectedStatusResponse {
         response: AgentToService,
     },
+    QueryAgentError {
+        reason: AgentErrorReason,
+        message: String,
+    },
     StartWrite {
         source: ServiceIpcError,
     },
@@ -154,6 +161,10 @@ impl ServiceAgentError {
 
     fn unexpected_status_response(response: AgentToService) -> Self {
         Self::UnexpectedStatusResponse { response }
+    }
+
+    fn query_agent_error(reason: AgentErrorReason, message: String) -> Self {
+        Self::QueryAgentError { reason, message }
     }
 
     fn start_write(source: ServiceIpcError) -> Self {
@@ -210,6 +221,9 @@ impl fmt::Display for ServiceAgentError {
                 formatter,
                 "Agent 状态查询响应类型错误：期望 StatusChanged，实际收到 {response:?}"
             ),
+            Self::QueryAgentError { reason, message } => {
+                write!(formatter, "Agent 状态查询失败：{reason:?}：{message}")
+            }
             Self::StartWrite { source } => {
                 write!(formatter, "发送 Agent 会话启动命令失败：{source}")
             }
@@ -258,6 +272,7 @@ impl Error for ServiceAgentError {
             | Self::StopWrite { source }
             | Self::StopRead { source } => Some(source),
             Self::UnexpectedStatusResponse { .. }
+            | Self::QueryAgentError { .. }
             | Self::UnexpectedStartResponse { .. }
             | Self::MismatchedStartSessionId { .. }
             | Self::StartAgentError { .. }
