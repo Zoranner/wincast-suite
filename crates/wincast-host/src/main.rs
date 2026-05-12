@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use wincast_protocol::config::HostConfig;
+use wincast_protocol::config::{CaptureMode, HostConfig};
 
 mod agent;
 mod agent_runtime;
@@ -107,6 +107,7 @@ fn execute_service_command(
 
 fn validate_config(path: &PathBuf) -> Result<String, String> {
     let config = load_config(path)?;
+    validate_stable_capture_support(&config)?;
     Ok(format!(
         "宿主端配置有效，监听 {}，程序 {}，视频 {}x{}@{}fps",
         config.listen, config.program, config.video.width, config.video.height, config.video.fps
@@ -123,6 +124,7 @@ fn run_host_with_runtime(
     runtime: &mut impl HostAgentRuntime,
 ) -> Result<String, String> {
     let config = load_config(path)?;
+    validate_stable_capture_support(&config)?;
     let startup_message = runtime_not_implemented_message(&config);
     let local_addr = runtime.run(&config)?;
     Ok(format!(
@@ -147,6 +149,17 @@ fn load_config(path: &PathBuf) -> Result<HostConfig, String> {
     let source =
         fs::read_to_string(path).map_err(|error| format!("读取宿主端配置失败: {error}"))?;
     HostConfig::from_toml_str(&source).map_err(|error| error.to_string())
+}
+
+fn validate_stable_capture_support(config: &HostConfig) -> Result<(), String> {
+    if matches!(config.capture.mode, CaptureMode::Desktop) {
+        return Err(
+            "当前稳定版仅支持窗口捕获，请将 capture.mode 配置为 \"window\"；desktop 捕获尚未实现。"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -276,8 +289,85 @@ mod tests {
     }
 
     #[test]
-    fn run_command_loads_config_and_delegates_host_agent_runtime() {
-        let config_path = temp_host_config_path("run-delegates-runtime");
+    fn validate_command_rejects_desktop_capture_before_runtime() {
+        let config_path = temp_host_config_path("validate-rejects-desktop");
+        fs::write(
+            &config_path,
+            r#"
+listen = "127.0.0.1:0"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+args = ["--profile", "demo"]
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+
+[capture]
+mode = "desktop"
+window_title_contains = ""
+startup_timeout_ms = 15000
+"#,
+        )
+        .expect("host config should be written");
+
+        let error = validate_config(&config_path).expect_err("desktop capture should be rejected");
+
+        assert_eq!(
+            error,
+            "当前稳定版仅支持窗口捕获，请将 capture.mode 配置为 \"window\"；desktop 捕获尚未实现。"
+        );
+
+        fs::remove_file(config_path).expect("temp host config should be removed");
+    }
+
+    #[test]
+    fn run_command_loads_window_config_and_delegates_host_agent_runtime() {
+        let config_path = temp_host_config_path("run-delegates-window-runtime");
+        fs::write(
+            &config_path,
+            r#"
+listen = "127.0.0.1:0"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+args = ["--profile", "demo"]
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+
+[capture]
+mode = "window"
+window_title_contains = "SomeApp"
+startup_timeout_ms = 15000
+"#,
+        )
+        .expect("host config should be written");
+        let mut runtime = RecordingHostAgentRuntime::default();
+
+        let message = run_host_with_runtime(&config_path, &mut runtime)
+            .expect("window capture should delegate to runtime");
+
+        assert_eq!(runtime.calls.len(), 1);
+        assert_eq!(runtime.calls[0].listen, "127.0.0.1:0");
+        assert_eq!(runtime.calls[0].capture.mode, CaptureMode::Window);
+        assert_eq!(
+            message,
+            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
+        );
+
+        fs::remove_file(config_path).expect("temp host config should be removed");
+    }
+
+    #[test]
+    fn run_command_rejects_desktop_capture_before_starting_runtime() {
+        let config_path = temp_host_config_path("run-rejects-desktop-before-runtime");
         fs::write(
             &config_path,
             r#"
@@ -302,17 +392,43 @@ startup_timeout_ms = 15000
         .expect("host config should be written");
         let mut runtime = RecordingHostAgentRuntime::default();
 
-        let message = run_host_with_runtime(&config_path, &mut runtime)
-            .expect("run command should delegate to runtime");
+        let error = run_host_with_runtime(&config_path, &mut runtime)
+            .expect_err("desktop capture should be rejected before runtime starts");
 
-        assert_eq!(runtime.calls.len(), 1);
-        assert_eq!(runtime.calls[0].listen, "127.0.0.1:0");
+        assert_eq!(runtime.calls.len(), 0);
         assert_eq!(
-            message,
-            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
+            error,
+            "当前稳定版仅支持窗口捕获，请将 capture.mode 配置为 \"window\"；desktop 捕获尚未实现。"
         );
 
         fs::remove_file(config_path).expect("temp host config should be removed");
+    }
+
+    #[test]
+    fn protocol_config_still_parses_desktop_capture_mode() {
+        let config = HostConfig::from_toml_str(
+            r#"
+listen = "127.0.0.1:0"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+args = []
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+
+[capture]
+mode = "desktop"
+window_title_contains = ""
+startup_timeout_ms = 15000
+"#,
+        )
+        .expect("protocol config should continue parsing desktop mode");
+
+        assert_eq!(config.capture.mode, CaptureMode::Desktop);
     }
 
     fn host_config(listen: String) -> HostConfig {
