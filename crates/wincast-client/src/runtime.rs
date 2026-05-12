@@ -101,9 +101,10 @@ pub(crate) fn run_with_retry(
         match attempt() {
             Ok(message) => return Ok(message),
             Err(error) => {
-                let should_retry = error.is_retriable() && attempts < max_attempts;
+                let is_retriable = error.is_retriable();
+                let should_retry = is_retriable && attempts < max_attempts;
                 if !should_retry {
-                    if max_attempts == 1 {
+                    if max_attempts == 1 || !is_retriable {
                         return Err(error.into_message());
                     }
                     return Err(format!(

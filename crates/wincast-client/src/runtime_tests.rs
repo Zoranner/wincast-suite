@@ -323,8 +323,11 @@ fn retry_policy_does_not_retry_unsupported_version() {
     .expect_err("unsupported version should not retry");
 
     assert_eq!(attempts, 1);
-    assert!(error.contains("尝试 1 次后失败"));
     assert!(error.contains("协议版本不匹配"));
+    assert!(
+        !error.contains("尝试"),
+        "不可重试错误不应伪装成重试耗尽: {error}"
+    );
 }
 
 #[test]
