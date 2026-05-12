@@ -1,5 +1,45 @@
 use wincast_protocol::config::{CaptureMode, ClientConfig, ConfigError, HostConfig, VideoCodec};
 
+fn example_config(name: &str) -> String {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = manifest_dir
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join(name);
+
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read example config {}: {}", path.display(), err))
+}
+
+#[test]
+fn parses_stable_host_example_config() {
+    let config = HostConfig::from_toml_str(&example_config("wincast-host.toml"))
+        .expect("stable host example config should parse");
+
+    assert_eq!(config.capture.mode, CaptureMode::Window);
+    assert_eq!(config.video.codec, VideoCodec::RawBgra);
+    assert!(
+        !config.capture.window_title_contains.trim().is_empty(),
+        "stable host example must keep a non-empty window title hint"
+    );
+}
+
+#[test]
+fn parses_stable_client_example_config() {
+    let config = ClientConfig::from_toml_str(&example_config("wincast-client.toml"))
+        .expect("stable client example config should parse");
+
+    assert!(
+        !config.host.trim().is_empty(),
+        "stable client example must keep a non-empty host"
+    );
+    assert_ne!(
+        config.port, 0,
+        "stable client example must keep a non-zero port"
+    );
+}
+
 #[test]
 fn parses_host_config_from_documented_toml() {
     let config = HostConfig::from_toml_str(
