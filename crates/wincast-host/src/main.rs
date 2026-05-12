@@ -223,10 +223,12 @@ mod tests {
                 .unwrap_or_else(|error| error);
 
             assert!(message.contains("Windows Service"));
-            assert!(message.contains("未实现"));
-            assert!(message.contains("当前仍需使用前台 run 模式"));
+            assert!(message.contains("当前稳定版仅支持前台 run 模式，Service 管理未启用"));
             if !matches!(command, ServiceCommand::Status) {
                 assert!(message.contains("未执行真实系统服务操作"));
+            }
+            if matches!(command, ServiceCommand::Status) {
+                assert!(message.contains("未执行真实系统服务状态查询"));
             }
             assert!(!message.contains("安装成功"));
             assert!(!message.contains("Service 已安装"));
@@ -253,7 +255,7 @@ mod tests {
 
             assert_eq!(manager.calls, vec![expected_call]);
             if matches!(command, ServiceCommand::Status) {
-                assert!(message.contains("未实现"));
+                assert!(message.contains("当前稳定版仅支持前台 run 模式，Service 管理未启用"));
             } else {
                 assert!(message.contains(expected_call));
             }
@@ -270,9 +272,11 @@ mod tests {
         )
         .expect("status should return a user-facing message");
 
-        assert!(message.contains("未实现"));
+        assert_eq!(
+            message,
+            "Windows Service 状态：当前稳定版仅支持前台 run 模式，Service 管理未启用；未安装，未执行真实系统服务状态查询。"
+        );
         assert!(message.contains("未安装"));
-        assert!(message.contains("当前仍需使用前台 run 模式"));
         assert!(!message.contains("安装成功"));
         assert!(!message.contains("已启动"));
     }

@@ -1,14 +1,19 @@
+fn stable_service_boundary() -> &'static str {
+    "当前稳定版仅支持前台 run 模式，Service 管理未启用"
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceStatus {
     PendingImplementation,
 }
 
 impl ServiceStatus {
-    pub(crate) fn message(self) -> &'static str {
+    pub(crate) fn message(self) -> String {
         match self {
-            Self::PendingImplementation => {
-                "Windows Service 状态：未实现真实系统服务管理，未安装；当前仍需使用前台 run 模式。"
-            }
+            Self::PendingImplementation => format!(
+                "Windows Service 状态：{}；未安装，未执行真实系统服务状态查询。",
+                stable_service_boundary()
+            ),
         }
     }
 }
@@ -26,7 +31,8 @@ impl std::fmt::Display for ServiceError {
         match self {
             Self::PendingImplementation(operation) => write!(
                 formatter,
-                "Windows Service {operation}尚未实现，未执行真实系统服务操作；当前仍需使用前台 run 模式。"
+                "Windows Service {operation}不可用：{}；未执行真实系统服务操作。",
+                stable_service_boundary()
             ),
             #[cfg(not(windows))]
             Self::UnsupportedPlatform(operation) => write!(
@@ -147,7 +153,7 @@ mod tests {
         assert_eq!(error, ServiceError::PendingImplementation("安装"));
         assert_eq!(
             error.to_string(),
-            "Windows Service 安装尚未实现，未执行真实系统服务操作；当前仍需使用前台 run 模式。"
+            "Windows Service 安装不可用：当前稳定版仅支持前台 run 模式，Service 管理未启用；未执行真实系统服务操作。"
         );
     }
 
@@ -161,9 +167,12 @@ mod tests {
         let message = status.message();
 
         assert_eq!(status, ServiceStatus::PendingImplementation);
-        assert!(message.contains("未实现"));
+        assert_eq!(
+            message,
+            "Windows Service 状态：当前稳定版仅支持前台 run 模式，Service 管理未启用；未安装，未执行真实系统服务状态查询。"
+        );
         assert!(message.contains("未安装"));
-        assert!(message.contains("当前仍需使用前台 run 模式"));
+        assert!(message.contains("当前稳定版仅支持前台 run 模式，Service 管理未启用"));
         assert!(!message.contains("安装成功"));
         assert!(!message.contains("已启动"));
     }
