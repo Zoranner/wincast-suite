@@ -6,7 +6,7 @@ use wincast_protocol::{frame::write_message, message::ControlMessage};
 
 #[cfg(any(test, target_os = "linux"))]
 use crate::stream::{
-    RawBgraReceiveSummary, RawBgraStreamEvent, RawBgraStreamItem, format_raw_bgra_read_error,
+    RawBgraReceiveSummary, RawBgraStreamEvent, RawBgraStreamItem, format_raw_bgra_stream_error,
     read_raw_bgra_stream_item, render_raw_bgra_frame,
 };
 
@@ -100,7 +100,7 @@ fn read_raw_bgra_frames_with_renderer_limit(
             }
             Err(error) => {
                 sender
-                    .send(RawBgraStreamEvent::Failed(format_raw_bgra_read_error(
+                    .send(RawBgraStreamEvent::Failed(format_raw_bgra_stream_error(
                         error,
                     )))
                     .map_err(|_| "raw BGRA 测试帧通道已关闭".to_owned())?;
@@ -190,7 +190,7 @@ fn spawn_raw_bgra_frame_reader(
             let event = match read_raw_bgra_stream_item(&mut reader) {
                 Ok(RawBgraStreamItem::Frame(frame)) => RawBgraStreamEvent::Frame(frame),
                 Ok(RawBgraStreamItem::Goodbye) => RawBgraStreamEvent::Goodbye,
-                Err(error) => RawBgraStreamEvent::Failed(format_raw_bgra_read_error(error)),
+                Err(error) => RawBgraStreamEvent::Failed(format_raw_bgra_stream_error(error)),
             };
             let should_stop = !matches!(event, RawBgraStreamEvent::Frame(_));
             if sender.send(event).is_err() || should_stop {

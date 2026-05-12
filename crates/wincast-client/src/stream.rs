@@ -37,7 +37,7 @@ pub(crate) fn read_raw_bgra_frames(
     let mut last_sequence_number = None;
     let mut frames = 0;
     for _ in 0..frame_count {
-        match read_raw_bgra_stream_item(reader).map_err(format_raw_bgra_read_error)? {
+        match read_raw_bgra_stream_item(reader).map_err(format_raw_bgra_stream_error)? {
             RawBgraStreamItem::Frame(frame) => {
                 validate_raw_frame_sequence(&frame, &mut last_sequence_number)?;
                 frames += 1;
@@ -101,23 +101,40 @@ fn validate_raw_frame_sequence(
 
 pub(crate) fn read_raw_bgra_stream_item(
     reader: &mut impl std::io::Read,
-) -> Result<RawBgraStreamItem, String> {
-    match read_protocol_raw_bgra_stream_item(reader).map_err(|error| error.to_string())? {
+) -> Result<RawBgraStreamItem, RawBgraStreamReadError> {
+    match read_protocol_raw_bgra_stream_item(reader)
+        .map_err(|error| RawBgraStreamReadError::Interrupted(error.to_string()))?
+    {
         ProtocolRawBgraStreamItem::Frame(frame) => Ok(RawBgraStreamItem::Frame(frame)),
-        ProtocolRawBgraStreamItem::Control(ControlMessage::Error { code, message }) => {
-            Err(format_host_error(code, message))
-        }
+        ProtocolRawBgraStreamItem::Control(ControlMessage::Error { code, message }) => Err(
+            RawBgraStreamReadError::Host(format_host_error(code, message)),
+        ),
         ProtocolRawBgraStreamItem::Control(ControlMessage::Goodbye) => {
             Ok(RawBgraStreamItem::Goodbye)
         }
-        ProtocolRawBgraStreamItem::Control(message) => {
-            Err(format!("宿主端 raw BGRA 流中收到无效控制消息: {message:?}"))
-        }
+        ProtocolRawBgraStreamItem::Control(message) => Err(RawBgraStreamReadError::InvalidControl(
+            format!("宿主端 raw BGRA 流中收到无效控制消息: {message:?}"),
+        )),
     }
 }
 
 pub(crate) fn format_raw_bgra_read_error(error: impl std::fmt::Display) -> String {
     format!("视频流中断: 读取宿主端 raw BGRA 视频帧失败: {error}")
+}
+
+pub(crate) fn format_raw_bgra_stream_error(error: RawBgraStreamReadError) -> String {
+    match error {
+        RawBgraStreamReadError::Host(message) | RawBgraStreamReadError::InvalidControl(message) => {
+            message
+        }
+        RawBgraStreamReadError::Interrupted(message) => format_raw_bgra_read_error(message),
+    }
+}
+
+pub(crate) enum RawBgraStreamReadError {
+    Host(String),
+    InvalidControl(String),
+    Interrupted(String),
 }
 
 pub(crate) enum RawBgraStreamItem {
@@ -211,6 +228,10 @@ mod tests {
 
         assert!(error.contains("宿主端画面捕获失败"));
         assert!(error.contains("读取后续 raw BGRA 捕获帧失败"));
+        assert!(
+            !error.contains("视频流中断"),
+            "host error should not be reported as raw stream interruption: {error}"
+        );
     }
 
     #[test]
