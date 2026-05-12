@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use wincast_protocol::config::{CaptureMode, HostConfig};
+use wincast_protocol::config::{CaptureMode, HostConfig, VideoCodec};
 
 mod agent;
 mod agent_runtime;
@@ -109,8 +109,11 @@ fn validate_config(path: &PathBuf) -> Result<String, String> {
     let config = load_config(path)?;
     validate_stable_capture_support(&config)?;
     Ok(format!(
-        "宿主端配置有效，监听 {}，程序 {}，视频 {}x{}@{}fps",
-        config.listen, config.program, config.video.width, config.video.height, config.video.fps
+        "宿主端配置有效，smoke-test 摘要：监听 {}，capture mode {}，window title {}，codec {}。",
+        config.listen,
+        capture_mode_label(config.capture.mode),
+        config.capture.window_title_contains,
+        video_codec_label(config.video.codec)
     ))
 }
 
@@ -160,6 +163,20 @@ fn validate_stable_capture_support(config: &HostConfig) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn capture_mode_label(mode: CaptureMode) -> &'static str {
+    match mode {
+        CaptureMode::Window => "window",
+        CaptureMode::Desktop => "desktop",
+    }
+}
+
+fn video_codec_label(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::RawBgra => "raw_bgra",
+        VideoCodec::H264 => "h264",
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +341,45 @@ startup_timeout_ms = 15000
             error,
             "当前稳定版仅支持窗口捕获，请将 capture.mode 配置为 \"window\"；desktop 捕获尚未实现。"
         );
+
+        fs::remove_file(config_path).expect("temp host config should be removed");
+    }
+
+    #[test]
+    fn validate_command_reports_smoke_test_summary() {
+        let config_path = temp_host_config_path("validate-smoke-summary");
+        fs::write(
+            &config_path,
+            r#"
+listen = "127.0.0.1:0"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+args = ["--profile", "demo"]
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "raw_bgra"
+bitrate_kbps = 4000
+
+[capture]
+mode = "window"
+window_title_contains = "SomeApp"
+startup_timeout_ms = 15000
+"#,
+        )
+        .expect("host config should be written");
+
+        let message = validate_config(&config_path).expect("window capture should validate");
+
+        assert!(message.contains("smoke-test"));
+        assert!(message.contains("监听 127.0.0.1:0"));
+        assert!(message.contains("capture mode window"));
+        assert!(message.contains("window title SomeApp"));
+        assert!(message.contains("codec raw_bgra"));
+        assert!(!message.contains("args"));
+        assert!(!message.contains("work_dir"));
 
         fs::remove_file(config_path).expect("temp host config should be removed");
     }

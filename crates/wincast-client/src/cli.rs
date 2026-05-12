@@ -73,7 +73,7 @@ pub(crate) fn run(command: Command, config_path: &PathBuf) -> ExitCode {
 fn validate_config(path: &PathBuf) -> Result<String, String> {
     let config = crate::runtime::load_config(path)?;
     Ok(format!(
-        "客户端配置有效，目标 {}，支持平台 {}",
+        "客户端配置有效，smoke-test 摘要：host:port {}，支持目标 {}。",
         config.endpoint(),
         SUPPORTED_CLIENT_TARGETS.join(", ")
     ))
@@ -88,11 +88,12 @@ fn supported_targets_message() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use clap::Parser;
 
-    use super::{Args, Command, supported_targets_message};
+    use super::{Args, Command, supported_targets_message, validate_config};
 
     #[test]
     fn parses_run_command_with_config_path() {
@@ -155,5 +156,40 @@ mod tests {
         assert!(message.contains("x86_64-unknown-linux-gnu"));
         assert!(message.contains("aarch64-unknown-linux-gnu"));
         assert!(message.contains("ARM64"));
+    }
+
+    #[test]
+    fn validate_command_reports_smoke_test_summary() {
+        let config_path = temp_client_config_path("validate-smoke-summary");
+        fs::write(
+            &config_path,
+            r#"
+host = "192.168.1.20"
+port = 7856
+"#,
+        )
+        .expect("client config should be written");
+
+        let message = validate_config(&config_path).expect("client config should validate");
+
+        assert!(message.contains("smoke-test"));
+        assert!(message.contains("host:port 192.168.1.20:7856"));
+        assert!(message.contains("支持目标"));
+        assert!(message.contains("x86_64-unknown-linux-gnu"));
+        assert!(message.contains("aarch64-unknown-linux-gnu"));
+
+        fs::remove_file(config_path).expect("temp client config should be removed");
+    }
+
+    fn temp_client_config_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "wincast-client-{name}-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
     }
 }
