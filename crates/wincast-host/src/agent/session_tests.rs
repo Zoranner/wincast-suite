@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    io,
     net::{TcpListener, TcpStream},
     sync::{Arc, atomic::AtomicUsize, mpsc},
     thread,
@@ -7,6 +8,7 @@ use std::{
 
 use crate::agent::{
     listener::run_control_listener_n_with_runtime,
+    session::run_started_session,
     stream::{
         HostSessionEndReason, write_raw_bgra_stream_with_input_events, write_session_goodbye,
     },
@@ -18,6 +20,84 @@ use wincast_protocol::{
     message::{ControlMessage, ErrorCode},
     raw_frame::read_raw_bgra_frame,
 };
+
+use crate::program::StartedProgram;
+
+#[test]
+fn host_reports_error_response_write_failure_without_hiding_window_failure() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let mut writer = FailingWriter;
+    let mut config = host_config("127.0.0.1:0".to_owned());
+    config.capture.startup_timeout_ms = 1;
+    let mut locator = FailingWindowLocator;
+    let mut capture = RecordingCaptureStarter::default();
+    let started = StartedProgram::from_process_id(42);
+
+    let error = run_started_session(
+        &mut writer,
+        &server,
+        &config,
+        &mut locator,
+        &mut capture,
+        &started,
+    )
+    .expect_err("host should report session failure");
+
+    assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
+    assert!(error.message.contains("定位宿主端程序窗口失败"));
+    assert!(error.message.contains("写入控制错误消息失败"));
+    drop(client);
+}
+
+#[test]
+fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let mut writer = FailingWriter;
+    let config = host_config("127.0.0.1:0".to_owned());
+    let mut locator = RecordingWindowLocator::default();
+    let mut capture = FailingCaptureStarter;
+    let started = StartedProgram::from_process_id(42);
+
+    let error = run_started_session(
+        &mut writer,
+        &server,
+        &config,
+        &mut locator,
+        &mut capture,
+        &started,
+    )
+    .expect_err("host should report session failure");
+
+    assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
+    assert!(error.message.contains("初始化画面捕获失败"));
+    assert!(error.message.contains("写入控制错误消息失败"));
+    drop(client);
+}
+
+struct FailingWriter;
+
+impl io::Write for FailingWriter {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "client closed before error response",
+        ))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[test]
 fn host_cleans_program_after_stop_session_and_waits_for_next_client() {

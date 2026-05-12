@@ -127,7 +127,7 @@ fn ensure_remote_session_allowed(
     }
 }
 
-fn run_started_session(
+pub(super) fn run_started_session(
     writer: &mut impl std::io::Write,
     stream: &TcpStream,
     config: &HostConfig,
@@ -137,13 +137,16 @@ fn run_started_session(
 ) -> Result<HostSessionEndReason, HostSessionError> {
     let window = locate_started_window(config, started, locator).map_err(|error| {
         let message = format!("定位宿主端程序窗口失败: {error}");
-        let _ = write_control_error(writer, ErrorCode::WindowNotFound, message.clone());
+        let write_result = write_control_error(writer, ErrorCode::WindowNotFound, message.clone());
+        let message = append_error_response_write_failure(message, write_result);
         HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
     })?;
     let (mut session, first_frame) =
         start_capture_session(config, &window, capture).map_err(|error| {
             let message = format!("初始化画面捕获失败: {error}");
-            let _ = write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
+            let write_result =
+                write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
+            let message = append_error_response_write_failure(message, write_result);
             HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
         })?;
     write_session_ready(writer, &first_frame)
@@ -155,4 +158,14 @@ fn run_started_session(
         session.as_mut(),
         capture_input_bounds(config, &window, &first_frame),
     )
+}
+
+fn append_error_response_write_failure(
+    message: String,
+    write_result: Result<(), String>,
+) -> String {
+    match write_result {
+        Ok(()) => message,
+        Err(write_error) => format!("{message}；{write_error}"),
+    }
 }
