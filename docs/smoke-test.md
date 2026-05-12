@@ -14,7 +14,7 @@
 配置文件以仓库内 `examples/` 目录为准，烟测时复制示例文件到默认用户配置目录后按现场环境调整，避免在清单里维护第二份 TOML。日常运行不需要每次传 `--config`；`--config` 仅用于临时调试或一次性验证时覆盖默认路径。
 
 - Windows host 复制 `examples/wincast-host.toml` 为 `%APPDATA%\WinCast\wincast-host.toml`。
-- Linux client 复制 `examples/wincast-client.toml` 为 `$XDG_CONFIG_HOME/wincast/wincast-client.toml`；未设置 `$XDG_CONFIG_HOME` 时复制到 `$HOME/.config/wincast/wincast-client.toml`。
+- Linux client 复制 `examples/wincast-client.toml` 为 `${XDG_CONFIG_HOME:-$HOME/.config}/wincast/wincast-client.toml`。`XDG_CONFIG_HOME` 必须是非空绝对路径；未设置、为空或为相对路径时使用 `$HOME/.config/wincast/wincast-client.toml`。
 
 Windows host 保持窗口捕获和 raw BGRA，重点核对以下字段：
 

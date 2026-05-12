@@ -79,20 +79,23 @@ fn default_host_config_path() -> PathBuf {
         }
     }
 
-    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(config_home)
-            .join("wincast")
-            .join("wincast-host.toml");
-    }
+    xdg_host_config_path(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))
+}
 
-    if let Some(home) = env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("wincast")
-            .join("wincast-host.toml");
-    }
-
-    PathBuf::from("wincast-host.toml")
+fn xdg_host_config_path(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    xdg_config_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| {
+            home.map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config")
+        })
+        .join("wincast")
+        .join("wincast-host.toml")
 }
 
 fn run(command: Command, config_path: &Path) -> ExitCode {
@@ -635,5 +638,42 @@ startup_timeout_ms = 15000
                 .join("wincast")
                 .join("wincast-host.toml")
         }
+    }
+
+    #[test]
+    fn xdg_host_config_path_falls_back_when_xdg_config_home_is_empty() {
+        let home = absolute_test_home();
+        let path = xdg_host_config_path(Some("".into()), Some(home.as_os_str().into()));
+
+        assert_eq!(path, expected_host_config_under_home(&home));
+    }
+
+    #[test]
+    fn xdg_host_config_path_ignores_relative_xdg_config_home() {
+        let home = absolute_test_home();
+        let path = xdg_host_config_path(
+            Some("relative-config".into()),
+            Some(home.as_os_str().into()),
+        );
+
+        assert_eq!(path, expected_host_config_under_home(&home));
+    }
+
+    fn absolute_test_home() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"C:\Users\tester")
+        }
+
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/home/tester")
+        }
+    }
+
+    fn expected_host_config_under_home(home: &std::path::Path) -> PathBuf {
+        home.join(".config")
+            .join("wincast")
+            .join("wincast-host.toml")
     }
 }

@@ -104,17 +104,28 @@ fn default_config_path() -> PathBuf {
 
     #[cfg(not(target_os = "windows"))]
     {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".config")
-            })
-            .join("wincast")
-            .join("wincast-client.toml")
+        xdg_config_path(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        )
     }
+}
+
+#[cfg(any(test, not(target_os = "windows")))]
+fn xdg_config_path(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    xdg_config_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| {
+            home.map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config")
+        })
+        .join("wincast")
+        .join("wincast-client.toml")
 }
 
 #[cfg(test)]
@@ -124,7 +135,10 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, Command, default_config_path, supported_targets_message, validate_config};
+    use super::{
+        Args, Command, default_config_path, supported_targets_message, validate_config,
+        xdg_config_path,
+    };
 
     #[test]
     fn parses_run_command_with_config_path() {
@@ -186,6 +200,43 @@ mod tests {
 
         assert_eq!(args.config, default_config_path());
         assert_ne!(args.config, PathBuf::from("wincast-client.toml"));
+    }
+
+    #[test]
+    fn xdg_config_path_falls_back_when_xdg_config_home_is_empty() {
+        let home = absolute_test_home();
+        let path = xdg_config_path(Some("".into()), Some(home.as_os_str().into()));
+
+        assert_eq!(path, expected_client_config_under_home(&home));
+    }
+
+    #[test]
+    fn xdg_config_path_ignores_relative_xdg_config_home() {
+        let home = absolute_test_home();
+        let path = xdg_config_path(
+            Some("relative-config".into()),
+            Some(home.as_os_str().into()),
+        );
+
+        assert_eq!(path, expected_client_config_under_home(&home));
+    }
+
+    fn absolute_test_home() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"C:\Users\tester")
+        }
+
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/home/tester")
+        }
+    }
+
+    fn expected_client_config_under_home(home: &std::path::Path) -> PathBuf {
+        home.join(".config")
+            .join("wincast")
+            .join("wincast-client.toml")
     }
 
     #[test]
