@@ -92,7 +92,7 @@ fn host_reports_capture_failed_after_window_lookup() {
         read_message(&mut client).expect("capture error should read"),
         ControlMessage::Error {
             code: ErrorCode::CaptureFailed,
-            message: "初始化画面捕获失败: Windows 画面捕获实现未完成：尚未接入帧获取循环"
+            message: "初始化画面捕获失败: 桌面捕获尚未实现：当前稳定版仅接入 Windows 窗口捕获"
                 .to_owned(),
         }
     );
