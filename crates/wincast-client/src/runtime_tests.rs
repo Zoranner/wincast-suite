@@ -208,7 +208,8 @@ fn client_rejects_invalid_message_after_video_ready() {
     let error = run_client_with_config(&config).expect_err("invalid message should fail");
 
     host_thread.join().expect("host thread should finish");
-    assert!(error.contains("raw BGRA 视频帧失败"));
+    assert!(error.contains("宿主端 raw BGRA 流中收到无效控制消息"));
+    assert!(!error.contains("视频流中断"));
 }
 
 #[test]
