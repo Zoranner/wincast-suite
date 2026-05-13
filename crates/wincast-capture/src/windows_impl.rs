@@ -36,6 +36,7 @@ use windows::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
             Graphics::Capture::IGraphicsCaptureItemInterop,
         },
+        UI::WindowsAndMessaging::{IsIconic, IsWindow},
     },
     core::{Interface, factory},
 };
@@ -47,13 +48,14 @@ pub(crate) struct WindowsCaptureState {
     direct3d_device: IDirect3DDevice,
     frame_pool: Direct3D11CaptureFramePool,
     _session: GraphicsCaptureSession,
+    source_window_handle: isize,
     frame_pool_size: FramePoolSize,
     sequence_number: u64,
 }
 
 impl WindowsCaptureState {
     pub(crate) fn is_active(&self) -> bool {
-        true
+        source_window_is_active(self.source_window_handle)
     }
 
     pub(crate) fn try_next_frame_metadata(
@@ -152,6 +154,18 @@ type FrameTexture = (
 struct BgraReadback {
     row_pitch: u32,
     bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceWindowActivity {
+    exists: bool,
+    minimized: bool,
+}
+
+impl SourceWindowActivity {
+    fn is_active(self) -> bool {
+        self.exists && !self.minimized
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,11 +303,14 @@ pub(crate) fn start_windows_capture(
         return Err(CaptureError::windows_graphics_capture_unsupported());
     }
 
-    let item = match target {
-        CaptureTarget::Window { handle, .. } => create_window_capture_item(*handle)?,
+    let (item, source_window_handle) = match target {
+        CaptureTarget::Window { handle, .. } => (create_window_capture_item(*handle)?, *handle),
         CaptureTarget::Desktop {
             source_window_handle,
-        } => create_monitor_capture_item_from_window(*source_window_handle)?,
+        } => (
+            create_monitor_capture_item_from_window(*source_window_handle)?,
+            *source_window_handle,
+        ),
     };
 
     let d3d_device = create_d3d_device()?;
@@ -323,9 +340,21 @@ pub(crate) fn start_windows_capture(
         direct3d_device,
         frame_pool,
         _session: session,
+        source_window_handle,
         frame_pool_size: FramePoolSize::from_size(frame_pool_size),
         sequence_number: 0,
     })
+}
+
+fn source_window_is_active(handle: isize) -> bool {
+    query_source_window_activity(handle).is_active()
+}
+
+fn query_source_window_activity(handle: isize) -> SourceWindowActivity {
+    let hwnd = HWND(handle as *mut core::ffi::c_void);
+    let exists = unsafe { IsWindow(Some(hwnd)).as_bool() };
+    let minimized = exists && unsafe { IsIconic(hwnd).as_bool() };
+    SourceWindowActivity { exists, minimized }
 }
 
 fn create_window_capture_item(handle: isize) -> Result<GraphicsCaptureItem, CaptureError> {
@@ -440,6 +469,31 @@ mod tests {
                 width: 1920,
                 height: 1080
             }
+        );
+    }
+
+    #[test]
+    fn source_window_activity_is_inactive_when_missing_or_minimized() {
+        assert!(
+            SourceWindowActivity {
+                exists: true,
+                minimized: false
+            }
+            .is_active()
+        );
+        assert!(
+            !SourceWindowActivity {
+                exists: false,
+                minimized: false
+            }
+            .is_active()
+        );
+        assert!(
+            !SourceWindowActivity {
+                exists: true,
+                minimized: true
+            }
+            .is_active()
         );
     }
 }
