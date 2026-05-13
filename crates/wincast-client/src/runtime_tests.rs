@@ -304,6 +304,46 @@ fn retry_policy_reports_last_session_locked_error_after_limit() {
 }
 
 #[test]
+fn retry_policy_retries_session_gate_rejections_until_recovering() {
+    for code in [
+        ErrorCode::NoUserLoggedIn,
+        ErrorCode::SessionLocked,
+        ErrorCode::AgentUnavailable,
+    ] {
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let options = RetryOptions {
+            retries: 3,
+            retry_delay: Duration::from_millis(20),
+        };
+
+        let message = run_with_retry(
+            &options,
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(ClientRunError::host_status(
+                        code,
+                        format!("第 {attempts} 次门禁拒绝"),
+                    ))
+                } else {
+                    Ok(format!("{code:?} recovered"))
+                }
+            },
+            |delay| sleeps.push(delay),
+        )
+        .expect("session gate rejection should be retried until recovery");
+
+        assert_eq!(message, format!("{code:?} recovered"));
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            sleeps,
+            vec![Duration::from_millis(20), Duration::from_millis(20)]
+        );
+    }
+}
+
+#[test]
 fn retry_policy_does_not_retry_unsupported_version() {
     let mut attempts = 0;
     let options = RetryOptions {

@@ -1,3 +1,5 @@
+use std::sync::{Arc, RwLock};
+
 use wincast_protocol::message::ErrorCode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6,6 +8,13 @@ pub enum SessionState {
     Unlocked,
     Locked,
     AgentUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopSessionState {
+    NoUserLoggedIn,
+    Unlocked,
+    Locked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +87,7 @@ impl RemoteSessionStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionStateMachine {
-    state: SessionState,
+    desktop_state: DesktopSessionState,
     agent_running: bool,
 }
 
@@ -91,40 +100,39 @@ impl Default for SessionStateMachine {
 impl SessionStateMachine {
     pub fn new() -> Self {
         Self {
-            state: SessionState::NoUserLoggedIn,
+            desktop_state: DesktopSessionState::NoUserLoggedIn,
             agent_running: false,
         }
     }
 
     pub fn state(&self) -> SessionState {
-        self.state
+        match (self.desktop_state, self.agent_running) {
+            (DesktopSessionState::NoUserLoggedIn, _) => SessionState::NoUserLoggedIn,
+            (DesktopSessionState::Locked, _) => SessionState::Locked,
+            (DesktopSessionState::Unlocked, true) => SessionState::Unlocked,
+            (DesktopSessionState::Unlocked, false) => SessionState::AgentUnavailable,
+        }
     }
 
     pub fn apply(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::UserLoggedIn | SessionEvent::SessionUnlocked => {
-                self.state = SessionState::Unlocked;
+                self.desktop_state = DesktopSessionState::Unlocked;
             }
             SessionEvent::SessionLocked => {
-                if self.state != SessionState::NoUserLoggedIn {
-                    self.state = SessionState::Locked;
+                if self.desktop_state != DesktopSessionState::NoUserLoggedIn {
+                    self.desktop_state = DesktopSessionState::Locked;
                 }
             }
             SessionEvent::UserLoggedOut => {
-                self.state = SessionState::NoUserLoggedIn;
+                self.desktop_state = DesktopSessionState::NoUserLoggedIn;
                 self.agent_running = false;
             }
             SessionEvent::AgentStarted => {
                 self.agent_running = true;
-                if self.state != SessionState::NoUserLoggedIn {
-                    self.state = SessionState::Unlocked;
-                }
             }
             SessionEvent::AgentExited => {
                 self.agent_running = false;
-                if self.state != SessionState::NoUserLoggedIn {
-                    self.state = SessionState::AgentUnavailable;
-                }
             }
         }
     }
@@ -134,29 +142,62 @@ impl SessionStateMachine {
     }
 
     pub fn remote_session_status(&self) -> RemoteSessionStatus {
-        match (self.state, self.agent_running) {
-            (SessionState::Unlocked, true) => RemoteSessionStatus::Allowed,
-            (SessionState::NoUserLoggedIn, _) => RemoteSessionStatus::Rejected {
+        match (self.desktop_state, self.agent_running) {
+            (DesktopSessionState::NoUserLoggedIn, _) => RemoteSessionStatus::Rejected {
                 code: ClientSessionErrorCode::NoUserLoggedIn,
                 message: "当前没有 Windows 用户登录，无法启动远程会话。",
             },
-            (SessionState::Locked, _) => RemoteSessionStatus::Rejected {
+            (DesktopSessionState::Locked, _) => RemoteSessionStatus::Rejected {
                 code: ClientSessionErrorCode::SessionLocked,
                 message: "Windows 会话已锁定，请先解锁后再启动远程会话。",
             },
-            (SessionState::AgentUnavailable, _) | (SessionState::Unlocked, false) => {
-                RemoteSessionStatus::Rejected {
-                    code: ClientSessionErrorCode::AgentUnavailable,
-                    message: "宿主端 Agent 不可用，正在等待重新拉起。",
-                }
-            }
+            (DesktopSessionState::Unlocked, false) => RemoteSessionStatus::Rejected {
+                code: ClientSessionErrorCode::AgentUnavailable,
+                message: "宿主端 Agent 不可用，正在等待重新拉起。",
+            },
+            (DesktopSessionState::Unlocked, true) => RemoteSessionStatus::Allowed,
         }
     }
 
     pub fn should_start_agent(&self) -> bool {
-        self.state != SessionState::NoUserLoggedIn
-            && self.state != SessionState::Locked
-            && !self.agent_running
+        matches!(self.desktop_state, DesktopSessionState::Unlocked) && !self.agent_running
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SharedSessionState {
+    inner: Arc<RwLock<SessionStateMachine>>,
+}
+
+impl Default for SharedSessionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SharedSessionState {
+    pub fn new() -> Self {
+        Self::from_machine(SessionStateMachine::new())
+    }
+
+    pub fn from_machine(machine: SessionStateMachine) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(machine)),
+        }
+    }
+
+    pub fn apply(&self, event: SessionEvent) {
+        self.inner
+            .write()
+            .expect("shared session state lock should not be poisoned")
+            .apply(event);
+    }
+
+    pub fn remote_session_status(&self) -> RemoteSessionStatus {
+        self.inner
+            .read()
+            .expect("shared session state lock should not be poisoned")
+            .remote_session_status()
     }
 }
 
@@ -185,7 +226,14 @@ mod tests {
         let mut machine = SessionStateMachine::new();
 
         machine.apply(SessionEvent::UserLoggedIn);
-        assert_eq!(machine.state(), SessionState::Unlocked);
+        assert_eq!(machine.state(), SessionState::AgentUnavailable);
+        assert_eq!(
+            machine.remote_session_status(),
+            RemoteSessionStatus::Rejected {
+                code: ClientSessionErrorCode::AgentUnavailable,
+                message: "宿主端 Agent 不可用，正在等待重新拉起。",
+            }
+        );
         assert!(machine.should_start_agent());
 
         machine.apply(SessionEvent::AgentStarted);
@@ -221,6 +269,25 @@ mod tests {
             machine.remote_session_status(),
             RemoteSessionStatus::Allowed
         );
+    }
+
+    #[test]
+    fn agent_started_does_not_unlock_locked_desktop() {
+        let mut machine = SessionStateMachine::new();
+
+        machine.apply(SessionEvent::UserLoggedIn);
+        machine.apply(SessionEvent::SessionLocked);
+        machine.apply(SessionEvent::AgentStarted);
+
+        assert_eq!(machine.state(), SessionState::Locked);
+        assert_eq!(
+            machine.remote_session_status(),
+            RemoteSessionStatus::Rejected {
+                code: ClientSessionErrorCode::SessionLocked,
+                message: "Windows 会话已锁定，请先解锁后再启动远程会话。",
+            }
+        );
+        assert!(!machine.should_start_agent());
     }
 
     #[test]

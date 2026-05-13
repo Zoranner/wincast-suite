@@ -2,7 +2,7 @@ use std::net::TcpStream;
 
 use crate::{
     program::{ProgramRunner, StartedProgram},
-    session_state::RemoteSessionStatus,
+    session_state::{RemoteSessionStatus, SessionEvent, SharedSessionState},
 };
 use wincast_protocol::{
     config::HostConfig,
@@ -30,7 +30,7 @@ pub(super) fn handle_control_client(
     locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
 ) -> Result<(), String> {
-    let mut session_gate = ForegroundRunSessionGate;
+    let mut session_gate = SharedSessionGate::new(foreground_run_session_state());
     handle_control_client_with_session_gate(
         stream,
         config,
@@ -106,12 +106,27 @@ pub(super) trait SessionGate {
     fn remote_session_status(&mut self) -> RemoteSessionStatus;
 }
 
-struct ForegroundRunSessionGate;
+pub(super) struct SharedSessionGate {
+    state: SharedSessionState,
+}
 
-impl SessionGate for ForegroundRunSessionGate {
-    fn remote_session_status(&mut self) -> RemoteSessionStatus {
-        RemoteSessionStatus::Allowed
+impl SharedSessionGate {
+    pub(super) fn new(state: SharedSessionState) -> Self {
+        Self { state }
     }
+}
+
+impl SessionGate for SharedSessionGate {
+    fn remote_session_status(&mut self) -> RemoteSessionStatus {
+        self.state.remote_session_status()
+    }
+}
+
+fn foreground_run_session_state() -> SharedSessionState {
+    let state = SharedSessionState::new();
+    state.apply(SessionEvent::UserLoggedIn);
+    state.apply(SessionEvent::AgentStarted);
+    state
 }
 
 fn ensure_remote_session_allowed(

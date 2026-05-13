@@ -8,11 +8,14 @@ use std::{
 
 use crate::agent::{
     listener::run_control_listener_n_with_runtime,
-    session::run_started_session,
+    session::{SessionGate, SharedSessionGate, run_started_session},
     stream::{
         HostSessionEndReason, write_raw_bgra_stream_with_input_events, write_session_goodbye,
     },
     tests::*,
+};
+use crate::session_state::{
+    ClientSessionErrorCode, RemoteSessionStatus, SessionEvent, SharedSessionState,
 };
 use wincast_protocol::{
     frame::{read_message, write_message},
@@ -22,6 +25,39 @@ use wincast_protocol::{
 };
 
 use crate::program::StartedProgram;
+
+#[test]
+fn shared_session_gate_reports_no_user_locked_and_agent_unavailable() {
+    let shared_state = SharedSessionState::new();
+    let mut gate = SharedSessionGate::new(shared_state.clone());
+
+    assert_eq!(
+        gate.remote_session_status(),
+        RemoteSessionStatus::Rejected {
+            code: ClientSessionErrorCode::NoUserLoggedIn,
+            message: "当前没有 Windows 用户登录，无法启动远程会话。",
+        }
+    );
+
+    shared_state.apply(SessionEvent::UserLoggedIn);
+    assert_eq!(
+        gate.remote_session_status(),
+        RemoteSessionStatus::Rejected {
+            code: ClientSessionErrorCode::AgentUnavailable,
+            message: "宿主端 Agent 不可用，正在等待重新拉起。",
+        }
+    );
+
+    shared_state.apply(SessionEvent::AgentStarted);
+    shared_state.apply(SessionEvent::SessionLocked);
+    assert_eq!(
+        gate.remote_session_status(),
+        RemoteSessionStatus::Rejected {
+            code: ClientSessionErrorCode::SessionLocked,
+            message: "Windows 会话已锁定，请先解锁后再启动远程会话。",
+        }
+    );
+}
 
 #[test]
 fn host_reports_error_response_write_failure_without_hiding_window_failure() {
