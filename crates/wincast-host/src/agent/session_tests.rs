@@ -7,18 +7,23 @@ use std::{
 };
 
 use crate::agent::{
-    listener::run_control_listener_n_with_runtime,
+    listener::{
+        run_control_listener_n_with_runtime,
+        run_control_listener_once_with_runtime_and_session_gate,
+    },
     session::{SessionGate, SharedSessionGate, run_started_session},
     stream::{
         HostSessionEndReason, write_raw_bgra_stream_with_input_events, write_session_goodbye,
     },
     tests::*,
 };
+use crate::session_events::DetectedDesktopSession;
 use crate::session_state::{
     ClientSessionErrorCode, RemoteSessionStatus, SessionEvent, SharedSessionState,
 };
 use wincast_protocol::{
     frame::{read_message, write_message},
+    handshake::send_client_hello,
     ipc::SessionEndReason,
     message::{ControlMessage, ErrorCode},
     raw_frame::read_raw_bgra_frame,
@@ -57,6 +62,93 @@ fn shared_session_gate_reports_no_user_locked_and_agent_unavailable() {
             message: "Windows 会话已锁定，请先解锁后再启动远程会话。",
         }
     );
+}
+
+#[test]
+fn foreground_detection_failure_is_conservative_rejection_by_default() {
+    let state = crate::agent::session::foreground_run_session_state_from_detection(Err(
+        "probe failed".into(),
+    ));
+
+    assert_eq!(
+        state.remote_session_status(),
+        RemoteSessionStatus::Rejected {
+            code: ClientSessionErrorCode::NoUserLoggedIn,
+            message: "当前没有 Windows 用户登录，无法启动远程会话。",
+        }
+    );
+}
+
+#[test]
+fn explicit_development_fallback_keeps_detection_failure_allowed() {
+    let state =
+        crate::agent::session::foreground_run_session_state_from_detection_with_failure_policy(
+            Err("probe failed".into()),
+            true,
+        );
+
+    assert_eq!(state.remote_session_status(), RemoteSessionStatus::Allowed);
+}
+
+#[test]
+fn foreground_detection_rejects_no_user_before_launching_program() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener addr should be available");
+    let config = host_config(endpoint.to_string());
+    let mut runner = RecordingProgramRunner::default();
+    let mut locator = RecordingWindowLocator::default();
+    let mut capture = RecordingCaptureStarter::default();
+    let state = crate::agent::session::foreground_run_session_state_from_detection(Ok(
+        DetectedDesktopSession {
+            user_logged_in: false,
+            locked: false,
+        },
+    ));
+    let mut session_gate = SharedSessionGate::new(state);
+    let host = thread::spawn(move || {
+        let result = run_control_listener_once_with_runtime_and_session_gate(
+            listener,
+            &config,
+            &mut runner,
+            &mut locator,
+            &mut capture,
+            &mut session_gate,
+        );
+        (
+            result,
+            runner.launched,
+            runner.cleaned,
+            locator.lookups,
+            capture.targets,
+        )
+    });
+
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    send_client_hello(&mut client).expect("client hello should write");
+    assert_eq!(
+        read_message(&mut client).expect("host hello should read"),
+        ControlMessage::Hello { version: 1 }
+    );
+    write_message(&mut client, &ControlMessage::StartSession).expect("start session should write");
+
+    assert_eq!(
+        read_message(&mut client).expect("session rejection should read"),
+        ControlMessage::Error {
+            code: ErrorCode::NoUserLoggedIn,
+            message: "当前没有 Windows 用户登录，无法启动远程会话。".to_owned(),
+        }
+    );
+
+    let (host_result, launched, cleaned, lookups, capture_targets) =
+        host.join().expect("host thread should finish");
+    let error = host_result.expect_err("host should report session rejection");
+    assert!(error.contains("当前没有 Windows 用户登录"));
+    assert!(launched.is_empty());
+    assert!(cleaned.is_empty());
+    assert!(lookups.is_empty());
+    assert!(capture_targets.is_empty());
 }
 
 #[test]

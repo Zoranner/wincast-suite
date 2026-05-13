@@ -2,6 +2,7 @@ use std::net::TcpStream;
 
 use crate::{
     program::{ProgramRunner, StartedProgram},
+    session_events::{DetectedDesktopSession, detect_desktop_session},
     session_state::{RemoteSessionStatus, SessionEvent, SharedSessionState},
 };
 use wincast_protocol::{
@@ -123,9 +124,55 @@ impl SessionGate for SharedSessionGate {
 }
 
 fn foreground_run_session_state() -> SharedSessionState {
+    foreground_run_session_state_from_detection_with_failure_policy(
+        detect_desktop_session(),
+        foreground_detection_failure_should_fallback_to_development(),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn foreground_run_session_state_from_detection(
+    detected: Result<DetectedDesktopSession, String>,
+) -> SharedSessionState {
+    foreground_run_session_state_from_detection_with_failure_policy(detected, false)
+}
+
+pub(super) fn foreground_run_session_state_from_detection_with_failure_policy(
+    detected: Result<DetectedDesktopSession, String>,
+    fallback_to_development: bool,
+) -> SharedSessionState {
+    let state = detected
+        .map(crate::session_events::shared_session_state_from_detected_desktop_session)
+        .unwrap_or_else(|_| {
+            foreground_session_state_after_detection_failure(fallback_to_development)
+        });
+    state.apply(SessionEvent::AgentStarted);
+    state
+}
+
+fn foreground_session_state_after_detection_failure(
+    fallback_to_development: bool,
+) -> SharedSessionState {
+    if fallback_to_development {
+        foreground_development_session_state()
+    } else {
+        SharedSessionState::new()
+    }
+}
+
+#[cfg(windows)]
+fn foreground_detection_failure_should_fallback_to_development() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn foreground_detection_failure_should_fallback_to_development() -> bool {
+    true
+}
+
+fn foreground_development_session_state() -> SharedSessionState {
     let state = SharedSessionState::new();
     state.apply(SessionEvent::UserLoggedIn);
-    state.apply(SessionEvent::AgentStarted);
     state
 }
 
