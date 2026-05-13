@@ -112,7 +112,7 @@ fn wait_next_capture_result_supports_texture_metadata() {
 fn capture_errors_have_clear_chinese_messages() {
     assert_eq!(
         CaptureError::windows_capture_not_implemented().to_string(),
-        "桌面捕获尚未实现：当前稳定版仅接入 Windows 窗口捕获"
+        "当前平台不支持桌面捕获"
     );
     assert_eq!(
         CaptureError::windows_graphics_capture_unsupported().to_string(),

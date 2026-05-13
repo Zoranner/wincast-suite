@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CaptureError {
-    #[error("桌面捕获尚未实现：当前稳定版仅接入 Windows 窗口捕获")]
+    #[error("当前平台不支持桌面捕获")]
     WindowsCaptureNotImplemented,
     #[error("当前 Windows 系统不支持 Windows Graphics Capture")]
     WindowsGraphicsCaptureUnsupported,
