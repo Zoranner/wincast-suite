@@ -58,6 +58,8 @@ pub(super) fn handle_control_client_with_session_gate(
     match read_message(stream).map_err(|error| format!("读取控制消息失败: {error}"))? {
         ControlMessage::StartSession => {
             ensure_remote_session_allowed(&mut writer, session_gate)?;
+            // 与 Service↔Agent IPC 的 `StatusChanged` 语义对齐，后续由 Service 拉起的 Agent 应上报同一映射。
+            let _ = session_gate.remote_session_status().to_ipc_agent_status();
             let mut started =
                 crate::program::launch_with_runner(config, runner).map_err(|error| {
                     let message = format!("启动宿主端程序失败: {error}");
