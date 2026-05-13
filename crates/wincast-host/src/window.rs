@@ -11,6 +11,7 @@ pub(crate) struct WindowCandidate {
     pub(crate) visible: bool,
     pub(crate) tool_window: bool,
     pub(crate) rect: WindowRect,
+    pub(crate) monitor_rect: WindowRect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +152,9 @@ pub(crate) fn find_main_window(
 fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupError> {
     use windows_sys::Win32::{
         Foundation::{HWND, LPARAM, RECT},
+        Graphics::Gdi::{
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        },
         UI::WindowsAndMessaging::{
             EnumWindows, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
             GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, WS_EX_TOOLWINDOW,
@@ -191,6 +195,7 @@ fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupErr
         let title = unsafe { read_window_title(hwnd) };
         let extended_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
         let tool_window = (extended_style & WS_EX_TOOLWINDOW as isize) != 0;
+        let monitor_rect = unsafe { monitor_rect_for_window(hwnd) }?;
 
         Ok(WindowCandidate {
             handle: hwnd as isize,
@@ -204,6 +209,30 @@ fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupErr
                 right: rect.right,
                 bottom: rect.bottom,
             },
+            monitor_rect,
+        })
+    }
+
+    unsafe fn monitor_rect_for_window(hwnd: HWND) -> Result<WindowRect, String> {
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        if monitor.is_null() {
+            return Err("MonitorFromWindow 未返回显示器".to_owned());
+        }
+
+        let mut monitor_info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let got_monitor = unsafe { GetMonitorInfoW(monitor, &mut monitor_info) };
+        if got_monitor == 0 {
+            return Err("GetMonitorInfoW 返回失败".to_owned());
+        }
+
+        Ok(WindowRect {
+            left: monitor_info.rcMonitor.left,
+            top: monitor_info.rcMonitor.top,
+            right: monitor_info.rcMonitor.right,
+            bottom: monitor_info.rcMonitor.bottom,
         })
     }
 
@@ -305,6 +334,7 @@ mod tests {
             visible,
             tool_window,
             rect,
+            monitor_rect: rect,
         }
     }
 

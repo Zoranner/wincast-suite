@@ -117,7 +117,9 @@ pub(super) fn start_capture_session(
 
 fn capture_target(config: &HostConfig, window: &WindowCandidate) -> CaptureTarget {
     match config.capture.mode {
-        CaptureMode::Desktop => CaptureTarget::Desktop,
+        CaptureMode::Desktop => CaptureTarget::Desktop {
+            source_window_handle: window.handle,
+        },
         CaptureMode::Window => CaptureTarget::Window {
             handle: window.handle,
             width: window.rect.width() as u32,
@@ -134,8 +136,8 @@ pub(super) fn capture_input_bounds(
 ) -> CaptureInputBounds {
     match config.capture.mode {
         CaptureMode::Desktop => CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
+            origin_x: window.monitor_rect.left,
+            origin_y: window.monitor_rect.top,
             width: frame.metadata.frame.width,
             height: frame.metadata.frame.height,
         },

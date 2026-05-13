@@ -1,4 +1,4 @@
-use std::slice;
+use std::{mem, slice};
 
 use crate::{
     error::CaptureError,
@@ -30,6 +30,7 @@ use windows::{
                 ID3D11Texture2D,
             },
             Dxgi::IDXGIDevice,
+            Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow},
         },
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
@@ -290,7 +291,9 @@ pub(crate) fn start_windows_capture(
 
     let item = match target {
         CaptureTarget::Window { handle, .. } => create_window_capture_item(*handle)?,
-        CaptureTarget::Desktop => return Err(CaptureError::windows_capture_not_implemented()),
+        CaptureTarget::Desktop {
+            source_window_handle,
+        } => create_monitor_capture_item_from_window(*source_window_handle)?,
     };
 
     let d3d_device = create_d3d_device()?;
@@ -330,6 +333,34 @@ fn create_window_capture_item(handle: isize) -> Result<GraphicsCaptureItem, Capt
     let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
         .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))?;
     unsafe { interop.CreateForWindow(hwnd) }
+        .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))
+}
+
+fn create_monitor_capture_item_from_window(
+    handle: isize,
+) -> Result<GraphicsCaptureItem, CaptureError> {
+    let hwnd = HWND(handle as *mut core::ffi::c_void);
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return Err(CaptureError::windows_capture_item_create_failed(
+            "MonitorFromWindow 未返回显示器",
+        ));
+    }
+
+    let mut monitor_info = MONITORINFO {
+        cbSize: mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let got_monitor_info = unsafe { GetMonitorInfoW(monitor, &mut monitor_info) };
+    if !got_monitor_info.as_bool() {
+        return Err(CaptureError::windows_capture_item_create_failed(
+            "GetMonitorInfoW 返回失败",
+        ));
+    }
+
+    let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+        .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))?;
+    unsafe { interop.CreateForMonitor(monitor) }
         .map_err(|error| CaptureError::windows_capture_item_create_failed(error.to_string()))
 }
 

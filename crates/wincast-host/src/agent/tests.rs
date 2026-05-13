@@ -90,6 +90,12 @@ impl WindowLocator for RecordingWindowLocator {
                 right: 1280,
                 bottom: 720,
             },
+            monitor_rect: window::WindowRect {
+                left: 0,
+                top: 0,
+                right: 1280,
+                bottom: 720,
+            },
         })
     }
 }
@@ -281,6 +287,18 @@ pub(super) fn window_candidate() -> WindowCandidate {
             right: 1280,
             bottom: 720,
         },
+        monitor_rect: window::WindowRect {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 720,
+        },
+    }
+}
+
+pub(super) fn desktop_capture_target() -> CaptureTarget {
+    CaptureTarget::Desktop {
+        source_window_handle: 100,
     }
 }
 

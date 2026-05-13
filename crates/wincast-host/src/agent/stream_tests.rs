@@ -6,7 +6,6 @@ use std::{
 };
 
 use crate::agent::{listener::run_control_listener_once_with_runtime, tests::*};
-use wincast_capture::CaptureTarget;
 use wincast_protocol::{
     frame::{read_message, write_message},
     handshake::send_client_hello,
@@ -70,7 +69,7 @@ fn host_can_send_first_raw_binary_frame_after_session_ready() {
         vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
     );
     assert_eq!(lookups, vec![(42, None)]);
-    assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
+    assert_eq!(capture_targets, vec![desktop_capture_target()]);
 }
 
 #[test]
@@ -138,7 +137,7 @@ fn host_streams_available_raw_binary_frames_after_first_frame() {
         vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
     );
     assert_eq!(lookups, vec![(42, None)]);
-    assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
+    assert_eq!(capture_targets, vec![desktop_capture_target()]);
 }
 
 #[test]
@@ -194,5 +193,5 @@ fn host_keeps_raw_stream_alive_when_no_frame_is_temporarily_available() {
         vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
     );
     assert_eq!(lookups, vec![(42, None)]);
-    assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
+    assert_eq!(capture_targets, vec![desktop_capture_target()]);
 }

@@ -2,7 +2,9 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureTarget {
-    Desktop,
+    Desktop {
+        source_window_handle: isize,
+    },
     Window {
         handle: isize,
         width: u32,
@@ -14,7 +16,9 @@ pub enum CaptureTarget {
 impl fmt::Display for CaptureTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Desktop => formatter.write_str("整个桌面"),
+            Self::Desktop {
+                source_window_handle,
+            } => write!(formatter, "窗口 {source_window_handle} 所在显示器"),
             Self::Window {
                 handle,
                 width,

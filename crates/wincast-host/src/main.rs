@@ -54,6 +54,9 @@ enum ServiceCommand {
     Stop,
     /// 查看 Windows Service 状态
     Status,
+    /// 由 Windows SCM 启动的 Service 运行入口
+    #[command(hide = true)]
+    Run,
 }
 
 fn main() -> ExitCode {
@@ -142,12 +145,12 @@ fn execute_service_command(
         ServiceCommand::Status => service_manager
             .status()
             .map(|status| status.message().to_owned()),
+        ServiceCommand::Run => service::run_service_dispatcher(),
     }
 }
 
 fn validate_config(path: &Path) -> Result<String, String> {
     let config = load_config(path)?;
-    validate_stable_capture_support(&config)?;
     Ok(format!(
         "宿主端配置有效，smoke-test 摘要：监听 {}，capture mode {}，window title {}，codec {}。",
         config.listen,
@@ -167,7 +170,6 @@ fn run_host_with_runtime(
     runtime: &mut impl HostAgentRuntime,
 ) -> Result<String, String> {
     let config = load_config(path)?;
-    validate_stable_capture_support(&config)?;
     let startup_message = runtime_not_implemented_message(&config);
     let local_addr = runtime.run(&config)?;
     Ok(format!(
@@ -192,17 +194,6 @@ fn load_config(path: &Path) -> Result<HostConfig, String> {
     let source = fs::read_to_string(path)
         .map_err(|error| format!("读取宿主端配置失败（{}）: {error}", path.display()))?;
     HostConfig::from_toml_str(&source).map_err(|error| error.to_string())
-}
-
-fn validate_stable_capture_support(config: &HostConfig) -> Result<(), String> {
-    if matches!(config.capture.mode, CaptureMode::Desktop) {
-        return Err(
-            "当前稳定版仅支持窗口捕获，请将 capture.mode 配置为 \"window\"；desktop 捕获尚未实现。"
-                .to_owned(),
-        );
-    }
-
-    Ok(())
 }
 
 fn capture_mode_label(mode: CaptureMode) -> &'static str {
@@ -253,6 +244,7 @@ mod tests {
             ("start", ServiceCommand::Start),
             ("stop", ServiceCommand::Stop),
             ("status", ServiceCommand::Status),
+            ("run", ServiceCommand::Run),
         ] {
             let args = Args::try_parse_from(["wincast-host", "service", name])
                 .expect("service command should parse");
@@ -266,6 +258,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn service_commands_report_explicitly_not_implemented() {
         for command in [
@@ -318,6 +311,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn pending_service_status_reports_clear_pending_state() {
         let mut manager = DefaultServiceManager::default();
@@ -349,8 +343,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_command_rejects_desktop_capture_before_runtime() {
-        let config_path = temp_host_config_path("validate-rejects-desktop");
+    fn validate_command_accepts_desktop_capture_mode() {
+        let config_path = temp_host_config_path("validate-accepts-desktop");
         fs::write(
             &config_path,
             r#"
@@ -374,12 +368,10 @@ startup_timeout_ms = 15000
         )
         .expect("host config should be written");
 
-        let error = validate_config(&config_path).expect_err("desktop capture should be rejected");
+        let message = validate_config(&config_path).expect("desktop capture should validate");
 
-        assert_eq!(
-            error,
-            "当前稳定版仅支持窗口捕获，请将 capture.mode 配置为 \"window\"；desktop 捕获尚未实现。"
-        );
+        assert!(message.contains("smoke-test"));
+        assert!(message.contains("capture mode desktop"));
 
         fs::remove_file(config_path).expect("temp host config should be removed");
     }
@@ -475,8 +467,8 @@ startup_timeout_ms = 15000
     }
 
     #[test]
-    fn run_command_rejects_desktop_capture_before_starting_runtime() {
-        let config_path = temp_host_config_path("run-rejects-desktop-before-runtime");
+    fn run_command_loads_desktop_config_and_delegates_host_agent_runtime() {
+        let config_path = temp_host_config_path("run-delegates-desktop-runtime");
         fs::write(
             &config_path,
             r#"
@@ -501,13 +493,14 @@ startup_timeout_ms = 15000
         .expect("host config should be written");
         let mut runtime = RecordingHostAgentRuntime::default();
 
-        let error = run_host_with_runtime(&config_path, &mut runtime)
-            .expect_err("desktop capture should be rejected before runtime starts");
+        let message = run_host_with_runtime(&config_path, &mut runtime)
+            .expect("desktop capture should delegate to runtime");
 
-        assert_eq!(runtime.calls.len(), 0);
+        assert_eq!(runtime.calls.len(), 1);
+        assert_eq!(runtime.calls[0].capture.mode, CaptureMode::Desktop);
         assert_eq!(
-            error,
-            "当前稳定版仅支持窗口捕获，请将 capture.mode 配置为 \"window\"；desktop 捕获尚未实现。"
+            message,
+            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
         );
 
         fs::remove_file(config_path).expect("temp host config should be removed");

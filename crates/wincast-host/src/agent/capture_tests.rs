@@ -13,7 +13,7 @@ use crate::{
     },
     window,
 };
-use wincast_capture::{CaptureError, CaptureTarget};
+use wincast_capture::CaptureError;
 use wincast_input::CaptureInputBounds;
 use wincast_protocol::{
     config::CaptureMode,
@@ -117,7 +117,7 @@ fn host_treats_missing_initial_frame_as_waitable_state() {
     let (_session, frame) = start_capture_session(&config, &window, &mut capture)
         .expect("host should wait until first frame metadata is available");
 
-    assert_eq!(capture.targets, vec![CaptureTarget::Desktop]);
+    assert_eq!(capture.targets, vec![desktop_capture_target()]);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(frame.row_pitch, 5120);
     assert_eq!(frame.bytes.len(), 5120 * 720);
@@ -150,9 +150,15 @@ fn capture_input_bounds_keep_window_origin_for_window_capture() {
 }
 
 #[test]
-fn capture_input_bounds_use_frame_size_for_desktop_capture() {
+fn capture_input_bounds_use_monitor_origin_for_desktop_capture() {
     let config = host_config("127.0.0.1:0".to_owned());
-    let window = window_candidate();
+    let mut window = window_candidate();
+    window.monitor_rect = window::WindowRect {
+        left: -1920,
+        top: 120,
+        right: 0,
+        bottom: 1200,
+    };
     let frame = captured_bgra_frame();
 
     let bounds = capture_input_bounds(&config, &window, &frame);
@@ -160,8 +166,8 @@ fn capture_input_bounds_use_frame_size_for_desktop_capture() {
     assert_eq!(
         bounds,
         CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
+            origin_x: -1920,
+            origin_y: 120,
             width: 1280,
             height: 720,
         }

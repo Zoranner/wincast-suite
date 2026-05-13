@@ -8,7 +8,13 @@ use wincast_capture::{
 
 #[test]
 fn capture_target_describes_desktop_and_window_targets() {
-    assert_eq!(CaptureTarget::Desktop.to_string(), "整个桌面");
+    assert_eq!(
+        CaptureTarget::Desktop {
+            source_window_handle: 100
+        }
+        .to_string(),
+        "窗口 100 所在显示器"
+    );
     assert_eq!(
         CaptureTarget::Window {
             handle: 100,
@@ -133,22 +139,26 @@ fn capture_errors_have_clear_chinese_messages() {
 
 #[cfg(windows)]
 #[test]
-fn windows_start_returns_desktop_capture_not_implemented() {
-    let error = CaptureSession::start(CaptureTarget::Desktop)
-        .expect_err("desktop capture should be explicit pending work");
+fn windows_start_accepts_desktop_capture_target() {
+    let target = CaptureTarget::Desktop {
+        source_window_handle: 100,
+    };
 
-    assert_eq!(error, CaptureError::windows_capture_not_implemented());
-    assert_eq!(
-        error.to_string(),
-        "桌面捕获尚未实现：当前稳定版仅接入 Windows 窗口捕获"
-    );
+    let result = CaptureSession::start(target);
+
+    assert!(!matches!(
+        result,
+        Err(error) if error == CaptureError::windows_capture_not_implemented()
+    ));
 }
 
 #[cfg(not(windows))]
 #[test]
 fn non_windows_start_returns_unsupported_platform() {
-    let error = CaptureSession::start(CaptureTarget::Desktop)
-        .expect_err("non-windows capture should be unsupported");
+    let error = CaptureSession::start(CaptureTarget::Desktop {
+        source_window_handle: 100,
+    })
+    .expect_err("non-windows capture should be unsupported");
 
     assert_eq!(
         error,

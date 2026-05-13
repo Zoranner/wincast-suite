@@ -15,7 +15,6 @@ use crate::{
     },
     session_state::{ClientSessionErrorCode, RemoteSessionStatus},
 };
-use wincast_capture::CaptureTarget;
 use wincast_protocol::{
     frame::{read_message, write_message},
     handshake::send_client_hello,
@@ -80,7 +79,7 @@ fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_
         vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
     );
     assert_eq!(lookups, vec![(42, None)]);
-    assert_eq!(capture_targets, vec![CaptureTarget::Desktop]);
+    assert_eq!(capture_targets, vec![desktop_capture_target()]);
 }
 
 #[test]
@@ -127,7 +126,7 @@ fn host_accepts_two_clients_in_sequence_without_rebinding() {
     assert_eq!(lookups, vec![(42, None), (43, None)]);
     assert_eq!(
         capture_targets,
-        vec![CaptureTarget::Desktop, CaptureTarget::Desktop]
+        vec![desktop_capture_target(), desktop_capture_target()]
     );
 }
 
