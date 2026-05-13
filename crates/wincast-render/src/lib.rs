@@ -21,6 +21,74 @@ impl RenderConfig {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PixelDimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FrameMousePosition {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn map_window_point_to_frame_pixels(
+    x: i32,
+    y: i32,
+    window: PixelDimensions,
+    frame: PixelDimensions,
+) -> FrameMousePosition {
+    FrameMousePosition {
+        x: map_window_axis_to_frame_axis(x, window.width, frame.width),
+        y: map_window_axis_to_frame_axis(y, window.height, frame.height),
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn mouse_button_input_events(
+    x: i32,
+    y: i32,
+    button: wincast_protocol::input::MouseButton,
+    state: wincast_protocol::input::ButtonState,
+    window: PixelDimensions,
+    frame: PixelDimensions,
+) -> [InputEvent; 2] {
+    let position = map_window_point_to_frame_pixels(x, y, window, frame);
+
+    [
+        InputEvent::MouseMove {
+            x: position.x,
+            y: position.y,
+        },
+        InputEvent::MouseButton { button, state },
+    ]
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn map_window_axis_to_frame_axis(coordinate: i32, window_span: u32, frame_span: u32) -> f32 {
+    if frame_span <= 1 {
+        return 0.0;
+    }
+
+    if window_span <= 1 {
+        return if coordinate <= 0 {
+            0.0
+        } else {
+            frame_span.saturating_sub(1) as f32
+        };
+    }
+
+    let mapped = coordinate as f32 * frame_span.saturating_sub(1) as f32
+        / window_span.saturating_sub(1) as f32;
+    mapped
+        .round()
+        .clamp(0.0, frame_span.saturating_sub(1) as f32)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderLoopAction {
     Continue,
@@ -84,6 +152,7 @@ impl SdlRawBgraRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wincast_protocol::input::{ButtonState, MouseButton};
 
     #[test]
     fn render_config_rejects_empty_title() {
@@ -128,6 +197,95 @@ mod tests {
             RenderError::UnsupportedPlatform {
                 platform: std::env::consts::OS,
             }
+        );
+    }
+
+    #[test]
+    fn maps_window_mouse_coordinates_to_remote_frame_pixels() {
+        let position = map_window_point_to_frame_pixels(
+            1280,
+            720,
+            PixelDimensions {
+                width: 2560,
+                height: 1440,
+            },
+            PixelDimensions {
+                width: 1280,
+                height: 720,
+            },
+        );
+
+        assert_eq!(position, FrameMousePosition { x: 640.0, y: 360.0 });
+    }
+
+    #[test]
+    fn maps_bottom_right_window_pixel_to_bottom_right_frame_pixel() {
+        let position = map_window_point_to_frame_pixels(
+            1279,
+            719,
+            PixelDimensions {
+                width: 1280,
+                height: 720,
+            },
+            PixelDimensions {
+                width: 2560,
+                height: 1440,
+            },
+        );
+
+        assert_eq!(
+            position,
+            FrameMousePosition {
+                x: 2559.0,
+                y: 1439.0,
+            }
+        );
+    }
+
+    #[test]
+    fn clamps_window_mouse_coordinates_inside_remote_frame() {
+        let position = map_window_point_to_frame_pixels(
+            3000,
+            -20,
+            PixelDimensions {
+                width: 2560,
+                height: 1440,
+            },
+            PixelDimensions {
+                width: 1280,
+                height: 720,
+            },
+        );
+
+        assert_eq!(position, FrameMousePosition { x: 1279.0, y: 0.0 });
+    }
+
+    #[test]
+    fn mouse_button_input_events_move_then_click_at_mapped_position() {
+        let events = mouse_button_input_events(
+            1280,
+            720,
+            MouseButton::Left,
+            ButtonState::Pressed,
+            PixelDimensions {
+                width: 2560,
+                height: 1440,
+            },
+            PixelDimensions {
+                width: 1280,
+                height: 720,
+            },
+        );
+
+        assert_eq!(
+            events,
+            [
+                InputEvent::MouseMove { x: 640.0, y: 360.0 },
+                InputEvent::MouseButton {
+                    button: MouseButton::Left,
+                    state: ButtonState::Pressed,
+                },
+            ]
         );
     }
 }

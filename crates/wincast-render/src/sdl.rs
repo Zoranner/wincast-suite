@@ -12,13 +12,17 @@ use wincast_protocol::{
     raw_frame::RawBgraFrame,
 };
 
-use crate::{RawBgraRenderer, RenderConfig, RenderError, RenderLoopAction, RenderLoopResult};
+use crate::{
+    PixelDimensions, RawBgraRenderer, RenderConfig, RenderError, RenderLoopAction,
+    RenderLoopResult, map_window_point_to_frame_pixels, mouse_button_input_events,
+};
 
 pub struct SdlRawBgraRenderer {
     _sdl: Sdl,
     canvas: Canvas<Window>,
     texture_creator: TextureCreator<WindowContext>,
     event_pump: EventPump,
+    frame_dimensions: PixelDimensions,
 }
 
 impl SdlRawBgraRenderer {
@@ -46,7 +50,16 @@ impl SdlRawBgraRenderer {
             canvas,
             texture_creator,
             event_pump,
+            frame_dimensions: PixelDimensions {
+                width: config.width,
+                height: config.height,
+            },
         })
+    }
+
+    fn window_dimensions(&self) -> PixelDimensions {
+        let (width, height) = self.canvas.window().size();
+        PixelDimensions { width, height }
     }
 }
 
@@ -68,34 +81,56 @@ impl RawBgraRenderer for SdlRawBgraRenderer {
             .copy(&texture, None, None)
             .map_err(RenderError::Backend)?;
         self.canvas.present();
+        self.frame_dimensions = PixelDimensions {
+            width: frame.width,
+            height: frame.height,
+        };
         Ok(())
     }
 
     fn poll_input(&mut self) -> Result<RenderLoopResult, RenderError> {
         let mut input_events = Vec::new();
         let mut action = RenderLoopAction::Continue;
+        let window_dimensions = self.window_dimensions();
+        let frame_dimensions = self.frame_dimensions;
 
         for event in self.event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => action = RenderLoopAction::Quit,
-                Event::MouseMotion { x, y, .. } => input_events.push(InputEvent::MouseMove {
-                    x: x as f32,
-                    y: y as f32,
-                }),
-                Event::MouseButtonDown { mouse_btn, .. } => {
+                Event::MouseMotion { x, y, .. } => {
+                    let position =
+                        map_window_point_to_frame_pixels(x, y, window_dimensions, frame_dimensions);
+                    input_events.push(InputEvent::MouseMove {
+                        x: position.x,
+                        y: position.y,
+                    });
+                }
+                Event::MouseButtonDown {
+                    mouse_btn, x, y, ..
+                } => {
                     if let Some(button) = map_mouse_button(mouse_btn) {
-                        input_events.push(InputEvent::MouseButton {
+                        input_events.extend(mouse_button_input_events(
+                            x,
+                            y,
                             button,
-                            state: ButtonState::Pressed,
-                        });
+                            ButtonState::Pressed,
+                            window_dimensions,
+                            frame_dimensions,
+                        ));
                     }
                 }
-                Event::MouseButtonUp { mouse_btn, .. } => {
+                Event::MouseButtonUp {
+                    mouse_btn, x, y, ..
+                } => {
                     if let Some(button) = map_mouse_button(mouse_btn) {
-                        input_events.push(InputEvent::MouseButton {
+                        input_events.extend(mouse_button_input_events(
+                            x,
+                            y,
                             button,
-                            state: ButtonState::Released,
-                        });
+                            ButtonState::Released,
+                            window_dimensions,
+                            frame_dimensions,
+                        ));
                     }
                 }
                 Event::MouseWheel { x, y, .. } => input_events.push(InputEvent::MouseWheel {
