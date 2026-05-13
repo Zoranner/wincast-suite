@@ -21,10 +21,11 @@ pub(crate) fn load_config(path: &PathBuf) -> Result<ClientConfig, String> {
 
 pub(crate) fn run_client(path: &PathBuf, retry_options: RetryOptions) -> Result<String, String> {
     let config = load_config(path)?;
-    run_with_retry(
+    run_with_retry_and_reporter(
         &retry_options,
         || run_client_attempt(&config),
         std::thread::sleep,
+        |report| eprintln!("{}", format_retry_report(report)),
     )
 }
 
@@ -52,6 +53,14 @@ pub(crate) fn run_client_with_config(config: &ClientConfig) -> Result<String, St
 pub(crate) struct RetryOptions {
     pub(crate) retries: u32,
     pub(crate) retry_delay: Duration,
+}
+
+#[derive(Debug)]
+pub(crate) struct RetryReport {
+    pub(crate) attempt: u32,
+    pub(crate) max_attempts: u32,
+    pub(crate) retry_delay: Duration,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug)]
@@ -89,10 +98,20 @@ impl ClientRunError {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run_with_retry(
+    options: &RetryOptions,
+    attempt: impl FnMut() -> Result<String, ClientRunError>,
+    sleep: impl FnMut(Duration),
+) -> Result<String, String> {
+    run_with_retry_and_reporter(options, attempt, sleep, |_| {})
+}
+
+pub(crate) fn run_with_retry_and_reporter(
     options: &RetryOptions,
     mut attempt: impl FnMut() -> Result<String, ClientRunError>,
     mut sleep: impl FnMut(Duration),
+    mut reporter: impl FnMut(&RetryReport),
 ) -> Result<String, String> {
     let max_attempts = options.retries.saturating_add(1);
     let mut attempts = 0;
@@ -112,10 +131,26 @@ pub(crate) fn run_with_retry(
                         error.into_message()
                     ));
                 }
+                reporter(&RetryReport {
+                    attempt: attempts,
+                    max_attempts,
+                    retry_delay: options.retry_delay,
+                    reason: error.into_message(),
+                });
                 sleep(options.retry_delay);
             }
         }
     }
+}
+
+pub(crate) fn format_retry_report(report: &RetryReport) -> String {
+    format!(
+        "客户端运行第 {}/{} 次失败：{}；{} ms 后重试。",
+        report.attempt,
+        report.max_attempts,
+        report.reason,
+        report.retry_delay.as_millis()
+    )
 }
 
 fn is_retriable_host_status(code: ErrorCode) -> bool {

@@ -11,8 +11,8 @@ use wincast_protocol::{
 use crate::{
     errors::format_host_error,
     runtime::{
-        ClientRunError, RetryOptions, control_channel_ready_message, run_client_with_config,
-        run_with_retry,
+        ClientRunError, RetryOptions, RetryReport, control_channel_ready_message,
+        format_retry_report, run_client_with_config, run_with_retry, run_with_retry_and_reporter,
     },
     test_support::{raw_bgra_frame, raw_binary_frame},
 };
@@ -269,6 +269,59 @@ fn retry_policy_succeeds_after_busy_status_recovers() {
     assert_eq!(message, "已连接");
     assert_eq!(attempts, 2);
     assert_eq!(sleeps, vec![Duration::from_millis(25)]);
+}
+
+#[test]
+fn retry_report_formats_session_locked_reason_with_delay() {
+    let report = RetryReport {
+        attempt: 1,
+        max_attempts: 4,
+        retry_delay: Duration::from_millis(1_000),
+        reason: "宿主端 Windows 会话已锁屏: 当前用户锁屏".to_owned(),
+    };
+
+    let message = format_retry_report(&report);
+
+    assert!(message.contains("客户端运行第 1/4 次失败"));
+    assert!(message.contains("宿主端 Windows 会话已锁屏: 当前用户锁屏"));
+    assert!(message.contains("1000 ms 后重试"));
+}
+
+#[test]
+fn retry_policy_reports_retriable_error_before_recovering() {
+    let mut attempts = 0;
+    let mut reports = Vec::new();
+    let mut sleeps = Vec::new();
+    let options = RetryOptions {
+        retries: 2,
+        retry_delay: Duration::from_millis(30),
+    };
+
+    let message = run_with_retry_and_reporter(
+        &options,
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(ClientRunError::host_status(
+                    ErrorCode::SessionLocked,
+                    "当前 Windows 用户已锁屏",
+                ))
+            } else {
+                Ok("已连接".to_owned())
+            }
+        },
+        |delay| sleeps.push(delay),
+        |report| reports.push(format_retry_report(report)),
+    )
+    .expect("session locked status should be retried and recover");
+
+    assert_eq!(message, "已连接");
+    assert_eq!(attempts, 2);
+    assert_eq!(sleeps, vec![Duration::from_millis(30)]);
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].contains("客户端运行第 1/3 次失败"));
+    assert!(reports[0].contains("宿主端 Windows 会话已锁屏: 当前 Windows 用户已锁屏"));
+    assert!(reports[0].contains("30 ms 后重试"));
 }
 
 #[test]
