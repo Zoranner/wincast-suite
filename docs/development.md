@@ -40,6 +40,14 @@ cargo clippy -p wincast-protocol -p wincast-client --all-targets --all-features 
 
 Host 与 Client 默认从用户配置目录读取配置，日常运行不需要每次传 `--config`。Windows host 默认读取 `%APPDATA%\WinCast\wincast-host.toml`；Linux client 默认读取 `${XDG_CONFIG_HOME:-$HOME/.config}/wincast/wincast-client.toml`。`XDG_CONFIG_HOME` 必须是非空绝对路径；未设置、为空或为相对路径时回退到 `$HOME/.config`。`--config` 仅用于临时调试或一次性验证时覆盖默认路径。
 
+仓库内 `examples/` 目录提供稳定版烟测示例配置。调整示例后至少执行以下校验，确保示例仍可被配置模型解析：
+
+```powershell
+cargo test -p wincast-protocol --test config parses_stable
+cargo run -p wincast-host -- --config examples/wincast-host.toml validate
+cargo run -p wincast-client -- --config examples/wincast-client.toml validate
+```
+
 客户端 `run` 支持启动连接阶段的有限重试，便于宿主端前台进程刚启动或端口短暂不可用时验证连接恢复：
 
 ```powershell
@@ -68,4 +76,4 @@ cargo test -p wincast-host service_agent
 
 这仍不代表已经接入命名管道权限模型、Service 拉起 Agent、重连、心跳超时、真实 Agent 进程会话编排或消息投递重试策略。
 
-`wincast-host service` 子命令当前通过可测试的 `ServiceManager` 占位抽象固定安装、卸载、启动、停止和状态查询的 CLI 边界。它仍不会执行真实 Windows Service 操作；验证时应把结果理解为管理抽象占位行为，而不是系统服务已安装或已运行。
+`wincast-host service` 子命令已接入 Windows SCM 的安装、卸载、启动、停止和状态查询最小闭环，并提供隐藏的 `service run` 入口供 SCM 启动服务进程。该能力只覆盖系统服务管理本身，不代表 Service 已经拉起交互桌面 Host Agent，也不代表命名管道权限模型、锁屏恢复、心跳或自动重连已经完成。真实 `service install/start/stop/uninstall` 会修改系统服务状态，需要在 Windows 管理员终端中手动烟测，不应放入默认 CI。
