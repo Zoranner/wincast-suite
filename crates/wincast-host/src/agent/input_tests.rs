@@ -3,7 +3,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
 };
@@ -44,7 +44,8 @@ fn input_reader_handles_client_input_events_until_stop_session() {
     write_message(&mut bytes, &ControlMessage::StopSession).expect("stop should encode");
     let mut sink = RecordingInputEventSink::default();
 
-    let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink);
+    let stop_requested = AtomicBool::new(false);
+    let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink, &stop_requested);
 
     assert_eq!(event, InputReaderEvent::StopSession);
     assert_eq!(
@@ -68,7 +69,8 @@ fn input_reader_rejects_non_input_messages() {
     write_message(&mut bytes, &ControlMessage::Heartbeat).expect("heartbeat should encode");
     let mut sink = RecordingInputEventSink::default();
 
-    let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink);
+    let stop_requested = AtomicBool::new(false);
+    let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink, &stop_requested);
 
     assert_eq!(
         event,
@@ -91,7 +93,8 @@ fn input_reader_reports_stop_session_after_input_events() {
     write_message(&mut bytes, &ControlMessage::StopSession).expect("stop should encode");
     let mut sink = RecordingInputEventSink::default();
 
-    let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink);
+    let stop_requested = AtomicBool::new(false);
+    let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink, &stop_requested);
 
     assert_eq!(event, InputReaderEvent::StopSession);
     assert_eq!(

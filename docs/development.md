@@ -4,6 +4,15 @@
 
 工程使用 Rust 2024 edition，最低 Rust 版本为 1.88。
 
+## Windows 绑定策略
+
+Windows 侧当前保留 `windows` 与 `windows-sys` 双线绑定，不承诺已经收敛到单一绑定：
+
+- `wincast-capture` 使用 `windows`，因为 Windows Graphics Capture、WinRT 对象和 D3D11 资源交互需要更完整的类型封装和接口调用支持。
+- `wincast-host` 与 `wincast-input` 使用 `windows-sys`，因为当前主要调用 SCM、WTS、窗口枚举和 `SendInput` 等 Win32 API，边界更接近 C ABI，轻量绑定更便于显式管理句柄、结构体和错误码。
+
+升级 Windows 绑定依赖时，应分别检查两条线的版本兼容性、feature 范围和生成类型变化。跨 crate 传递 Windows 类型时优先使用项目自有的中性类型、句柄值或明确封装，避免把 `windows` 的 COM/WinRT 类型和 `windows-sys` 的裸 FFI 类型扩散到不属于它们的 crate。确需转换时，应在转换点说明来源、生命周期、所有权和失败语义，并把 unsafe 或句柄释放责任限制在最小模块内。
+
 ## 常用验证
 
 修改 Rust 代码后先执行格式化修复：

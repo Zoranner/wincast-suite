@@ -1,7 +1,13 @@
-use std::{net::TcpStream, sync::mpsc, thread, time::Duration};
-
-#[cfg(test)]
-use std::net::Shutdown;
+use std::{
+    net::TcpStream,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+    time::Duration,
+};
 
 use wincast_capture::CapturedBgraFrame;
 use wincast_input::{CaptureInputBounds, WindowsInputEventSink};
@@ -95,7 +101,30 @@ pub(super) fn write_raw_bgra_stream(
         )
     })?;
     let input_events = spawn_input_event_reader(input_stream, input_bounds);
-    write_raw_bgra_stream_with_input_events(writer, first_frame, session, input_events.receiver())
+    write_raw_bgra_stream_with_input_reader(writer, first_frame, session, input_events)
+}
+
+pub(super) fn write_raw_bgra_stream_with_input_reader(
+    writer: &mut impl std::io::Write,
+    first_frame: &CapturedBgraFrame,
+    session: &mut dyn CaptureRuntime,
+    input_reader: InputEventReader,
+) -> Result<HostSessionEndReason, HostSessionError> {
+    let result = write_raw_bgra_stream_with_input_events(
+        writer,
+        first_frame,
+        session,
+        input_reader.receiver(),
+    );
+    let cleanup_result = match &result {
+        Ok(HostSessionEndReason::StopSession) => join_input_reader(input_reader),
+        _ => stop_and_join_input_reader(input_reader),
+    };
+
+    result.and_then(|reason| {
+        cleanup_result?;
+        Ok(reason)
+    })
 }
 
 pub(super) fn write_raw_bgra_stream_with_input_events(
@@ -159,6 +188,24 @@ pub(super) fn write_raw_bgra_stream_with_input_events(
     }
 }
 
+fn stop_and_join_input_reader(input_reader: InputEventReader) -> Result<(), HostSessionError> {
+    input_reader.stop_and_join().map(|_| ()).map_err(|_| {
+        HostSessionError::new(
+            HostSessionEndReason::InputFailed,
+            "输入事件读取线程异常结束".to_owned(),
+        )
+    })
+}
+
+fn join_input_reader(input_reader: InputEventReader) -> Result<(), HostSessionError> {
+    input_reader.join().map(|_| ()).map_err(|_| {
+        HostSessionError::new(
+            HostSessionEndReason::InputFailed,
+            "输入事件读取线程异常结束".to_owned(),
+        )
+    })
+}
+
 pub(super) fn write_session_goodbye(writer: &mut impl std::io::Write) -> Result<(), String> {
     match write_message(writer, &ControlMessage::Goodbye) {
         Ok(()) => writer
@@ -197,9 +244,16 @@ pub(super) fn spawn_input_event_reader(
     input_bounds: CaptureInputBounds,
 ) -> InputEventReader {
     let (sender, receiver) = mpsc::channel();
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let reader_stop_requested = Arc::clone(&stop_requested);
     let handle = thread::spawn(move || {
+        let _ = input_reader.set_read_timeout(Some(Duration::from_millis(100)));
         let mut input_sink = WindowsInputEventSink::new(input_bounds);
-        let event = read_input_events_until_stop(&mut input_reader, &mut input_sink);
+        let event = read_input_events_until_stop(
+            &mut input_reader,
+            &mut input_sink,
+            &reader_stop_requested,
+        );
         let _ = sender.send(event.clone());
         Some(event)
     });
@@ -207,12 +261,14 @@ pub(super) fn spawn_input_event_reader(
     InputEventReader {
         receiver,
         handle: Some(handle),
+        stop_requested,
     }
 }
 
 pub(super) struct InputEventReader {
     receiver: mpsc::Receiver<InputReaderEvent>,
     handle: Option<thread::JoinHandle<Option<InputReaderEvent>>>,
+    stop_requested: Arc<AtomicBool>,
 }
 
 impl InputEventReader {
@@ -220,7 +276,6 @@ impl InputEventReader {
         &self.receiver
     }
 
-    #[cfg(test)]
     pub(super) fn join(mut self) -> thread::Result<Option<InputReaderEvent>> {
         self.handle
             .take()
@@ -228,12 +283,8 @@ impl InputEventReader {
             .join()
     }
 
-    #[cfg(test)]
-    pub(super) fn stop_and_join(
-        self,
-        input_reader: &TcpStream,
-    ) -> thread::Result<Option<InputReaderEvent>> {
-        let _ = input_reader.shutdown(Shutdown::Read);
+    pub(super) fn stop_and_join(self) -> thread::Result<Option<InputReaderEvent>> {
+        self.stop_requested.store(true, Ordering::SeqCst);
         self.join()
     }
 }
@@ -254,8 +305,13 @@ impl Drop for InputEventReader {
 pub(super) fn read_input_events_until_stop(
     reader: &mut impl std::io::Read,
     sink: &mut impl InputEventSink,
+    stop_requested: &AtomicBool,
 ) -> InputReaderEvent {
     loop {
+        if stop_requested.load(Ordering::SeqCst) {
+            return InputReaderEvent::Disconnected;
+        }
+
         match read_message(reader) {
             Ok(ControlMessage::InputEvent(event)) => {
                 if let Err(error) = sink.handle_input_event(event) {
@@ -269,6 +325,9 @@ pub(super) fn read_input_events_until_stop(
                 return InputReaderEvent::Failed(format!("客户端输入事件消息无效: {message:?}"));
             }
             Err(error) => {
+                if is_temporary_read_timeout(&error) {
+                    continue;
+                }
                 if is_control_stream_closed(&error) {
                     return InputReaderEvent::Disconnected;
                 }
@@ -276,6 +335,17 @@ pub(super) fn read_input_events_until_stop(
             }
         }
     }
+}
+
+fn is_temporary_read_timeout(error: &FrameError) -> bool {
+    matches!(
+        error,
+        FrameError::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    )
 }
 
 fn is_control_stream_closed(error: &FrameError) -> bool {

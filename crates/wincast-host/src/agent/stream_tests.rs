@@ -7,7 +7,10 @@ use std::{
 
 use crate::agent::{
     listener::run_control_listener_once_with_runtime,
-    stream::{InputReaderEvent, spawn_input_event_reader},
+    stream::{
+        HostSessionEndReason, InputReaderEvent, spawn_input_event_reader,
+        write_raw_bgra_stream_with_input_reader,
+    },
     tests::*,
 };
 use wincast_input::CaptureInputBounds;
@@ -235,10 +238,6 @@ fn input_event_reader_owner_can_stop_blocked_reader_thread() {
         .expect("listener addr should be available");
     let _client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = listener.accept().expect("server should accept");
-    let shutdown_stream = server
-        .try_clone()
-        .expect("shutdown stream should clone for test");
-
     let input_reader = spawn_input_event_reader(
         server,
         CaptureInputBounds {
@@ -251,8 +250,64 @@ fn input_event_reader_owner_can_stop_blocked_reader_thread() {
 
     assert_eq!(
         input_reader
-            .stop_and_join(&shutdown_stream)
+            .stop_and_join()
             .expect("input reader should stop and join"),
         Some(InputReaderEvent::Disconnected)
+    );
+}
+
+#[test]
+fn raw_stream_stops_blocked_input_reader_after_capture_inactive_goodbye() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (shutdown_stream, _) = listener.accept().expect("server should accept");
+    let mut writer = shutdown_stream
+        .try_clone()
+        .expect("server writer should clone for protocol output");
+    let input_stream = shutdown_stream
+        .try_clone()
+        .expect("input stream should clone from control connection");
+    let input_reader = spawn_input_event_reader(
+        input_stream,
+        CaptureInputBounds {
+            origin_x: 0,
+            origin_y: 0,
+            width: 1280,
+            height: 720,
+        },
+    );
+    let stream = thread::spawn(move || {
+        let mut session = RecordingCaptureRuntime {
+            frames: VecDeque::from([None]),
+            attempts: Default::default(),
+            block_after_empty: None,
+        };
+        write_raw_bgra_stream_with_input_reader(
+            &mut writer,
+            &captured_bgra_frame(),
+            &mut session,
+            input_reader,
+        )
+    });
+
+    assert_eq!(
+        read_message(&mut client).expect("video ready should read"),
+        ControlMessage::VideoReady
+    );
+    read_raw_bgra_frame(&mut client).expect("first frame should read");
+    assert_eq!(
+        read_message(&mut client).expect("goodbye should read after capture ends"),
+        ControlMessage::Goodbye
+    );
+
+    assert_eq!(
+        stream
+            .join()
+            .expect("stream thread should finish")
+            .expect("capture inactive should finish cleanly"),
+        HostSessionEndReason::CaptureInactive
     );
 }

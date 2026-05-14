@@ -105,6 +105,12 @@ docs/
 - `wincast-client` 负责连接宿主端、窗口生命周期和本地事件采集。
 - `wincast-render` 负责帧缓冲和渲染输出；当前使用 SDL2 在 Linux 上显示 raw BGRA 帧，后续接入 H.264 时再承担视频解码。
 
+## Windows 绑定策略
+
+Windows 侧当前保留 `windows` 与 `windows-sys` 双线绑定，不把现状描述为已经收敛到单一绑定。`wincast-capture` 使用 `windows`，主要因为 Windows Graphics Capture、WinRT 接口和 D3D11 对象交互需要较完整的类型封装；`wincast-host` 与 `wincast-input` 使用 `windows-sys`，主要因为 SCM、WTS、窗口枚举和 `SendInput` 等 Win32 调用更接近 C ABI，轻量绑定便于显式管理句柄、结构体、错误码和 unsafe 边界。
+
+后续升级 Windows 绑定依赖时，应把 `windows` 与 `windows-sys` 分别作为受控边界审计：确认 feature 范围、生成类型、错误返回、句柄所有权和线程/回调生命周期是否变化。跨 crate 暴露的接口优先使用项目自有中性类型，避免把 COM/WinRT 类型或裸 FFI 类型扩散到协议、配置和上层编排模块。确需在两类绑定之间转换时，转换点必须说明类型来源、生命周期、所有权、释放责任和失败语义。
+
 ## 当前 CLI 骨架
 
 当前 `wincast-host` 与 `wincast-client` 已在配置读取、配置校验和 TCP 控制通道握手基础上接入 raw BGRA 捕获传输、SDL2 渲染和基础输入回传。若宿主端提示编码传输未实现，应理解为 H.264/WebRTC 等编码传输路线尚未接入，不代表当前 raw BGRA 链路不可用；当前 `run` 的默认可用画面链路就是 raw BGRA。
