@@ -9,4 +9,4 @@ rust-version.workspace = true
 wincast-protocol.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-sdl2 = "0.37"
+sdl2.workspace = true

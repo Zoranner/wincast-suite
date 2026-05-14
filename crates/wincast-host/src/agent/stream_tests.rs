@@ -5,7 +5,12 @@ use std::{
     thread,
 };
 
-use crate::agent::{listener::run_control_listener_once_with_runtime, tests::*};
+use crate::agent::{
+    listener::run_control_listener_once_with_runtime,
+    stream::{InputReaderEvent, spawn_input_event_reader},
+    tests::*,
+};
+use wincast_input::CaptureInputBounds;
 use wincast_protocol::{
     frame::{read_message, write_message},
     handshake::send_client_hello,
@@ -194,4 +199,60 @@ fn host_keeps_raw_stream_alive_when_no_frame_is_temporarily_available() {
     );
     assert_eq!(lookups, vec![(42, None)]);
     assert_eq!(capture_targets, vec![desktop_capture_target()]);
+}
+
+#[test]
+fn input_event_reader_owner_can_join_reader_thread_result() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = listener.accept().expect("server should accept");
+
+    let input_reader = spawn_input_event_reader(
+        server,
+        CaptureInputBounds {
+            origin_x: 0,
+            origin_y: 0,
+            width: 1280,
+            height: 720,
+        },
+    );
+    write_message(&mut client, &ControlMessage::StopSession).expect("stop session should write");
+
+    assert_eq!(
+        input_reader.join().expect("input reader should join"),
+        Some(InputReaderEvent::StopSession)
+    );
+}
+
+#[test]
+fn input_event_reader_owner_can_stop_blocked_reader_thread() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener addr should be available");
+    let _client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = listener.accept().expect("server should accept");
+    let shutdown_stream = server
+        .try_clone()
+        .expect("shutdown stream should clone for test");
+
+    let input_reader = spawn_input_event_reader(
+        server,
+        CaptureInputBounds {
+            origin_x: 0,
+            origin_y: 0,
+            width: 1280,
+            height: 720,
+        },
+    );
+
+    assert_eq!(
+        input_reader
+            .stop_and_join(&shutdown_stream)
+            .expect("input reader should stop and join"),
+        Some(InputReaderEvent::Disconnected)
+    );
 }

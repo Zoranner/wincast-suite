@@ -1,4 +1,9 @@
-use std::{net::TcpStream, sync::mpsc, thread, time::Duration};
+use std::{
+    net::{Shutdown, TcpStream},
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
 use wincast_capture::CapturedBgraFrame;
 use wincast_input::{CaptureInputBounds, WindowsInputEventSink};
@@ -92,7 +97,7 @@ pub(super) fn write_raw_bgra_stream(
         )
     })?;
     let input_events = spawn_input_event_reader(input_stream, input_bounds);
-    write_raw_bgra_stream_with_input_events(writer, first_frame, session, &input_events)
+    write_raw_bgra_stream_with_input_events(writer, first_frame, session, input_events.receiver())
 }
 
 pub(super) fn write_raw_bgra_stream_with_input_events(
@@ -158,7 +163,9 @@ pub(super) fn write_raw_bgra_stream_with_input_events(
 
 pub(super) fn write_session_goodbye(writer: &mut impl std::io::Write) -> Result<(), String> {
     match write_message(writer, &ControlMessage::Goodbye) {
-        Ok(()) => Ok(()),
+        Ok(()) => writer
+            .flush()
+            .map_err(|error| format!("刷新会话结束消息失败: {error}")),
         Err(error) if is_control_stream_closed(&error) => Ok(()),
         Err(error) => Err(format!("写入会话结束消息失败: {error}")),
     }
@@ -187,17 +194,63 @@ pub(super) enum InputReaderEvent {
     Failed(String),
 }
 
-fn spawn_input_event_reader(
+pub(super) fn spawn_input_event_reader(
     mut input_reader: TcpStream,
     input_bounds: CaptureInputBounds,
-) -> mpsc::Receiver<InputReaderEvent> {
+) -> InputEventReader {
     let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         let mut input_sink = WindowsInputEventSink::new(input_bounds);
         let event = read_input_events_until_stop(&mut input_reader, &mut input_sink);
-        let _ = sender.send(event);
+        let _ = sender.send(event.clone());
+        Some(event)
     });
-    receiver
+
+    InputEventReader {
+        receiver,
+        handle: Some(handle),
+    }
+}
+
+pub(super) struct InputEventReader {
+    receiver: mpsc::Receiver<InputReaderEvent>,
+    handle: Option<thread::JoinHandle<Option<InputReaderEvent>>>,
+}
+
+impl InputEventReader {
+    pub(super) fn receiver(&self) -> &mpsc::Receiver<InputReaderEvent> {
+        &self.receiver
+    }
+
+    #[cfg(test)]
+    pub(super) fn join(mut self) -> thread::Result<Option<InputReaderEvent>> {
+        self.handle
+            .take()
+            .expect("input reader handle should exist")
+            .join()
+    }
+
+    #[cfg(test)]
+    pub(super) fn stop_and_join(
+        self,
+        input_reader: &TcpStream,
+    ) -> thread::Result<Option<InputReaderEvent>> {
+        let _ = input_reader.shutdown(Shutdown::Read);
+        self.join()
+    }
+}
+
+impl Drop for InputEventReader {
+    fn drop(&mut self) {
+        if self
+            .handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+            && let Some(handle) = self.handle.take()
+        {
+            let _ = handle.join();
+        }
+    }
 }
 
 pub(super) fn read_input_events_until_stop(

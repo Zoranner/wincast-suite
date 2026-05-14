@@ -3,3 +3,35 @@
 **/*.rs.bk
 /wincast-host.toml
 /wincast-client.toml
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.p12
+*.key
+
+# Logs, dumps, and smoke-test outputs
+*.log
+*.dmp
+*.dump
+*.tmp
+*.temp
+
+# Coverage and profiling artifacts
+*.profraw
+*.profdata
+coverage/
+tarpaulin-report.html
+
+# Editor and OS local files
+.vscode/
+.idea/
+.vs/
+*.suo
+*.user
+*.swp
+Thumbs.db
+Desktop.ini

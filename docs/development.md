@@ -6,8 +6,21 @@
 
 ## 常用验证
 
+修改 Rust 代码后先执行格式化修复：
+
 ```powershell
 cargo fmt --all
+```
+
+评审、提交前或 CI 场景使用只读格式检查：
+
+```powershell
+cargo fmt --all -- --check
+```
+
+完整验证至少包括：
+
+```powershell
 cargo test --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```

@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    net::{TcpListener, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -10,10 +11,11 @@ use std::{
 use crate::agent::{
     stream::{
         HostSessionEndReason, InputReaderEvent, read_input_events_until_stop,
-        write_raw_bgra_stream_with_input_events,
+        spawn_input_event_reader, write_raw_bgra_stream_with_input_events,
     },
     tests::*,
 };
+use wincast_input::CaptureInputBounds;
 use wincast_protocol::{
     frame::{read_message, write_message},
     input::{ButtonState, InputEvent, Modifiers},
@@ -98,6 +100,37 @@ fn input_reader_reports_stop_session_after_input_events() {
             delta_x: 0,
             delta_y: 1,
         }]
+    );
+}
+
+#[test]
+fn spawned_input_reader_owner_joins_after_stop_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener.local_addr().expect("listener addr should exist");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = listener.accept().expect("server should accept");
+    let reader = spawn_input_event_reader(
+        server,
+        CaptureInputBounds {
+            origin_x: 0,
+            origin_y: 0,
+            width: 1280,
+            height: 720,
+        },
+    );
+
+    write_message(&mut client, &ControlMessage::StopSession).expect("stop should write");
+
+    assert_eq!(
+        reader
+            .receiver()
+            .recv()
+            .expect("input reader event should be received"),
+        InputReaderEvent::StopSession
+    );
+    assert_eq!(
+        reader.join().expect("input reader thread should join"),
+        Some(InputReaderEvent::StopSession)
     );
 }
 

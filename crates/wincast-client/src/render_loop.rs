@@ -42,7 +42,12 @@ pub(crate) fn read_first_raw_binary_frame_with_sdl_window(
         .try_clone()
         .map_err(|error| format!("克隆 raw BGRA 视频读取端失败: {error}"))?;
     let frames = spawn_raw_bgra_frame_reader(frame_reader);
-    read_raw_bgra_frames_until_renderer_quit(stream, &frames, &mut renderer).map(|_| ())
+    read_raw_bgra_frames_until_renderer_quit(stream, frames.receiver(), &mut renderer)
+        .map(|_| ())?;
+    frames
+        .stop_and_join()
+        .map_err(|_| "raw BGRA 视频读取线程异常结束".to_owned())?;
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -180,25 +185,123 @@ fn read_raw_bgra_frames_with_renderer_loop(
     })
 }
 
-#[cfg(target_os = "linux")]
-fn spawn_raw_bgra_frame_reader(
-    mut reader: impl std::io::Read + Send + 'static,
-) -> mpsc::Receiver<RawBgraStreamEvent> {
+#[cfg(any(test, target_os = "linux"))]
+fn spawn_raw_bgra_frame_reader(mut source: impl RawBgraFrameReaderSource) -> RawBgraFrameReader {
     let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
+    let stopper = source.stopper();
+    let handle = thread::spawn(move || {
         loop {
-            let event = match read_raw_bgra_stream_item(&mut reader) {
+            let event = match read_raw_bgra_stream_item(&mut source) {
                 Ok(RawBgraStreamItem::Frame(frame)) => RawBgraStreamEvent::Frame(frame),
                 Ok(RawBgraStreamItem::Goodbye) => RawBgraStreamEvent::Goodbye,
                 Err(error) => RawBgraStreamEvent::Failed(format_raw_bgra_stream_error(error)),
             };
-            let should_stop = !matches!(event, RawBgraStreamEvent::Frame(_));
-            if sender.send(event).is_err() || should_stop {
-                break;
+            match event {
+                RawBgraStreamEvent::Frame(frame) => {
+                    if sender.send(RawBgraStreamEvent::Frame(frame)).is_err() {
+                        break RawBgraFrameReaderEnd::ReceiverClosed;
+                    }
+                }
+                RawBgraStreamEvent::Goodbye => {
+                    let _ = sender.send(RawBgraStreamEvent::Goodbye);
+                    break RawBgraFrameReaderEnd::Goodbye;
+                }
+                RawBgraStreamEvent::Failed(error) => {
+                    let _ = sender.send(RawBgraStreamEvent::Failed(error.clone()));
+                    break RawBgraFrameReaderEnd::Failed(error);
+                }
             }
         }
     });
-    receiver
+    RawBgraFrameReader {
+        receiver,
+        stopper,
+        handle,
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+trait RawBgraFrameReaderSource: std::io::Read + Send + 'static {
+    fn stopper(&self) -> Box<dyn RawBgraFrameReaderStopper + Send>;
+}
+
+#[cfg(any(test, target_os = "linux"))]
+trait RawBgraFrameReaderStopper {
+    fn stop(&self);
+}
+
+#[cfg(target_os = "linux")]
+impl RawBgraFrameReaderSource for std::net::TcpStream {
+    fn stopper(&self) -> Box<dyn RawBgraFrameReaderStopper + Send> {
+        match self.try_clone() {
+            Ok(stream) => Box::new(TcpStreamRawBgraFrameReaderStopper(stream)),
+            Err(error) => Box::new(NoopRawBgraFrameReaderStopper {
+                reason: error.to_string(),
+            }),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct TcpStreamRawBgraFrameReaderStopper(std::net::TcpStream);
+
+#[cfg(target_os = "linux")]
+impl RawBgraFrameReaderStopper for TcpStreamRawBgraFrameReaderStopper {
+    fn stop(&self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+#[cfg(test)]
+impl RawBgraFrameReaderSource for std::io::Cursor<Vec<u8>> {
+    fn stopper(&self) -> Box<dyn RawBgraFrameReaderStopper + Send> {
+        Box::new(NoopRawBgraFrameReaderStopper {
+            reason: "in-memory test reader".to_owned(),
+        })
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+struct NoopRawBgraFrameReaderStopper {
+    reason: String,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+impl RawBgraFrameReaderStopper for NoopRawBgraFrameReaderStopper {
+    fn stop(&self) {
+        let _ = self.reason.is_empty();
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RawBgraFrameReaderEnd {
+    Goodbye,
+    Failed(String),
+    ReceiverClosed,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+struct RawBgraFrameReader {
+    receiver: mpsc::Receiver<RawBgraStreamEvent>,
+    stopper: Box<dyn RawBgraFrameReaderStopper + Send>,
+    handle: thread::JoinHandle<RawBgraFrameReaderEnd>,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+impl RawBgraFrameReader {
+    fn receiver(&self) -> &mpsc::Receiver<RawBgraStreamEvent> {
+        &self.receiver
+    }
+
+    fn join(self) -> thread::Result<RawBgraFrameReaderEnd> {
+        self.handle.join()
+    }
+
+    fn stop_and_join(self) -> thread::Result<RawBgraFrameReaderEnd> {
+        self.stopper.stop();
+        self.join()
+    }
 }
 
 #[cfg(test)]
@@ -437,6 +540,34 @@ mod tests {
 
         assert!(error.contains("渲染宿主端 raw BGRA 视频帧失败"));
         assert!(error.contains("测试渲染失败"));
+    }
+
+    #[test]
+    fn raw_bgra_frame_reader_owner_can_join_after_stream_ends() {
+        let mut bytes = Vec::new();
+        write_raw_bgra_frame(&mut bytes, &raw_binary_frame())
+            .expect("raw binary frame should encode");
+        write_message(&mut bytes, &ControlMessage::Goodbye).expect("goodbye message should encode");
+
+        let reader = spawn_raw_bgra_frame_reader(std::io::Cursor::new(bytes));
+        assert!(matches!(
+            reader.receiver().recv().expect("frame event should arrive"),
+            RawBgraStreamEvent::Frame(_)
+        ));
+        assert!(matches!(
+            reader
+                .receiver()
+                .recv()
+                .expect("goodbye event should arrive"),
+            RawBgraStreamEvent::Goodbye
+        ));
+
+        assert_eq!(
+            reader
+                .stop_and_join()
+                .expect("reader thread should join after terminal stream event"),
+            RawBgraFrameReaderEnd::Goodbye
+        );
     }
 
     #[test]
