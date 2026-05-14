@@ -187,7 +187,7 @@ fn runtime_not_implemented_message(config: &HostConfig) -> String {
 }
 
 fn runtime_not_implemented_detail() -> &'static str {
-    "raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。"
+    "H.264 编码传输已作为当前正式链路口径，运行期编码器和解码器仍待接入。"
 }
 
 fn load_config(path: &Path) -> Result<HostConfig, String> {
@@ -198,8 +198,9 @@ fn load_config(path: &Path) -> Result<HostConfig, String> {
 
 fn capture_mode_label(mode: CaptureMode) -> &'static str {
     match mode {
+        CaptureMode::Auto => "auto",
         CaptureMode::Window => "window",
-        CaptureMode::Desktop => "desktop",
+        CaptureMode::Display => "display",
     }
 }
 
@@ -332,19 +333,19 @@ mod tests {
     }
 
     #[test]
-    fn runtime_message_reports_raw_bgra_ready_and_codec_transport_pending() {
+    fn runtime_message_reports_h264_transport_pending() {
         let config = host_config("0.0.0.0:7856".to_owned());
 
         let message = runtime_not_implemented_message(&config);
 
         assert!(!message.contains("运行时链路未实现"));
-        assert!(message.contains("raw BGRA 画面链路已接入"));
-        assert!(message.contains("H.264/WebRTC 编码传输尚未接入"));
+        assert!(message.contains("H.264 编码传输已作为当前正式链路口径"));
+        assert!(message.contains("运行期编码器和解码器仍待接入"));
     }
 
     #[test]
-    fn validate_command_accepts_desktop_capture_mode() {
-        let config_path = temp_host_config_path("validate-accepts-desktop");
+    fn validate_command_accepts_display_capture_mode() {
+        let config_path = temp_host_config_path("validate-accepts-display");
         fs::write(
             &config_path,
             r#"
@@ -359,19 +360,20 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
-mode = "desktop"
+mode = "display"
 window_title_contains = ""
 startup_timeout_ms = 15000
 "#,
         )
         .expect("host config should be written");
 
-        let message = validate_config(&config_path).expect("desktop capture should validate");
+        let message = validate_config(&config_path).expect("display capture should validate");
 
         assert!(message.contains("smoke-test"));
-        assert!(message.contains("capture mode desktop"));
+        assert!(message.contains("capture mode display"));
 
         fs::remove_file(config_path).expect("temp host config should be removed");
     }
@@ -391,8 +393,9 @@ work_dir = "C:\\Program Files\\SomeApp"
 width = 1280
 height = 720
 fps = 30
-codec = "raw_bgra"
+codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
 mode = "window"
@@ -408,7 +411,7 @@ startup_timeout_ms = 15000
         assert!(message.contains("监听 127.0.0.1:0"));
         assert!(message.contains("capture mode window"));
         assert!(message.contains("window title SomeApp"));
-        assert!(message.contains("codec raw_bgra"));
+        assert!(message.contains("codec h264"));
         assert!(!message.contains("args"));
         assert!(!message.contains("work_dir"));
 
@@ -442,6 +445,7 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
 mode = "window"
@@ -460,15 +464,15 @@ startup_timeout_ms = 15000
         assert_eq!(runtime.calls[0].capture.mode, CaptureMode::Window);
         assert_eq!(
             message,
-            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
+            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。H.264 编码传输已作为当前正式链路口径，运行期编码器和解码器仍待接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
         );
 
         fs::remove_file(config_path).expect("temp host config should be removed");
     }
 
     #[test]
-    fn run_command_loads_desktop_config_and_delegates_host_agent_runtime() {
-        let config_path = temp_host_config_path("run-delegates-desktop-runtime");
+    fn run_command_loads_display_config_and_delegates_host_agent_runtime() {
+        let config_path = temp_host_config_path("run-delegates-display-runtime");
         fs::write(
             &config_path,
             r#"
@@ -483,9 +487,10 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
-mode = "desktop"
+mode = "display"
 window_title_contains = ""
 startup_timeout_ms = 15000
 "#,
@@ -494,20 +499,20 @@ startup_timeout_ms = 15000
         let mut runtime = RecordingHostAgentRuntime::default();
 
         let message = run_host_with_runtime(&config_path, &mut runtime)
-            .expect("desktop capture should delegate to runtime");
+            .expect("display capture should delegate to runtime");
 
         assert_eq!(runtime.calls.len(), 1);
-        assert_eq!(runtime.calls[0].capture.mode, CaptureMode::Desktop);
+        assert_eq!(runtime.calls[0].capture.mode, CaptureMode::Display);
         assert_eq!(
             message,
-            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。raw BGRA 画面链路已接入，H.264/WebRTC 编码传输尚未接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
+            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。H.264 编码传输已作为当前正式链路口径，运行期编码器和解码器仍待接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
         );
 
         fs::remove_file(config_path).expect("temp host config should be removed");
     }
 
     #[test]
-    fn protocol_config_still_parses_desktop_capture_mode() {
+    fn protocol_config_rejects_desktop_capture_mode() {
         let config = HostConfig::from_toml_str(
             r#"
 listen = "127.0.0.1:0"
@@ -521,6 +526,7 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
 mode = "desktop"
@@ -528,9 +534,12 @@ window_title_contains = ""
 startup_timeout_ms = 15000
 "#,
         )
-        .expect("protocol config should continue parsing desktop mode");
+        .expect_err("protocol config should reject old desktop mode");
 
-        assert_eq!(config.capture.mode, CaptureMode::Desktop);
+        assert!(matches!(
+            config,
+            wincast_protocol::config::ConfigError::InvalidToml(_)
+        ));
     }
 
     fn host_config(listen: String) -> HostConfig {
@@ -545,9 +554,10 @@ startup_timeout_ms = 15000
                 fps: 30,
                 codec: VideoCodec::H264,
                 bitrate_kbps: 4000,
+                max_bitrate_kbps: 6000,
             },
             capture: CaptureConfig {
-                mode: CaptureMode::Desktop,
+                mode: CaptureMode::Display,
                 window_title_contains: String::new(),
                 startup_timeout_ms: 15000,
             },

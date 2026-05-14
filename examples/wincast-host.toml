@@ -7,10 +7,11 @@ work_dir = "C:\\Windows\\System32"
 width = 1280
 height = 720
 fps = 30
-codec = "raw_bgra"
+codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
-mode = "window"
+mode = "auto"
 window_title_contains = "记事本"
 startup_timeout_ms = 15000

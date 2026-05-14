@@ -205,7 +205,7 @@ pub(super) fn run_started_session(
         let message = append_error_response_write_failure(message, write_result);
         HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
     })?;
-    let (mut session, first_frame) =
+    let (mut session, first_frame, active_capture_mode) =
         start_capture_session(config, &window, capture).map_err(|error| {
             let message = format!("初始化画面捕获失败: {error}");
             let write_result =
@@ -220,7 +220,7 @@ pub(super) fn run_started_session(
         stream,
         &first_frame,
         session.as_mut(),
-        capture_input_bounds(config, &window, &first_frame),
+        capture_input_bounds(active_capture_mode, &window, &first_frame),
     )
 }
 

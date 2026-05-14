@@ -60,7 +60,7 @@ pub(crate) fn mouse_button_input_events(
     let position = map_window_point_to_frame_pixels(x, y, window, frame);
 
     [
-        InputEvent::MouseMove {
+        InputEvent::MouseMoveAbsolute {
             x: position.x,
             y: position.y,
         },
@@ -280,10 +280,42 @@ mod tests {
         assert_eq!(
             events,
             [
-                InputEvent::MouseMove { x: 640.0, y: 360.0 },
+                InputEvent::MouseMoveAbsolute { x: 640.0, y: 360.0 },
                 InputEvent::MouseButton {
                     button: MouseButton::Left,
                     state: ButtonState::Pressed,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mouse_button_input_events_move_then_release_at_mapped_position() {
+        let events = mouse_button_input_events(
+            1279,
+            719,
+            MouseButton::Right,
+            ButtonState::Released,
+            PixelDimensions {
+                width: 1280,
+                height: 720,
+            },
+            PixelDimensions {
+                width: 2560,
+                height: 1440,
+            },
+        );
+
+        assert_eq!(
+            events,
+            [
+                InputEvent::MouseMoveAbsolute {
+                    x: 2559.0,
+                    y: 1439.0,
+                },
+                InputEvent::MouseButton {
+                    button: MouseButton::Right,
+                    state: ButtonState::Released,
                 },
             ]
         );

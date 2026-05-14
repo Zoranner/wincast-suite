@@ -23,6 +23,52 @@ fn maps_mouse_move_to_absolute_windows_action() {
 }
 
 #[test]
+fn maps_mouse_move_absolute_to_absolute_windows_action() {
+    let bounds = CaptureInputBounds {
+        origin_x: 100,
+        origin_y: 200,
+        width: 1280,
+        height: 720,
+    };
+
+    let actions = map_input_event_to_windows_actions(
+        InputEvent::MouseMoveAbsolute { x: 640.0, y: 360.0 },
+        bounds,
+    )
+    .expect("absolute mouse move should map");
+
+    assert_eq!(
+        actions,
+        vec![wincast_input::input::WindowsInputAction::MoveAbsolute { x: 740, y: 560 }]
+    );
+}
+
+#[test]
+fn maps_mouse_move_delta_to_relative_windows_action() {
+    let actions = map_input_event_to_windows_actions(
+        InputEvent::MouseMoveDelta {
+            delta_x: -12,
+            delta_y: 34,
+        },
+        CaptureInputBounds {
+            origin_x: 0,
+            origin_y: 0,
+            width: 0,
+            height: 0,
+        },
+    )
+    .expect("relative mouse move should not depend on capture bounds");
+
+    assert_eq!(
+        actions,
+        vec![wincast_input::input::WindowsInputAction::MoveRelative {
+            delta_x: -12,
+            delta_y: 34,
+        }]
+    );
+}
+
+#[test]
 fn clamps_mouse_move_inside_capture_bounds() {
     let bounds = CaptureInputBounds {
         origin_x: 10,

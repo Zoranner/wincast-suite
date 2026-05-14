@@ -398,6 +398,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wincast-media"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "wincast-protocol",
+]
+
+[[package]]
 name = "wincast-protocol"
 version = "0.1.0"
 dependencies = [

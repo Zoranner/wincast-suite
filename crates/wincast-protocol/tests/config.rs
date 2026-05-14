@@ -17,8 +17,8 @@ fn parses_stable_host_example_config() {
     let config = HostConfig::from_toml_str(&example_config("wincast-host.toml"))
         .expect("stable host example config should parse");
 
-    assert_eq!(config.capture.mode, CaptureMode::Window);
-    assert_eq!(config.video.codec, VideoCodec::RawBgra);
+    assert_eq!(config.capture.mode, CaptureMode::Auto);
+    assert_eq!(config.video.codec, VideoCodec::H264);
     assert!(
         !config.capture.window_title_contains.trim().is_empty(),
         "stable host example must keep a non-empty window title hint"
@@ -55,6 +55,7 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
 mode = "window"
@@ -73,8 +74,8 @@ startup_timeout_ms = 15000
 }
 
 #[test]
-fn parses_host_config_with_raw_bgra_video_codec() {
-    let config = HostConfig::from_toml_str(
+fn rejects_host_config_with_raw_bgra_video_codec() {
+    let err = HostConfig::from_toml_str(
         r#"
 listen = "0.0.0.0:7856"
 program = "C:\\Program Files\\SomeApp\\app.exe"
@@ -86,15 +87,16 @@ height = 720
 fps = 30
 codec = "raw_bgra"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
-mode = "desktop"
+mode = "display"
 startup_timeout_ms = 15000
 "#,
     )
-    .expect("raw BGRA host config should parse");
+    .expect_err("raw BGRA is not a configurable video codec");
 
-    assert_eq!(config.video.codec, VideoCodec::RawBgra);
+    assert!(matches!(err, ConfigError::InvalidToml(_)));
 }
 
 #[test]
@@ -111,9 +113,10 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
-mode = "desktop"
+mode = "display"
 startup_timeout_ms = 15000
 "#,
     )
@@ -136,9 +139,10 @@ height = 720
 fps = 30
 codec = "vp9"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
-mode = "desktop"
+mode = "auto"
 startup_timeout_ms = 15000
 "#,
     )
@@ -174,15 +178,79 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
-mode = "desktop"
+mode = "display"
 startup_timeout_ms = 15000
 "#,
     )
     .expect_err("empty program should be rejected");
 
     assert_eq!(err, ConfigError::MissingField("program"));
+}
+
+#[test]
+fn parses_supported_capture_modes() {
+    let cases = [
+        ("auto", CaptureMode::Auto),
+        ("window", CaptureMode::Window),
+        ("display", CaptureMode::Display),
+    ];
+
+    for (mode, expected) in cases {
+        let source = format!(
+            r#"
+listen = "0.0.0.0:7856"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+mode = "{mode}"
+window_title_contains = "SomeApp"
+startup_timeout_ms = 15000
+"#
+        );
+
+        let config = HostConfig::from_toml_str(&source)
+            .unwrap_or_else(|err| panic!("{mode} capture mode should parse: {err}"));
+
+        assert_eq!(config.capture.mode, expected);
+    }
+}
+
+#[test]
+fn rejects_desktop_capture_mode_as_invalid_toml() {
+    let err = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+program = "C:\\Program Files\\SomeApp\\app.exe"
+work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+mode = "desktop"
+startup_timeout_ms = 15000
+"#,
+    )
+    .expect_err("desktop is not a supported capture mode");
+
+    assert!(matches!(err, ConfigError::InvalidToml(_)));
 }
 
 #[test]
@@ -199,9 +267,10 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
-mode = "desktop"
+mode = "display"
 startup_timeout_ms = 15000
 "#,
     )
@@ -230,6 +299,7 @@ height = 720
 fps = 30
 codec = "h264"
 bitrate_kbps = 4000
+max_bitrate_kbps = 6000
 
 [capture]
 mode = "window"

@@ -43,7 +43,7 @@ rustup target add aarch64-unknown-linux-gnu
 cargo check -p wincast-client --target aarch64-unknown-linux-gnu
 ```
 
-当前客户端使用 SDL2 创建 Linux 窗口并显示 raw BGRA 帧，这是当前默认可用的画面链路。协议与配置层虽然已经预留 `video.codec = "h264"`、`EncodedVideoFrame` 等扩展点，但这部分目前仅用于协议边界和后续扩展预留，运行期还没有接入 H.264 编码传输或 WebRTC。
+当前正式视频链路按低延迟 H.264 编码帧设计，不再把未编码像素帧作为稳定版网络传输主线。Linux 客户端仍使用 SDL2 承载窗口和输入事件，但稳定版收口需要验证 H.264 解码、渲染和输入回传的端到端链路。WebRTC 仍不是当前默认方案，需等 H.264 直连链路稳定后再评估。
 
 Windows 开发机上的 workspace 验证只能证明非 Linux 占位路径和协议逻辑可编译，不能替代目标系统真机构建。客户端稳定版收口时，必须在目标 Linux 机器上安装 SDL2 开发包后分别验证：
 

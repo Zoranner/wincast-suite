@@ -12,15 +12,18 @@ pub fn map_input_event_to_windows_actions(
     event: InputEvent,
     bounds: CaptureInputBounds,
 ) -> Result<Vec<WindowsInputAction>, InputInjectionError> {
-    if bounds.width == 0 || bounds.height == 0 {
-        return Err(InputInjectionError::InvalidCaptureBounds);
-    }
-
     match event {
-        InputEvent::MouseMove { x, y } => {
+        InputEvent::MouseMove { x, y } | InputEvent::MouseMoveAbsolute { x, y } => {
+            if bounds.width == 0 || bounds.height == 0 {
+                return Err(InputInjectionError::InvalidCaptureBounds);
+            }
+
             let x = map_capture_coordinate(x, bounds.origin_x, bounds.width)?;
             let y = map_capture_coordinate(y, bounds.origin_y, bounds.height)?;
             Ok(vec![WindowsInputAction::MoveAbsolute { x, y }])
+        }
+        InputEvent::MouseMoveDelta { delta_x, delta_y } => {
+            Ok(vec![WindowsInputAction::MoveRelative { delta_x, delta_y }])
         }
         InputEvent::MouseButton { button, state } => {
             Ok(vec![WindowsInputAction::MouseButton { button, state }])
@@ -91,6 +94,52 @@ mod tests {
         assert_eq!(
             actions,
             vec![WindowsInputAction::MoveAbsolute { x: 740, y: 560 }]
+        );
+    }
+
+    #[test]
+    fn maps_mouse_move_absolute_from_capture_pixels_to_host_coordinates() {
+        let bounds = CaptureInputBounds {
+            origin_x: 100,
+            origin_y: 200,
+            width: 1280,
+            height: 720,
+        };
+
+        let actions = map_input_event_to_windows_actions(
+            InputEvent::MouseMoveAbsolute { x: 640.0, y: 360.0 },
+            bounds,
+        )
+        .expect("absolute mouse move should map");
+
+        assert_eq!(
+            actions,
+            vec![WindowsInputAction::MoveAbsolute { x: 740, y: 560 }]
+        );
+    }
+
+    #[test]
+    fn maps_mouse_move_delta_to_relative_windows_action() {
+        let actions = map_input_event_to_windows_actions(
+            InputEvent::MouseMoveDelta {
+                delta_x: -12,
+                delta_y: 34,
+            },
+            CaptureInputBounds {
+                origin_x: 0,
+                origin_y: 0,
+                width: 0,
+                height: 0,
+            },
+        )
+        .expect("relative mouse move should not depend on capture bounds");
+
+        assert_eq!(
+            actions,
+            vec![WindowsInputAction::MoveRelative {
+                delta_x: -12,
+                delta_y: 34,
+            }]
         );
     }
 

@@ -2,233 +2,195 @@
 
 ## 项目定位
 
-WinCast Suite 面向国产化操作系统访问 Windows 应用的内网远程应用工具。系统采用“专用 Windows 宿主机可被远程接管”的边界：Linux 客户端连接 Windows 宿主端后，由宿主端启动配置好的 Windows 程序，采集该程序窗口或桌面区域画面并传输给客户端，同时把客户端鼠标和键盘事件映射回 Windows 宿主机。客户端明确面向 Linux x86_64 与 Linux aarch64/ARM64 两类部署目标。
+WinCast Suite 面向内网或专网环境，用于让 Linux 客户端远程使用一台 Windows 宿主机上的指定程序。宿主端负责启动或接管配置中的 Windows 程序，捕获该程序所在画面，将编码后的视频流传给客户端，并把客户端鼠标键盘事件注入回 Windows 交互桌面。
 
-本项目使用 Rust 开发，优先保证链路清晰、部署简单、低延迟可验证。系统不追求替代 RDP/RemoteApp，也不承诺不影响宿主机本地使用。
+本项目不是通用远控产品，也不追求替代 RDP、RemoteApp 或 RustDesk。当前设计只面向受控内网、固定宿主机、单客户端、单显示器、最高 1920x1080 的远程应用操控场景。典型目标程序包括普通窗口程序、全屏仿真软件和不能要求其改成窗口化全屏的既有 Windows 程序。
+
+系统采用 Rust 开发。对捕获、编码、解码、渲染、输入和系统服务等成熟领域能力，优先使用可靠第三方库或系统 API 封装，不默认从零实现底层媒体栈。
 
 ## 使用边界
 
-系统只支持内网或专网直连。客户端直接配置 Windows 宿主机 IP 地址和端口，宿主端直接配置监听端口、程序路径、启动参数、工作目录、画面参数等基础项。
+系统只支持内网或专网直连。客户端直接配置 Windows 宿主机 IP 和端口，宿主端读取本地配置并监听连接。不提供公网访问、NAT 穿透、TURN 中继、服务发现、账号体系、客户端证书、权限分级或审计日志。
 
-Windows 宿主机需要满足以下前提：
+当前稳定目标限定如下：
 
-- 推荐使用专用账号自动登录，避免宿主机重启后停在登录界面。
-- 已登录到一个可交互桌面。
-- 桌面未锁屏；锁屏期间远程会话应暂停或断开，不能继续捕获和注入输入。
-- 推荐接入物理显示器、虚拟显示器或 HDMI 虚拟头，以保证无人值守时仍有稳定分辨率。
-- 被启动程序不应依赖 UAC 安全桌面交互。
-- 宿主机本地若有人同时使用，会被远程输入和窗口焦点影响。
+- Windows 宿主机只有一个可用显示器。
+- 宿主显示器最高按 1920x1080 设计，不主动降分辨率。
+- 宿主程序形态不可控，可能是普通窗口，也可能是全屏程序。
+- 客户端需要覆盖 Linux x86_64 与 Linux aarch64/ARM64。
+- 同一时间只允许一个客户端控制宿主端。
+- 宿主端可以被远程输入影响，不承诺不影响本地用户。
+- 宿主端推荐使用专用账号自动登录，保证重启后可进入交互桌面。
+- 锁屏、注销或交互桌面不可用时，系统只能感知、断开或恢复，不做远程凭据输入。
 
-系统支持通过部署策略让专用账号自动登录，并在运行时感知登录、锁屏、解锁和注销状态。系统不做远程输入 Windows 凭据解锁，不捕获或控制登录界面、锁屏界面、UAC 安全桌面、独立多用户远程会话，也不保证本地用户无感使用。
+安全边界按受控内网工具处理，只保留必要工程底线：Host 监听显式配置的地址和端口；Service 与 Agent 的 IPC 只允许本机访问；配置文件不保存 Windows 登录密码；错误状态明确暴露，不伪装在线。
 
 ## 目标能力
 
-- Linux x86_64 与 Linux aarch64/ARM64 客户端通过 IP 和端口连接 Windows 宿主端。
-- Windows 宿主端根据配置启动一个指定程序。
-- 宿主端定位目标程序窗口，捕获窗口画面；窗口捕获不稳定时允许退回桌面区域捕获。
-- 宿主端以低延迟视频流方式传输画面。
-- 客户端展示远程画面，并采集鼠标、键盘、滚轮事件。
-- 宿主端接收输入事件并注入到 Windows 交互桌面。
-- 连接断开后释放捕获、编码、进程和网络资源。
-- 对启动失败、找不到窗口、捕获失败、连接断开等基础错误给出明确提示。
-- Windows 宿主端开机后能够通过服务进程进入可等待连接状态。
-- 已登录且未锁屏时自动拉起交互桌面内的 Host Agent。
-- 检测到锁屏、注销或交互桌面不可用时暂停或断开会话，并向客户端返回明确状态。
-- 解锁或重新登录后恢复 Host Agent，允许客户端自动重连或手动重连。
+- Linux 客户端通过 IP 和端口连接 Windows 宿主端。
+- Windows 宿主端按配置启动指定程序。
+- 宿主端能处理窗口程序和全屏程序。
+- 捕获策略支持窗口优先、唯一显示器兜底。
+- 视频传输使用低延迟 H.264 编码流，不再设计 raw BGRA 网络传输链路。
+- 客户端解码视频流并显示远程画面。
+- 客户端采集鼠标移动、按下、释放、滚轮和键盘事件。
+- 输入重点覆盖仿真软件常见操作：拖动镜头旋转、拖动平移、滚轮缩放和普通键盘输入。
+- 客户端关闭或连接断开后，宿主端释放捕获、编码、输入、网络和本次会话启动的程序资源。
+- Windows Service 负责开机后的后台编排，交互桌面内的 Host Agent 负责捕获和输入注入。
+- 登录、锁屏、解锁和注销状态需要被感知，并转换为客户端可理解的状态或错误。
 
 ## 非目标能力
 
 系统明确不做以下能力：
 
-- 白名单、客户端证书、用户权限、审计日志。
-- 空闲超时、崩溃重启、单实例或多实例策略。
-- 敏感组合键过滤。
-- 文件传输、剪贴板同步、音频、打印、USB 重定向。
+- 公网远控、NAT 穿透、TURN 中继。
+- 账号体系、客户端证书、权限分级、审计日志。
 - 多客户端并发访问同一宿主端。
-- 管理端、服务发现、自动注册、中心调度。
-- 公网访问、NAT 穿透、TURN 中继。
+- 多显示器枚举、跨屏坐标、窗口跨屏迁移、显示器动态插拔。
+- 虚拟显示器驱动和无物理显示器兜底。
+- 文件传输、剪贴板同步、音频、打印、USB 重定向。
+- 敏感组合键过滤、完整远程输入法、手柄输入。
 - 不影响宿主机本地用户的独立远程会话。
 - 远程输入 Windows 账号密码来登录或解锁。
-- 对 Windows 登录界面、锁屏界面、UAC 安全桌面的捕获和控制。
+- Windows 登录界面、锁屏界面、UAC 安全桌面的捕获和控制。
 - Credential Provider、自定义登录凭据入口或替代 Windows 登录界面。
 
-其中远程登录/解锁、剪贴板同步、文件传输和多客户端并发是永久非目标，不作为后续路线图。
+其中远程登录/解锁、文件传输、剪贴板同步、多客户端并发、多屏和公网访问是永久非目标，不作为后续路线图。
 
 ## 总体架构
 
-系统由 Windows 宿主端和国产化操作系统客户端两部分组成。两端共享一套 Rust 协议 crate，保证控制消息、输入事件、错误码和配置模型一致。
+系统由 Windows 宿主端和 Linux 客户端组成。两端共享协议 crate，控制消息、输入事件、错误码和配置模型保持一致。
 
 ```text
-Linux 客户端
+Linux Client
   -> 读取 host/port
   -> 建立内网连接
-  -> 创建本地显示窗口
-  -> 接收并渲染远程画面
-  -> 采集鼠标键盘事件并发送
+  -> 接收 H.264 编码视频帧
+  -> 解码并显示远程画面
+  -> 采集鼠标键盘事件
+  -> 发送输入事件
 
-Windows 宿主端
-  -> 服务进程开机自启并读取监听端口和程序配置
-  -> 检测当前用户会话、锁屏和解锁状态
-  -> 在交互桌面内拉起 Host Agent
-  -> 等待客户端连接
-  -> 启动 Windows 程序
+Windows Service
+  -> 开机启动
+  -> 读取服务配置
+  -> 感知登录、锁屏、解锁和注销
+  -> 拉起或停止交互桌面 Host Agent
+  -> 通过本机 IPC 协调 Agent 状态
+
+Windows Host Agent
+  -> 运行在用户交互桌面
+  -> 启动目标程序
   -> 定位目标窗口
-  -> 捕获窗口或桌面区域
-  -> 发送画面帧
-  -> 接收输入事件并注入
+  -> 窗口捕获或唯一显示器捕获
+  -> H.264 低延迟编码
+  -> 发送编码视频帧
+  -> 接收并注入输入事件
 ```
 
-宿主端同一时间只处理一个客户端连接。若已有客户端连接，新的连接应返回“忙碌”错误并关闭。
+Service 不直接捕获画面或注入输入，避免 Session 0 与用户交互桌面隔离带来的不可预测行为。Host Agent 必须运行在实际用户会话中。
 
 ## Rust 工程结构
 
-当前 Cargo workspace：
+当前 Cargo workspace 继续保留按能力拆分的结构，但设计口径需要从 raw BGRA 传输转向编码视频流：
 
 ```text
 crates/
-  wincast-protocol/    # 控制消息、输入事件、配置模型、错误码、Service/Agent IPC 消息模型
-  wincast-host/        # Windows 宿主端主程序
-  wincast-capture/     # Windows 画面捕获封装
+  wincast-protocol/    # 控制消息、输入事件、配置模型、错误码、视频帧与 Service/Agent IPC 模型
+  wincast-host/        # Windows 宿主端 CLI、Service 编排与 Host Agent 运行入口
+  wincast-capture/     # Windows 窗口捕获与唯一显示器捕获封装
+  wincast-media/       # 视频编码、解码、码率/FPS 控制和媒体帧模型
   wincast-input/       # Windows 输入注入封装
   wincast-client/      # Linux x86_64 与 Linux aarch64/ARM64 客户端主程序
-  wincast-render/      # 客户端 raw BGRA 渲染封装，当前使用 SDL2
+  wincast-render/      # Linux 客户端窗口、解码后画面呈现和输入采集
 docs/
   design.md
 ```
 
-各 crate 边界如下：
+`wincast-media` 是设计目标中的新边界，用来避免把编码器、解码器、帧封装、码率和 FPS 控制散落在 host/client 入口里。实际实现时可以按风险拆成更细 crate，但职责应保持清晰。
 
-- `wincast-protocol` 不依赖平台 API，只定义可序列化的数据结构；当前已包含 Service 与 Host Agent 的 IPC 消息模型和长度前缀 JSON frame 编解码底座，并通过 JSON round-trip 与 frame 传输测试约束序列化边界。
-- `wincast-host` 负责配置读取、连接管理、进程生命周期和各模块编排；当前已包含登录、锁屏和 Agent 可用性的纯状态机模型、平台事件映射边界，以及给定窗口句柄后的 Windows 会话通知注册/注销边界，但尚未接入消息循环、真实状态检测和恢复编排。
-- `wincast-capture` 只封装 Windows 捕获能力，不处理网络和进程启动。
-- `wincast-input` 只封装 Windows 输入注入，不理解客户端 UI、网络会话或窗口生命周期。
-- `wincast-client` 负责连接宿主端、窗口生命周期和本地事件采集。
-- `wincast-render` 负责帧缓冲和渲染输出；当前使用 SDL2 在 Linux 上显示 raw BGRA 帧，后续接入 H.264 时再承担视频解码。
+## 第三方库与系统能力策略
 
-## Windows 绑定策略
+项目不应自己实现成熟媒体和系统底层能力。优先顺序如下：
 
-Windows 侧当前保留 `windows` 与 `windows-sys` 双线绑定，不把现状描述为已经收敛到单一绑定。`wincast-capture` 使用 `windows`，主要因为 Windows Graphics Capture、WinRT 接口和 D3D11 对象交互需要较完整的类型封装；`wincast-host` 与 `wincast-input` 使用 `windows-sys`，主要因为 SCM、WTS、窗口枚举和 `SendInput` 等 Win32 调用更接近 C ABI，轻量绑定便于显式管理句柄、结构体、错误码和 unsafe 边界。
+- 捕获：优先使用 Windows Graphics Capture 和 DXGI Desktop Duplication 等系统 API；如果已有 Rust 封装能稳定覆盖目标平台，可优先封装复用。
+- 编码：优先使用成熟 H.264 编码库或系统硬件编码能力。可评估 GStreamer、FFmpeg/libav、Windows Media Foundation、openh264 或参考 RustDesk `scrap` 的硬编分层，避免手写 H.264 编码器。
+- 解码：Linux 客户端优先使用成熟解码库。可评估 GStreamer、FFmpeg/libav、openh264 或平台硬解能力；先保证 x86_64 与 aarch64/ARM64 可构建、可部署。
+- 渲染与输入采集：客户端窗口继续优先 SDL2，除非目标系统证明 SDL2 不可用；不要引入复杂 GUI 框架只为显示视频画面。
+- 输入注入：Windows 侧优先使用 `SendInput` 或成熟封装；如果后续出现拖拽不连续、相对鼠标需求，再扩展输入协议和注入策略。
+- Service 与 IPC：Service 管理可以继续使用 Windows SCM API 或成熟 crate；本机 IPC 优先使用命名管道或成熟 IPC crate，并设置最小必要访问控制。
 
-后续升级 Windows 绑定依赖时，应把 `windows` 与 `windows-sys` 分别作为受控边界审计：确认 feature 范围、生成类型、错误返回、句柄所有权和线程/回调生命周期是否变化。跨 crate 暴露的接口优先使用项目自有中性类型，避免把 COM/WinRT 类型或裸 FFI 类型扩散到协议、配置和上层编排模块。确需在两类绑定之间转换时，转换点必须说明类型来源、生命周期、所有权、释放责任和失败语义。
+RustDesk 参考项目的价值在于捕获抽象、编码/QoS、输入事件完整性和 Service/IPC 边界，不在于照搬其公网远控、账号、文件、剪贴板、音频、打印、多端 UI 或插件体系。
 
-## 当前 CLI 骨架
+## 捕获设计
 
-当前 `wincast-host` 与 `wincast-client` 已在配置读取、配置校验和 TCP 控制通道握手基础上接入 raw BGRA 捕获传输、SDL2 渲染和基础输入回传。若宿主端提示编码传输未实现，应理解为 H.264/WebRTC 等编码传输路线尚未接入，不代表当前 raw BGRA 链路不可用；当前 `run` 的默认可用画面链路就是 raw BGRA。
-
-会话状态与 Service/Agent 分层当前仍是底座能力：`wincast-host` 已新增纯状态机，用于表达未登录、已登录、锁屏、Agent 可用、会话运行、会话暂停和错误状态之间的转换，并补齐平台事件到状态机事件的映射边界；前台 SessionGate 已能读取共享状态并拒绝未登录、已锁屏或 Agent 不可用的会话；`wincast-protocol` 已新增 Service 与 Host Agent 的 IPC 消息模型和长度前缀 JSON frame 编解码，用于表达 Agent 在线状态、启动会话、结束会话、锁屏通知和错误上报；`wincast-host` 已有可测试的通用 Read/Write IPC endpoint，并新增最小 TCP loopback transport，用于复用上述 frame 完成 Service/Agent 双向 round-trip；Service 侧已具备最小 Agent coordinator，可通过 `QueryStatus` 获取 Agent 上报状态，并对 `StartSession` / `StopSession` 做 request/ack 校验；前台 Host Agent 运行入口也已从 CLI 命令分发中抽出，便于后续 Service 复用。上述能力目前只约束内存状态、可序列化消息、通用 frame 传输、本机 loopback 连接、Service 侧 request/ack coordinator 和 Agent runtime 边界，不代表已经实现 Windows 会话事件运行时监听或 Service 拉起 Host Agent。
-
-宿主端 CLI：
+宿主程序形态不可控，因此捕获策略不能要求目标程序配合窗口化全屏。设计支持三种捕获模式：
 
 ```text
-wincast-host
-wincast-host validate
-wincast-host run
-wincast-host service install
-wincast-host service uninstall
-wincast-host service start
-wincast-host service stop
-wincast-host service status
+capture.mode = "auto"
+capture.mode = "window"
+capture.mode = "display"
 ```
 
-客户端 CLI：
+`window` 模式优先按配置启动程序和窗口标题定位目标窗口，适合普通窗口程序。该模式画面范围更干净，但可能在独占全屏、特殊渲染路径、窗口句柄不稳定或受保护内容场景下失败。
 
-```text
-wincast-client
-wincast-client validate
-wincast-client run
-wincast-client run --retries 3 --retry-delay-ms 1000
-wincast-client targets
-```
+`display` 模式捕获唯一显示器，适合全屏程序、窗口捕获失败、窗口捕获黑屏或目标窗口句柄不稳定的场景。当前设计只支持单显示器，因此不需要 display id、多屏排序、跨屏坐标或非零显示器原点。
 
-不带子命令时默认进入 `run`。Host 与 Client 默认从用户配置目录读取配置：Windows host 默认读取 `%APPDATA%\WinCast\wincast-host.toml`，Linux client 默认读取 `${XDG_CONFIG_HOME:-$HOME/.config}/wincast/wincast-client.toml`。`XDG_CONFIG_HOME` 必须是非空绝对路径；未设置、为空或为相对路径时回退到 `$HOME/.config`。`--config` 仅用于临时调试或一次性验证时覆盖默认路径。宿主端 `run` 在配置校验通过后进入持续 TCP 监听，同一时间只处理一个客户端会话；空闲时接受客户端 `Hello` 和 `StartSession` 控制消息，随后尝试启动配置程序、定位主窗口、通过 Windows Graphics Capture 初始化捕获会话、等待首帧 BGRA readback 缓冲，发送 `SessionReady`、`VideoReady` 并持续写入 raw BGRA 二进制帧；已有会话运行时，新的客户端连接会收到忙碌错误。`service` 子命令已接入 Windows SCM 的安装、卸载、启动、停止和状态查询最小闭环，隐藏的 `service run` 入口只负责 SCM 服务进程生命周期和停止控制，不直接做捕获、输入或 Host Agent 拉起。Linux 客户端 `run` 连接宿主端、发送 `Hello` 和 `StartSession`，创建 SDL2 窗口持续渲染 raw BGRA 帧，轮询 SDL2 基础键鼠事件并写回控制连接，窗口退出时发送 `StopSession`；`--retries` 和 `--retry-delay-ms` 只覆盖启动连接阶段的有限重试，不改变会话中断后的恢复语义，也不代表 Service/Agent 自动恢复已经完成。宿主端使用阻塞输入读取线程处理客户端输入事件，避免在非阻塞单次 `read_message` 中丢失半包状态，并通过 Windows SendInput 注入基础鼠标、滚轮和键盘事件。非 Linux 开发环境只执行协议校验路径，并把宿主端错误响应明确暴露出来。当前 `wincast-protocol` 已定义 raw BGRA 二进制帧、`VideoReady`、Service/Agent IPC 长度前缀 JSON frame 和后续可选 H.264 `EncodedVideoFrame` 线格式；当前主线优先打通 raw BGRA 帧链路，H.264/WebRTC 只作为后续性能优化项。`wincast-capture` 已接入 WGC 支持检测、窗口捕获目标创建、目标窗口所在显示器捕获、D3D11 设备、帧池、捕获会话启动、首帧等待、帧元数据读取、D3D11 纹理描述读取、尺寸变化后的帧池重建和可选 BGRA readback；`wincast-render` 已提供 SDL2 raw BGRA 窗口后端。客户端 `targets` 必须明确列出 `x86_64-unknown-linux-gnu` 与 `aarch64-unknown-linux-gnu`，对应 Linux x86_64 与 Linux aarch64/ARM64。
-
-## 宿主端设计
-
-当前代码中的 `wincast-host` 以前台 `run` 作为稳定捕获入口，同时已具备 Windows Service SCM 管理和最小服务进程入口，方便后续演进为 Service 加用户态 Host Agent 的两层结构。当前已补齐会话状态纯模型、平台事件映射边界、Service/Agent IPC 消息模型、长度前缀 JSON frame 底座、Host 侧通用 IPC endpoint、ServiceManager 管理抽象和共享状态门禁；后续为了处理开机自启、登录态和锁屏状态，还需要把真实 Windows 会话事件、Service 拉起 Agent 和跨进程状态同步接入运行时。
-
-Windows Service 负责：
-
-- 开机自启动并读取全局配置。
-- 监听客户端连接或协调监听端口占用。
-- 订阅 Windows 会话状态变化，识别登录、锁屏、解锁和注销。
-- 在已登录且未锁屏的交互桌面内拉起 Host Agent。
-- 在锁屏、注销或 Agent 退出时清理会话状态，并向客户端返回明确错误或状态。
-
-Host Agent 负责：
-
-- 运行在用户交互桌面内，不运行在 Session 0。
-- 启动配置程序、定位目标窗口、建立捕获会话。
-- 发送画面帧并接收输入事件。
-- 使用 Windows 输入注入能力作用到当前交互桌面。
-- 与 Service 通过本机 IPC 交换状态和控制命令。
-
-Service 不直接做窗口捕获和输入注入，避免 Session 0 与交互桌面隔离导致能力不可用或行为不可预测。
-
-当前已实现 Windows Service 安装、卸载、启动、停止和状态查询的最小 SCM 管理闭环，并提供可响应 stop/interrogate 的最小服务进程入口；尚未实现开机自启、Service 拉起 Host Agent、Agent 保活、命名管道权限模型、重连心跳或 Service 侧端口编排。现有 IPC 类型、长度前缀 JSON frame、最小 TCP loopback transport 和 Service 侧 request/ack coordinator 仍只是 Service 与 Agent 之间通信的底座。
-
-宿主端启动流程：
-
-```text
-读取配置
--> 检查当前用户会话状态
--> 已登录且未锁屏时启动 Host Agent
--> 监听 TCP 端口
--> 接收客户端连接
--> 启动配置程序
--> 等待程序进入可交互状态
--> 枚举进程窗口并选择主窗口
--> 建立捕获会话
--> 建立视频发送循环
--> 建立输入接收循环
-```
-
-程序启动使用 Windows 进程 API。窗口定位优先按进程 ID 枚举顶层窗口，过滤不可见窗口、工具窗口和尺寸异常窗口。如果目标程序会先启动 launcher 再拉起子进程，可以通过配置项补充窗口标题关键字或等待时间。
-
-## 登录与锁屏处理
-
-登录和锁屏处理以“感知状态、自动恢复、不远程提交 Windows 凭据”为原则。宿主机部署时推荐启用专用账号自动登录，解决断电重启、系统更新重启后无人值守恢复的问题。自动登录属于部署策略，不等同于远程解锁；其安全边界需要由专用账号权限、物理访问限制和内网隔离共同约束。
-
-系统运行时需要区分以下状态：
-
-- 未登录：Service 保持运行并等待用户会话出现；客户端连接时返回宿主机未登录状态。
-- 已登录且未锁屏：Service 拉起或保持 Host Agent，允许建立远程会话。
-- 已锁屏：停止新的会话启动；已有会话暂停或断开，客户端显示宿主机已锁定。
-- 解锁后：Service 重新确认交互桌面可用，拉起或恢复 Host Agent，客户端可自动重连或手动重连。
-- 注销或切换用户：释放 Agent、捕获、输入和会话资源，客户端收到会话结束或状态错误。
-
-当前代码已用纯状态机描述这些状态转换和对客户端可见的状态/错误，并补齐了 `WTSRegisterSessionNotification` / `WTSUnRegisterSessionNotification` 的注册边界，用于后续在拥有窗口句柄和消息循环后接收 `WM_WTSSESSION_CHANGE`。前台会话门禁已可读取共享状态，保证锁屏状态不会被 Agent 在线事件误放行。但当前尚未接入 `WTSGetActiveConsoleSessionId`、桌面锁定事件分发或其他 Windows 会话状态检测，也没有实现消息循环到状态机的运行时编排；现阶段仍不做真实状态恢复。系统也不做 Credential Provider，不采集、不保存、不转发 Windows 登录密码；远程登录或远程解锁不纳入本项目后续路线图。
-
-## 画面捕获
-
-Windows 捕获优先采用窗口级捕获，目标是只传输被启动程序的窗口画面。实现上优先封装 Windows Graphics Capture；当配置为 `capture.mode = "desktop"` 时，当前实现捕获目标窗口所在显示器，并用该显示器的桌面坐标原点映射输入。该路径不是多显示器拼接，也不覆盖锁屏、UAC 安全桌面或窗口跨显示器后的动态重算。
+`auto` 模式先尝试窗口捕获，失败、黑屏或明显无帧时切换到唯一显示器捕获。切换过程必须向客户端暴露状态，避免出现假会话。
 
 捕获模块需要处理：
 
-- DPI 缩放导致的逻辑坐标与物理像素坐标差异。
-- 窗口移动、缩放、最小化、关闭。
-- 主窗口句柄重建。
-- 弹窗和子窗口是否纳入画面。
-- 捕获失败后的错误上报和资源释放。
+- 程序启动后窗口出现等待。
+- launcher 拉起子进程后的窗口定位。
+- 窗口最小化、关闭、句柄重建。
+- 全屏程序导致窗口捕获失败或黑屏。
+- DPI 缩放下的坐标映射。
+- 唯一显示器捕获时的输入坐标映射。
+- 捕获失败后的明确错误上报和资源释放。
 
-推荐固定目标为 1280x720 或 1920x1080、30 FPS。画面尺寸由宿主端配置决定，客户端按收到的视频尺寸创建或调整显示区域。
+当前不处理多屏、虚拟显示器、UAC 安全桌面、锁屏界面和登录界面捕获。
 
-## 视频传输
+## 视频编码与传输
 
-当前阶段优先使用低复杂度 raw BGRA 帧通道，先形成可见画面的端到端闭环。该路线参考“覆盖式最新帧”模型：宿主端捕获 BGRA 帧后写入独立二进制帧，客户端读取最新帧并渲染；慢客户端允许丢帧，不把每一帧都堆成可靠队列。
+正式传输链路只保留编码视频流。设计上删除 raw BGRA 作为网络协议、配置 codec 和烟测主线的概念。
 
-raw BGRA 帧头包含 magic、宽度、高度、row pitch、序号、时间戳和 payload 长度，payload 为 BGRA32 字节。控制消息只承载握手、阶段切换、错误和输入事件，不承载持续大帧。
+第一目标链路：
 
-客户端当前窗口后端固定为 SDL2，不引入 Slint 或 egui。这样可以降低银河麒麟 V10 等老系统上的 GPU、Vulkan、Wayland 和桌面环境依赖风险，优先通过 SDL2 streaming texture 直接显示 BGRA8888 帧。
+```text
+Capture Frame
+  -> H.264 low-latency encoder
+  -> EncodedVideoFrame
+  -> framed stream over internal network
+  -> Linux decoder
+  -> renderer
+```
 
-H.264/WebRTC 保留为后续优化路线：当 raw BGRA 在目标分辨率、帧率或网络环境下不可接受时，再接入 H.264 编码、媒体传输和解码渲染。内网场景不需要公网 TURN 中继，连接模型限制为局域网直连。
+默认目标：
 
-Rust 负责配置、生命周期和协议编排。后续媒体底层可以封装 Rust WebRTC 能力；如果硬件编码和系统媒体管线集成成本过高，也可以封装 GStreamer 管线，但外部架构和协议边界保持不变。
+- codec：H.264。
+- resolution：最高 1920x1080，按宿主实际画面走，不主动降采样。
+- fps：默认 30。
+- latency：优先低延迟，允许为低延迟牺牲压缩率。
+- bitrate：配置目标码率和上限，后续可根据客户端反馈调整。
+
+H.265、AV1、硬件解码、60 FPS 和更复杂的自适应码率可以作为后续优化，但不影响第一条正式链路。WebRTC 也不作为当前默认方案；内网直连场景可先用自有控制连接和编码帧传输，等 H.264 链路稳定后再评估是否需要 WebRTC 的拥塞控制、抖动缓冲和媒体通道能力。
+
+协议层应表达编码帧，而不是 raw 像素帧。编码帧至少包含：
+
+- codec。
+- frame kind。
+- width 与 height。
+- sequence。
+- timestamp。
+- payload length。
+- keyframe 标记。
+
+慢客户端不应让编码帧无限积压。服务端和客户端需要有丢弃旧帧、请求关键帧、限制 FPS 或降低码率的机制。参考 RustDesk 的质量状态和 FPS 反馈思路，但 WinCast 不需要做复杂画质 UI。
 
 ## 输入映射
 
-客户端采集本地窗口内的鼠标和键盘事件，转换为协议事件发送给宿主端。鼠标坐标使用归一化坐标或远程画面像素坐标，宿主端根据当前捕获区域映射回 Windows 桌面坐标。
+输入协议需要服务仿真软件的高频拖拽场景，而不只是普通点击。
 
-输入事件类型：
+基础输入事件包括：
 
 - 鼠标移动。
 - 鼠标按下和释放。
@@ -236,22 +198,44 @@ Rust 负责配置、生命周期和协议编排。后续媒体底层可以封装
 - 键盘按下和释放。
 - 修饰键状态。
 
-宿主端使用 Windows 输入注入能力把事件注入到当前交互桌面。该方式会影响宿主机本地鼠标、键盘和窗口焦点，这是工具边界的一部分。
+设计上应保留相对移动或拖拽序列扩展点：
 
-系统不实现完整远程输入法。中文输入依赖 Windows 端输入法状态和按键事件。
+```text
+MouseMoveAbsolute { x, y }
+MouseMoveDelta { dx, dy }
+MouseButton { button, state }
+MouseWheel { delta_x, delta_y }
+Keyboard { key, state, modifiers }
+```
+
+普通窗口和唯一显示器捕获时，绝对坐标可以直接从客户端显示区域映射到远程画面坐标。若目标仿真软件依赖连续拖动来旋转或平移镜头，客户端必须保证按下、移动序列、释放顺序稳定；连接中断、窗口失焦或客户端退出时，宿主端需要释放仍处于按下状态的按键，避免粘键或粘鼠标按钮。
+
+验收重点：
+
+- 左键长按拖动旋转。
+- 右键或中键长按拖动平移。
+- 快速来回拖动不跳点。
+- 滚轮缩放连续可用。
+- 释放事件不丢失。
+- 客户端窗口退出后宿主端没有残留按下状态。
+
+当前不实现完整远程输入法、手柄输入、敏感组合键策略或游戏级 raw input 捕获。
 
 ## 协议设计
 
-控制消息使用长度前缀二进制消息和 `serde` 序列化。阻塞读取路径必须完整读完长度头和 payload 后才解码，避免粘包和半包问题；需要轮询时不能用无状态非阻塞 `read_message` 丢弃半包状态。
+控制消息使用长度前缀二进制消息和 `serde` 序列化。阻塞读取路径必须完整读完长度头和 payload 后才解码，避免粘包和半包问题。
 
-核心消息：
+核心控制消息：
 
 ```text
 Hello
 StartSession
 SessionReady
 VideoReady
+EncodedVideoFrame
 InputEvent
+RequestKeyFrame
+QualityFeedback
 StopSession
 Error
 Heartbeat
@@ -264,17 +248,20 @@ Goodbye
 Client -> Host: Hello
 Host -> Client: Hello
 Client -> Host: StartSession
-Host: 启动程序并建立捕获
+Host: 启动程序并选择捕获模式
+Host: 初始化编码器
 Host -> Client: SessionReady
 Host -> Client: VideoReady
-Client <-> Host: 输入事件与状态消息
+Host -> Client: EncodedVideoFrame...
+Client -> Host: InputEvent...
+Client -> Host: QualityFeedback...
 Client -> Host: StopSession
 Host -> Client: Goodbye
 ```
 
-当前 raw BGRA 阶段不需要 SDP offer/answer 或 ICE candidate。后续接入 WebRTC 时，控制通道再承载 SDP offer/answer 和 ICE candidate，信令过程隐藏在 `StartSession` 到 `VideoReady` 之间。
+控制消息、输入事件和编码视频帧可以共用连接，也可以在后续拆成控制通道和媒体通道。当前设计不要求 SDP offer/answer 或 ICE candidate；如果未来接入 WebRTC，再把信令过程隐藏在 `StartSession` 到 `VideoReady` 之间。
 
-Service 与 Host Agent 的本机 IPC 消息模型已经独立放在协议 crate 中，覆盖 Service 向 Agent 发起会话启动、停止、锁屏通知，以及 Agent 向 Service 上报在线状态、会话已启动、会话已结束和错误。当前已补齐长度前缀 JSON frame 编解码，并在 Host 侧增加通用 Read/Write endpoint、最小 TCP loopback transport 和 Service 侧 request/ack coordinator，便于后续继续替换或扩展到命名管道、Unix domain socket 等通道；现阶段还没有定义连接生命周期、重连、心跳超时、消息投递重试策略，也尚未把会话命令接入真实 Agent 进程和 Host Agent runtime。
+Service 与 Host Agent 的本机 IPC 消息模型独立于客户端协议。IPC 负责 Agent 在线状态、启动会话、停止会话、锁屏通知、错误上报和心跳。IPC 只绑定本机，并保留最小访问控制和进程来源校验。
 
 ## 配置设计
 
@@ -287,19 +274,19 @@ args = []
 work_dir = "C:\\Program Files\\SomeApp"
 
 [video]
-width = 1280
-height = 720
+width = 1920
+height = 1080
 fps = 30
-codec = "raw_bgra"
-bitrate_kbps = 4000
+codec = "h264"
+bitrate_kbps = 8000
+max_bitrate_kbps = 12000
 
 [capture]
-mode = "window"
+mode = "auto"
 window_title_contains = "SomeApp"
 startup_timeout_ms = 15000
+fallback_to_display = true
 ```
-
-当前配置模型仍要求填写 `bitrate_kbps`，但在 `codec = "raw_bgra"` 的当前主线下，该字段只是与后续编码路线共用的保留配置，不代表宿主端已经默认启用 H.264 编码传输。
 
 客户端配置示例：
 
@@ -308,26 +295,95 @@ host = "192.168.10.25"
 port = 7856
 ```
 
-配置读取失败必须直接报错并退出，不做隐式猜测。路径不存在、工作目录不存在、端口被占用、帧率或码率非法，都应在启动时暴露。
+配置原则：
+
+- `video.codec` 当前只设计为 `h264`。
+- `video.width` 与 `video.height` 是目标上限，不用于强制降采样到更低清晰度。
+- `capture.mode = "auto"` 是推荐默认值。
+- `capture.mode = "display"` 表示唯一宿主显示器。
+- `window_title_contains` 用于窗口定位，不能匹配时按 `fallback_to_display` 决定是否切显示器捕获。
+- 配置读取失败必须直接报错，不做隐式猜测。
+
+## 宿主端运行设计
+
+当前前台 `run` 可以作为开发和烟测入口。稳定部署形态仍是 Windows Service 加用户态 Host Agent。
+
+Windows Service 负责：
+
+- 开机自启动并读取服务配置。
+- 检测当前用户会话状态。
+- 感知锁屏、解锁和注销。
+- 在已登录且未锁屏时拉起 Host Agent。
+- 维护 Agent 在线状态和心跳。
+- 在锁屏、注销或 Agent 退出时清理会话状态。
+
+Host Agent 负责：
+
+- 运行在用户交互桌面，不运行在 Session 0。
+- 启动配置程序。
+- 定位窗口或切到唯一显示器捕获。
+- 初始化捕获和 H.264 编码器。
+- 接受客户端连接并发送编码视频帧。
+- 接收输入事件并注入到 Windows 交互桌面。
+- 与 Service 通过本机 IPC 上报状态。
+
+Service 和 Agent 的 IPC 不做复杂安全产品能力，但需要保留本机访问控制、Agent 来源校验、心跳超时和异常退出收尾，避免任意本机进程伪造 Agent 状态。
+
+## 登录与锁屏处理
+
+登录和锁屏处理以“感知状态、断开或恢复、不远程提交 Windows 凭据”为原则。
+
+系统运行时需要区分：
+
+- 未登录：Service 保持运行并等待用户会话出现；客户端连接时返回宿主机未登录。
+- 已登录且未锁屏：Service 拉起或保持 Host Agent，允许建立远程会话。
+- 已锁屏：停止新会话；已有会话断开或暂停，客户端显示宿主机已锁定。
+- 解锁后：Service 重新确认交互桌面可用，拉起或恢复 Host Agent，客户端可重新连接。
+- 注销或切换用户：释放 Agent、捕获、编码、输入和会话资源。
+
+系统不做 Credential Provider，不采集、不保存、不转发 Windows 登录密码。自动登录属于部署策略，不是远程解锁能力。
+
+## 客户端设计
+
+客户端只面向 Linux x86_64 与 Linux aarch64/ARM64。客户端职责是连接、解码、显示和输入采集，不承担业务管理能力。
+
+客户端运行流程：
+
+```text
+读取配置
+-> 连接 Host
+-> Hello 握手
+-> StartSession
+-> 等待 VideoReady
+-> 初始化 H.264 解码器
+-> 创建 SDL2 窗口
+-> 解码并显示视频帧
+-> 采集输入并发送
+-> 退出时发送 StopSession
+```
+
+客户端必须在目标 Linux 真机上验证 SDL2、解码库、窗口创建、渲染和输入采集。Windows 开发机上的编译和协议测试不能替代 Linux x86_64 或 ARM64 真机验证。
 
 ## 错误处理
 
-错误处理以“明确暴露，不静默重试”为原则。
+错误处理以“明确暴露，不伪装成功”为原则。
 
 宿主端需要区分：
 
 - 配置错误。
 - 监听端口失败。
-- Windows 未登录、已锁屏或交互桌面不可用。
+- Windows 未登录。
+- Windows 已锁屏。
+- Agent 不在线。
 - 客户端协议错误。
 - 程序启动失败。
 - 程序启动后找不到窗口。
-- 捕获初始化失败。
-- 编码失败。
+- 窗口捕获失败。
+- 显示器捕获失败。
+- 编码器初始化失败。
+- 编码帧生成失败。
 - 传输失败。
 - 输入注入失败。
-
-`CaptureFailed` 用于捕获能力本身失败，例如当前平台不支持捕获、Windows Graphics Capture 初始化失败、窗口句柄失效或捕获会话创建失败。`EncodingFailed` 仅用于后续 H.264 编码路线中的编码器初始化失败、首帧或后续帧编码失败，以及编码器产出非法帧。`TransportFailed` 用于控制通道、raw BGRA 帧通道、后续媒体传输、WebRTC/DataChannel 或编码后数据发送失败，不用于表达程序启动、窗口定位、捕获初始化或编码器本身错误。
 
 客户端需要区分：
 
@@ -335,12 +391,14 @@ port = 7856
 - 宿主端忙碌。
 - 宿主机未登录。
 - 宿主机已锁屏。
+- Agent 不在线。
 - 会话启动失败。
+- 视频解码失败。
 - 视频流中断。
 - 输入发送失败。
 - 协议版本不匹配。
 
-错误信息面向最终用户时使用中文；日志保留必要的底层错误码和上下文。
+错误信息面向最终用户时使用中文；日志保留必要底层错误码和上下文。
 
 ## 资源生命周期
 
@@ -350,17 +408,22 @@ port = 7856
 客户端连接建立
 -> 创建 session
 -> 启动程序
+-> 选择捕获模式
 -> 创建捕获资源
--> 创建帧发送资源
--> 建立输入循环
+-> 创建编码器
+-> 建立视频发送循环
+-> 建立输入接收循环
 -> 连接断开或用户停止
+-> 释放按下状态
+-> 停止输入循环
+-> 停止视频发送
+-> 停止编码器
 -> 停止捕获
--> 停止帧发送
--> 可配置是否关闭远程程序
+-> 关闭本次会话启动的程序
 -> 释放 session
 ```
 
-断开连接后关闭由本次会话启动的程序。
+任何异常路径都必须落到资源释放流程，尤其是鼠标按键释放、编码器释放、捕获资源释放和本次启动程序清理。
 
 ## 测试与验证
 
@@ -373,45 +436,44 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 除 `cargo fmt --all` 外，`cargo check`、`cargo clippy`、`cargo test`、`cargo build`、`cargo run`、`cargo doc` 等会写入 `target` 或运行 build script 的命令，执行时需要申请非沙箱权限，避免沙箱导致构建产物写入失败，例如 `拒绝访问 (os error 5)`。
 
-验证场景：
+设计验收场景：
 
 - 宿主端配置错误时能给出明确错误。
 - 客户端无法连接时能给出明确错误。
-- 宿主机未登录时客户端能显示明确状态，不进入假会话。
-- 宿主机锁屏时客户端能显示明确状态，并暂停或断开会话。
-- 宿主机解锁后能恢复 Agent，客户端能重连。
-- 客户端连接后能启动 Notepad 或其他轻量 Windows 程序。
-- 客户端能看到远程画面。
-- 鼠标移动、点击、滚轮可作用到远程程序。
-- 键盘输入可作用到远程程序。
-- 客户端断开后宿主端能释放资源并接受下一次连接。
-- 目标窗口关闭后客户端能收到明确错误或会话结束事件。
+- 宿主机未登录或锁屏时客户端能显示明确状态。
+- 普通窗口程序可被捕获、编码、传输、解码和显示。
+- 全屏仿真程序可通过唯一显示器捕获兜底。
+- 1080p、30 FPS、H.264 链路能持续运行。
+- 左键拖动旋转、右键或中键拖动平移、滚轮缩放可用。
+- 快速拖动不明显跳点，释放事件不丢失。
+- 客户端退出后宿主端释放资源并接受下一次连接。
+- 目标程序关闭后客户端收到明确错误或会话结束事件。
+- Windows Service 能安装、启动、停止、卸载，并能拉起 Host Agent。
+- Linux x86_64 和 Linux ARM64 真机完成客户端解码、渲染和输入采集验证。
 
 ## 实施顺序
 
 建议按以下顺序推进：
 
-- 当前 raw BGRA 主线已形成可用画面链路；客户端 `run` 已支持启动连接阶段的 `--retries` 和 `--retry-delay-ms` 有限重试；继续补齐资源释放、会话中断恢复、窗口关闭和错误上报，先让前台 Host Agent 形态稳定。
-- 会话状态纯模型、平台事件映射边界和 Windows 会话通知注册/注销边界已完成；后续补齐消息循环、活动会话检测和桌面锁定事件分发，把登录、锁屏、解锁和注销事件转换为现有状态机事件。
-- Service 与 Host Agent 的 IPC 消息模型、长度前缀 JSON frame 底座、Host 侧通用 endpoint、最小 TCP loopback transport 和 Service 侧 request/ack coordinator 已完成；后续继续处理连接建立、断开、超时、错误传播、权限边界，以及将会话命令接入真实 Agent 进程和 Host Agent runtime。
-- Host Agent 运行核心已从 CLI 入口中剥离，网络会话、程序生命周期、捕获和输入编排已有可复用 runtime 边界；后续由 Service 拉起时复用该边界。
-- `service` 命令已接入真实 Windows SCM 安装、卸载、启动、停止和状态查询；后续补齐开机自启、Service 拉起 Host Agent、权限边界和状态监督，Service 只负责编排，不直接捕获和注入输入。
-- 接入 Service 拉起 Host Agent 的流程，并把 Agent 在线状态、桌面可用状态和会话状态通过 IPC 回传给 Service。
-- 在客户端展示宿主机未登录、已锁屏、Agent 不在线等状态，并实现可控重连。
-- 在真机上验证重启后自动登录、锁屏、解锁、注销、断线重连和目标程序关闭等场景。
-- raw BGRA 链路稳定后，再按性能需要接入低延迟编码和传输。
-- 补打包、部署文档和基础测试。
+- 重写协议和配置口径，删除 raw BGRA 传输链路，固定 H.264 为第一正式 codec。
+- 建立 `wincast-media` 边界，优先选型并封装第三方编码/解码能力。
+- 把捕获策略收敛为 `auto/window/display`，其中 `display` 只表示唯一显示器。
+- 打通窗口捕获到 H.264 编码、传输、Linux 解码和渲染。
+- 补显示器捕获兜底，验证全屏仿真程序。
+- 补拖拽输入专项，覆盖连续移动、释放收尾和异常断开释放。
+- 将前台 Host Agent 链路稳定后，再接入 Service 拉起 Agent。
+- 接入登录、锁屏、解锁和注销状态感知。
+- 在 Windows 管理员终端和 Linux x86_64/ARM64 真机执行稳定版烟测。
+- 补打包和部署文档。
 
-每一步都应形成可运行、可验证的闭环，避免同时堆叠捕获、编码、网络、输入和 UI 问题。
+每一步都应形成可运行、可验证的闭环，避免同时堆叠捕获、编码、传输、输入和 Service 编排问题。
 
 ## 关键风险
 
-- Windows 会话限制是结构性风险。系统必须接受宿主机可被接管，不能承诺不影响本地用户。
-- 自动登录可以解决无人值守恢复，但会提高宿主机本地凭据暴露风险，需要配合专用低权限账号、物理访问限制和内网隔离。
-- Service 不能替代用户交互桌面内的 Agent；捕获和输入注入必须落在正确的用户会话中。
-- 锁屏和注销会天然中断捕获与输入，系统只能感知、停止和恢复，不能假装锁屏界面仍可控。
-- raw BGRA 帧带宽较高，只适合作为当前内网优先闭环链路；高分辨率或高帧率场景需要后续 H.264/WebRTC 优化。
-- 不同 Windows 版本和显卡驱动对窗口捕获、硬件编码支持存在差异，需要保留兜底路线。
-- DPI、窗口缩放和多显示器会影响输入坐标映射，需要在协议里保留画面尺寸和捕获区域元数据。
-- 输入法和组合键在跨系统场景下容易出现不一致，系统只保证基础键鼠事件。
-- Rust 生态中 WebRTC、硬编、Windows 捕获之间的集成成本需要原型验证，必要时可用 GStreamer 降低后续媒体链路风险。
+- 不可控全屏程序可能导致窗口捕获失败，必须依赖唯一显示器捕获兜底。
+- 1080p 原分辨率下 raw 像素传输不可接受，因此 H.264 编码链路是核心前提。
+- 第三方编码/解码库在 Windows、Linux x86_64 和 Linux ARM64 上的构建与部署成本需要尽早验证。
+- Windows Service 不能直接替代用户交互桌面 Agent；捕获和输入必须发生在正确用户会话中。
+- 锁屏和注销会天然中断捕获与输入，系统只能感知、停止和恢复，不能假装锁屏界面可控。
+- DPI、窗口缩放和全屏显示会影响坐标映射，需要以真实仿真软件烟测确认。
+- 输入法和复杂组合键不作为稳定目标，系统只保证基础键鼠和拖拽操控。

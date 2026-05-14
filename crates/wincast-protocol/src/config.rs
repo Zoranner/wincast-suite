@@ -73,6 +73,7 @@ pub struct VideoConfig {
     pub fps: u32,
     pub codec: VideoCodec,
     pub bitrate_kbps: u32,
+    pub max_bitrate_kbps: u32,
 }
 
 impl VideoConfig {
@@ -81,13 +82,20 @@ impl VideoConfig {
         validate_non_zero("video.height", self.height)?;
         validate_non_zero("video.fps", self.fps)?;
         validate_non_zero("video.bitrate_kbps", self.bitrate_kbps)?;
+        validate_non_zero("video.max_bitrate_kbps", self.max_bitrate_kbps)?;
+        if self.bitrate_kbps > self.max_bitrate_kbps {
+            return Err(ConfigError::InvalidValue {
+                field: "video.bitrate_kbps",
+                reason: "不能大于 video.max_bitrate_kbps",
+            });
+        }
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoCodec {
-    #[serde(rename = "raw_bgra")]
+    #[serde(rename = "raw_bgra", skip_deserializing)]
     RawBgra,
     #[serde(rename = "h264")]
     H264,
@@ -119,8 +127,9 @@ impl CaptureConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CaptureMode {
+    Auto,
     Window,
-    Desktop,
+    Display,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

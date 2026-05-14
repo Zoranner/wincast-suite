@@ -245,9 +245,10 @@ mod tests {
                 fps: 30,
                 codec: VideoCodec::H264,
                 bitrate_kbps: 4000,
+                max_bitrate_kbps: 6000,
             },
             capture: CaptureConfig {
-                mode: CaptureMode::Desktop,
+                mode: CaptureMode::Display,
                 window_title_contains: String::new(),
                 startup_timeout_ms: 15000,
             },

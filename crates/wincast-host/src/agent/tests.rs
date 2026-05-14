@@ -265,9 +265,10 @@ pub(super) fn host_config(listen: String) -> HostConfig {
             fps: 30,
             codec: VideoCodec::H264,
             bitrate_kbps: 4000,
+            max_bitrate_kbps: 6000,
         },
         capture: CaptureConfig {
-            mode: CaptureMode::Desktop,
+            mode: CaptureMode::Display,
             window_title_contains: String::new(),
             startup_timeout_ms: 15000,
         },
@@ -299,6 +300,15 @@ pub(super) fn window_candidate() -> WindowCandidate {
 pub(super) fn desktop_capture_target() -> CaptureTarget {
     CaptureTarget::Desktop {
         source_window_handle: 100,
+    }
+}
+
+pub(super) fn window_capture_target() -> CaptureTarget {
+    CaptureTarget::Window {
+        handle: 100,
+        width: 1280,
+        height: 720,
+        title: Some("SomeApp".to_owned()),
     }
 }
 

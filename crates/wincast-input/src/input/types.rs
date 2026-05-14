@@ -14,6 +14,10 @@ pub enum WindowsInputAction {
         x: i32,
         y: i32,
     },
+    MoveRelative {
+        delta_x: i32,
+        delta_y: i32,
+    },
     MouseButton {
         button: MouseButton,
         state: ButtonState,

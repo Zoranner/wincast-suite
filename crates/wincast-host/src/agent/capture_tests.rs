@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     agent::{
-        capture::{capture_input_bounds, start_capture_session},
+        capture::{ActiveCaptureMode, capture_input_bounds, start_capture_session},
         listener::run_control_listener_once_with_runtime,
         tests::*,
     },
@@ -113,10 +113,11 @@ fn host_treats_missing_initial_frame_as_waitable_state() {
     };
     let attempts = capture.attempts.clone();
 
-    let (_session, frame) = start_capture_session(&config, &window, &mut capture)
+    let (_session, frame, active_mode) = start_capture_session(&config, &window, &mut capture)
         .expect("host should wait until first frame metadata is available");
 
     assert_eq!(capture.targets, vec![desktop_capture_target()]);
+    assert_eq!(active_mode, ActiveCaptureMode::Display);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(frame.row_pitch, 5120);
     assert_eq!(frame.bytes.len(), 5120 * 720);
@@ -135,7 +136,7 @@ fn capture_input_bounds_keep_window_origin_for_window_capture() {
     };
     let frame = captured_bgra_frame();
 
-    let bounds = capture_input_bounds(&config, &window, &frame);
+    let bounds = capture_input_bounds(ActiveCaptureMode::Window, &window, &frame);
 
     assert_eq!(
         bounds,
@@ -149,8 +150,7 @@ fn capture_input_bounds_keep_window_origin_for_window_capture() {
 }
 
 #[test]
-fn capture_input_bounds_use_monitor_origin_for_desktop_capture() {
-    let config = host_config("127.0.0.1:0".to_owned());
+fn capture_input_bounds_use_monitor_origin_for_display_capture() {
     let mut window = window_candidate();
     window.monitor_rect = window::WindowRect {
         left: -1920,
@@ -160,7 +160,7 @@ fn capture_input_bounds_use_monitor_origin_for_desktop_capture() {
     };
     let frame = captured_bgra_frame();
 
-    let bounds = capture_input_bounds(&config, &window, &frame);
+    let bounds = capture_input_bounds(ActiveCaptureMode::Display, &window, &frame);
 
     assert_eq!(
         bounds,
@@ -192,4 +192,18 @@ fn host_reports_capture_failed_when_initial_frame_times_out() {
         error,
         CaptureError::windows_frame_read_failed("等待 Windows 捕获首帧超时")
     );
+}
+
+#[test]
+fn auto_capture_uses_window_capture_before_display_fallback() {
+    let mut config = host_config("127.0.0.1:0".to_owned());
+    config.capture.mode = CaptureMode::Auto;
+    let window = window_candidate();
+    let mut capture = RecordingCaptureStarter::default();
+
+    let (_session, _frame, active_mode) = start_capture_session(&config, &window, &mut capture)
+        .expect("auto capture should prefer window capture");
+
+    assert_eq!(capture.targets, vec![window_capture_target()]);
+    assert_eq!(active_mode, ActiveCaptureMode::Window);
 }

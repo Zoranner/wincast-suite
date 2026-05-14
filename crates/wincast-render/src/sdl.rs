@@ -100,7 +100,7 @@ impl RawBgraRenderer for SdlRawBgraRenderer {
                 Event::MouseMotion { x, y, .. } => {
                     let position =
                         map_window_point_to_frame_pixels(x, y, window_dimensions, frame_dimensions);
-                    input_events.push(InputEvent::MouseMove {
+                    input_events.push(InputEvent::MouseMoveAbsolute {
                         x: position.x,
                         y: position.y,
                     });

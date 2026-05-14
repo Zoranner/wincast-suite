@@ -50,6 +50,9 @@ pub(super) fn inject_windows_actions(
                     0,
                 )
             }
+            WindowsInputAction::MoveRelative { delta_x, delta_y } => {
+                mouse_input(delta_x, delta_y, MOUSEEVENTF_MOVE, 0)
+            }
             WindowsInputAction::MouseButton { button, state } => {
                 mouse_input(0, 0, mouse_button_flags(button, state), 0)
             }

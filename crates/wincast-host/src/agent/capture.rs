@@ -53,6 +53,12 @@ pub(super) trait InputEventSink {
     fn handle_input_event(&mut self, event: InputEvent) -> Result<(), String>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ActiveCaptureMode {
+    Window,
+    Display,
+}
+
 impl InputEventSink for WindowsInputEventSink {
     fn handle_input_event(&mut self, event: InputEvent) -> Result<(), String> {
         self.inject(event).map_err(|error| error.to_string())
@@ -106,42 +112,66 @@ pub(super) fn start_capture_session(
     config: &HostConfig,
     window: &WindowCandidate,
     capture: &mut impl CaptureStarter,
-) -> Result<(Box<dyn CaptureRuntime>, CapturedBgraFrame), CaptureError> {
-    let mut session = capture.start_capture(capture_target(config, window))?;
+) -> Result<
+    (
+        Box<dyn CaptureRuntime>,
+        CapturedBgraFrame,
+        ActiveCaptureMode,
+    ),
+    CaptureError,
+> {
+    let (mut session, active_mode) = match config.capture.mode {
+        CaptureMode::Auto => match capture.start_capture(window_capture_target(window)) {
+            Ok(session) => (session, ActiveCaptureMode::Window),
+            Err(_) => (
+                capture.start_capture(display_capture_target(window))?,
+                ActiveCaptureMode::Display,
+            ),
+        },
+        CaptureMode::Window => (
+            capture.start_capture(window_capture_target(window))?,
+            ActiveCaptureMode::Window,
+        ),
+        CaptureMode::Display => (
+            capture.start_capture(display_capture_target(window))?,
+            ActiveCaptureMode::Display,
+        ),
+    };
     let first_frame = wait_next_capture_result_with(
         Duration::from_millis(config.capture.startup_timeout_ms),
         || session.try_next_bgra_frame(),
     )?;
-    Ok((session, first_frame))
+    Ok((session, first_frame, active_mode))
 }
 
-fn capture_target(config: &HostConfig, window: &WindowCandidate) -> CaptureTarget {
-    match config.capture.mode {
-        CaptureMode::Desktop => CaptureTarget::Desktop {
-            source_window_handle: window.handle,
-        },
-        CaptureMode::Window => CaptureTarget::Window {
-            handle: window.handle,
-            width: window.rect.width() as u32,
-            height: window.rect.height() as u32,
-            title: (!window.title.is_empty()).then_some(window.title.clone()),
-        },
+fn window_capture_target(window: &WindowCandidate) -> CaptureTarget {
+    CaptureTarget::Window {
+        handle: window.handle,
+        width: window.rect.width() as u32,
+        height: window.rect.height() as u32,
+        title: (!window.title.is_empty()).then_some(window.title.clone()),
+    }
+}
+
+fn display_capture_target(window: &WindowCandidate) -> CaptureTarget {
+    CaptureTarget::Desktop {
+        source_window_handle: window.handle,
     }
 }
 
 pub(super) fn capture_input_bounds(
-    config: &HostConfig,
+    mode: ActiveCaptureMode,
     window: &WindowCandidate,
     frame: &CapturedBgraFrame,
 ) -> CaptureInputBounds {
-    match config.capture.mode {
-        CaptureMode::Desktop => CaptureInputBounds {
+    match mode {
+        ActiveCaptureMode::Display => CaptureInputBounds {
             origin_x: window.monitor_rect.left,
             origin_y: window.monitor_rect.top,
             width: frame.metadata.frame.width,
             height: frame.metadata.frame.height,
         },
-        CaptureMode::Window => CaptureInputBounds {
+        ActiveCaptureMode::Window => CaptureInputBounds {
             origin_x: window.rect.left,
             origin_y: window.rect.top,
             width: frame.metadata.frame.width,
