@@ -156,6 +156,75 @@ struct BgraReadback {
     bytes: Vec<u8>,
 }
 
+trait ReadbackUnmapper {
+    fn unmap(&mut self);
+}
+
+struct D3dReadbackUnmapper<'a> {
+    context: &'a ID3D11DeviceContext,
+    texture: &'a ID3D11Texture2D,
+    subresource: u32,
+}
+
+impl ReadbackUnmapper for D3dReadbackUnmapper<'_> {
+    fn unmap(&mut self) {
+        unsafe {
+            self.context.Unmap(self.texture, self.subresource);
+        }
+    }
+}
+
+struct MappedReadback<U: ReadbackUnmapper> {
+    mapped: D3D11_MAPPED_SUBRESOURCE,
+    unmapper: U,
+}
+
+impl<U: ReadbackUnmapper> MappedReadback<U> {
+    fn new(mapped: D3D11_MAPPED_SUBRESOURCE, unmapper: U) -> Self {
+        Self { mapped, unmapper }
+    }
+
+    fn row_pitch(&self) -> u32 {
+        self.mapped.RowPitch
+    }
+
+    fn copy_rows_to_vec(&self, height: u32) -> Result<Vec<u8>, CaptureError> {
+        let byte_len = mapped_byte_len(height, self.row_pitch())?;
+        if byte_len == 0 {
+            return Ok(Vec::new());
+        }
+        if self.mapped.pData.is_null() {
+            return Err(CaptureError::windows_frame_read_failed("Map 返回空指针"));
+        }
+
+        // SAFETY:
+        // - `MappedReadback` 只会在 D3D11 `Map` 成功后构造，因此 `pData` 来自有效映射。
+        // - `mapped_byte_len` 已验证 `height * row_pitch` 不溢出且不超过 `isize::MAX`。
+        // - 本切片仅在当前 guard 生命周期内短暂存在；guard drop 前不会 `Unmap`。
+        // - 读取范围仅覆盖当前 subresource 的 `height * RowPitch` 字节，不跨越映射边界。
+        Ok(unsafe { slice::from_raw_parts(self.mapped.pData.cast::<u8>(), byte_len) }.to_vec())
+    }
+}
+
+impl<U: ReadbackUnmapper> Drop for MappedReadback<U> {
+    fn drop(&mut self) {
+        self.unmapper.unmap();
+    }
+}
+
+fn mapped_byte_len(height: u32, row_pitch: u32) -> Result<usize, CaptureError> {
+    let byte_len = (height as usize)
+        .checked_mul(row_pitch as usize)
+        .ok_or_else(|| CaptureError::windows_frame_read_failed("readback 字节长度溢出"))?;
+    if byte_len > isize::MAX as usize {
+        return Err(CaptureError::windows_frame_read_failed(
+            "readback 字节长度超过 isize::MAX",
+        ));
+    }
+
+    Ok(byte_len)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SourceWindowActivity {
     exists: bool,
@@ -279,18 +348,19 @@ fn readback_bgra_frame(
             .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
             .map_err(|error| CaptureError::windows_frame_read_failed(error.to_string()))?;
     }
+    let mapped = MappedReadback::new(
+        mapped,
+        D3dReadbackUnmapper {
+            context: d3d_context,
+            texture: &staging,
+            subresource: 0,
+        },
+    );
 
-    let byte_len = texture_desc.Height as usize * mapped.RowPitch as usize;
-    let bytes = unsafe { slice::from_raw_parts(mapped.pData.cast::<u8>(), byte_len) }.to_vec();
+    let row_pitch = mapped.row_pitch();
+    let bytes = mapped.copy_rows_to_vec(texture_desc.Height)?;
 
-    unsafe {
-        d3d_context.Unmap(&staging, 0);
-    }
-
-    Ok(BgraReadback {
-        row_pitch: mapped.RowPitch,
-        bytes,
-    })
+    Ok(BgraReadback { row_pitch, bytes })
 }
 
 pub(crate) fn start_windows_capture(
@@ -445,6 +515,7 @@ fn create_direct3d_device(d3d_device: &ID3D11Device) -> Result<IDirect3DDevice, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn frame_pool_size_updates_only_for_positive_changes() {
@@ -494,6 +565,91 @@ mod tests {
                 minimized: true
             }
             .is_active()
+        );
+    }
+
+    #[test]
+    fn mapped_readback_unmaps_when_dropped() {
+        struct CountingUnmapper<'a> {
+            calls: &'a Cell<usize>,
+        }
+
+        impl ReadbackUnmapper for CountingUnmapper<'_> {
+            fn unmap(&mut self) {
+                self.calls.set(self.calls.get() + 1);
+            }
+        }
+
+        let calls = Cell::new(0);
+        {
+            let _mapping = MappedReadback::new(
+                D3D11_MAPPED_SUBRESOURCE::default(),
+                CountingUnmapper { calls: &calls },
+            );
+            assert_eq!(calls.get(), 0);
+        }
+
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn mapped_readback_rejects_null_pointer_for_non_empty_copy() {
+        struct NoopUnmapper;
+
+        impl ReadbackUnmapper for NoopUnmapper {
+            fn unmap(&mut self) {}
+        }
+
+        let mapping = MappedReadback::new(
+            D3D11_MAPPED_SUBRESOURCE {
+                pData: std::ptr::null_mut(),
+                RowPitch: 4,
+                DepthPitch: 4,
+            },
+            NoopUnmapper,
+        );
+
+        let error = mapping
+            .copy_rows_to_vec(1)
+            .expect_err("null pointer must be rejected for non-empty copy");
+
+        assert_eq!(
+            error,
+            CaptureError::windows_frame_read_failed("Map 返回空指针")
+        );
+    }
+
+    #[test]
+    fn mapped_readback_allows_zero_length_copy_without_pointer() {
+        struct NoopUnmapper;
+
+        impl ReadbackUnmapper for NoopUnmapper {
+            fn unmap(&mut self) {}
+        }
+
+        let mapping = MappedReadback::new(
+            D3D11_MAPPED_SUBRESOURCE {
+                pData: std::ptr::null_mut(),
+                RowPitch: 128,
+                DepthPitch: 128,
+            },
+            NoopUnmapper,
+        );
+
+        let bytes = mapping
+            .copy_rows_to_vec(0)
+            .expect("zero-length copy should not require a backing pointer");
+
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn mapped_byte_len_rejects_overflow() {
+        let error = mapped_byte_len(u32::MAX, u32::MAX).expect_err("overflow must be rejected");
+
+        assert_eq!(
+            error,
+            CaptureError::windows_frame_read_failed("readback 字节长度超过 isize::MAX")
         );
     }
 }

@@ -1,5 +1,6 @@
 use std::{
     net::{SocketAddr, TcpListener, TcpStream},
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::mpsc,
     thread,
     time::Duration,
@@ -84,13 +85,18 @@ where
                 capture,
             } => {
                 let finished_sender = session_finished_sender.clone();
-                ListenerSessionState::Busy(scope.spawn(move || {
-                    let mut stream = stream;
-                    let result =
-                        handle_control_client(&mut stream, config, runner, locator, capture);
-                    let _ = finished_sender.send(SessionFinished);
-                    (peer_addr, result, runner, locator, capture)
-                }))
+                ListenerSessionState::Busy(spawn_control_session(
+                    scope,
+                    stream,
+                    peer_addr,
+                    SessionRuntime {
+                        config,
+                        runner,
+                        locator,
+                        capture,
+                    },
+                    finished_sender,
+                ))
             }
             ListenerSessionState::Busy(session) => {
                 let state = wait_for_finished_session(
@@ -105,18 +111,18 @@ where
                         capture,
                     } => {
                         let finished_sender = session_finished_sender.clone();
-                        ListenerSessionState::Busy(scope.spawn(move || {
-                            let mut stream = stream;
-                            let result = handle_control_client(
-                                &mut stream,
+                        ListenerSessionState::Busy(spawn_control_session(
+                            scope,
+                            stream,
+                            peer_addr,
+                            SessionRuntime {
                                 config,
                                 runner,
                                 locator,
                                 capture,
-                            );
-                            let _ = finished_sender.send(SessionFinished);
-                            (peer_addr, result, runner, locator, capture)
-                        }))
+                            },
+                            finished_sender,
+                        ))
                     }
                     ListenerSessionState::Busy(session) => {
                         reject_busy_control_client(stream, peer_addr);
@@ -129,6 +135,47 @@ where
 }
 
 struct SessionFinished;
+
+struct SessionRuntime<'scope, R, L, C>
+where
+    R: ProgramRunner + Send + 'scope,
+    L: WindowLocator + Send + 'scope,
+    C: CaptureStarter + Send + 'scope,
+{
+    config: &'scope HostConfig,
+    runner: &'scope mut R,
+    locator: &'scope mut L,
+    capture: &'scope mut C,
+}
+
+fn spawn_control_session<'scope, R, L, C>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    runtime: SessionRuntime<'scope, R, L, C>,
+    finished_sender: mpsc::Sender<SessionFinished>,
+) -> ScopedSessionHandle<'scope, R, L, C>
+where
+    R: ProgramRunner + Send + 'scope,
+    L: WindowLocator + Send + 'scope,
+    C: CaptureStarter + Send + 'scope,
+{
+    scope.spawn(move || {
+        let mut stream = stream;
+        let SessionRuntime {
+            config,
+            runner,
+            locator,
+            capture,
+        } = runtime;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            handle_control_client(&mut stream, config, runner, locator, capture)
+        }))
+        .unwrap_or_else(|_| Err("客户端会话线程异常结束".to_owned()));
+        let _ = finished_sender.send(SessionFinished);
+        (peer_addr, result, runner, locator, capture)
+    })
+}
 
 enum ListenerSessionState<'scope, R, L, C>
 where
@@ -266,7 +313,7 @@ fn log_session_result<'scope, R, L, C>(
             (peer_addr, session_result, runner, locator, capture)
         }
         Err(_) => {
-            panic!("客户端会话线程异常结束");
+            panic!("客户端会话线程异常结束且无法恢复会话资源");
         }
     }
 }

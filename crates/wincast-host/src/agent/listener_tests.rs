@@ -13,6 +13,7 @@ use crate::{
         },
         tests::*,
     },
+    program::{self, ProgramRunner},
     session_state::{ClientSessionErrorCode, RemoteSessionStatus},
 };
 use wincast_protocol::{
@@ -246,4 +247,70 @@ fn host_rejects_start_session_when_remote_session_is_locked_before_launching_pro
     assert!(cleaned.is_empty());
     assert!(lookups.is_empty());
     assert!(capture_targets.is_empty());
+}
+
+#[test]
+fn host_keeps_listening_after_session_thread_panics() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener addr should be available");
+    let config = host_config(endpoint.to_string());
+    let mut runner = PanicsOnceProgramRunner::default();
+    let mut locator = RecordingWindowLocator::default();
+    let mut capture = RecordingCaptureStarter::default();
+    let host = thread::spawn(move || {
+        let result = run_control_listener_n_with_runtime(
+            listener,
+            &config,
+            &mut runner,
+            &mut locator,
+            &mut capture,
+            2,
+        );
+        (result, runner.launch_attempts, runner.cleaned)
+    });
+
+    let mut first_client = connect_and_start_session(endpoint);
+    assert!(
+        read_message(&mut first_client).is_err(),
+        "panicked session should close the first client connection"
+    );
+
+    let second = run_short_client_session(endpoint);
+
+    assert_eq!(second.sequence_number, 0);
+    let (host_result, launch_attempts, cleaned) = host
+        .join()
+        .expect("listener should not panic after session panic");
+    assert_eq!(host_result.expect("host should finish cleanly"), endpoint);
+    assert_eq!(launch_attempts, 2);
+    assert_eq!(cleaned, vec![42]);
+}
+
+#[derive(Default)]
+struct PanicsOnceProgramRunner {
+    launch_attempts: usize,
+    cleaned: Vec<u32>,
+}
+
+impl ProgramRunner for PanicsOnceProgramRunner {
+    fn launch(
+        &mut self,
+        _request: &program::LaunchRequest,
+    ) -> Result<program::StartedProgram, program::LaunchError> {
+        self.launch_attempts += 1;
+        if self.launch_attempts == 1 {
+            panic!("simulated session panic");
+        }
+        Ok(program::StartedProgram::from_process_id(42))
+    }
+
+    fn cleanup(
+        &mut self,
+        started: &mut program::StartedProgram,
+    ) -> Result<(), program::LaunchError> {
+        self.cleaned.push(started.process_id);
+        Ok(())
+    }
 }

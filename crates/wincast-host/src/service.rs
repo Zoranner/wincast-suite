@@ -457,13 +457,18 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
 #[cfg(windows)]
 fn run_service_main() -> Result<(), ServiceError> {
     let (stop_sender, stop_receiver) = mpsc::channel();
-    let stop_sender = Mutex::new(stop_sender);
+    let service_context = Box::new(ServiceControlContext::new(stop_sender));
     let service_name = wide_null(SERVICE_NAME);
     let status_handle = unsafe {
+        // SAFETY: `service_context` owns the handler context for this service main invocation.
+        // The boxed allocation gives the SCM callback a stable address, and it is kept alive
+        // until after the service reports `SERVICE_STOPPED`. The handler only reads this pointer
+        // while the service control dispatcher is running; stop signaling is synchronized by the
+        // `Mutex` inside `ServiceControlContext`.
         RegisterServiceCtrlHandlerExW(
             service_name.as_ptr(),
             Some(service_control_handler),
-            &stop_sender as *const Mutex<mpsc::Sender<()>> as *mut _,
+            service_context.as_handler_context(),
         )
     };
     if status_handle.is_null() {
@@ -489,16 +494,47 @@ unsafe extern "system" fn service_control_handler(
 ) -> u32 {
     match handle_service_control(ServiceControlEvent::from(control)) {
         ServiceControlOutcome::Stop => {
-            if !context.is_null() {
-                let stop_sender = unsafe { &*(context as *const Mutex<mpsc::Sender<()>>) };
-                if let Ok(sender) = stop_sender.lock() {
-                    let _ = sender.send(());
-                }
-            }
+            ServiceControlContext::notify_stop_from_handler_context(context);
             NO_ERROR
         }
         ServiceControlOutcome::Continue => NO_ERROR,
         ServiceControlOutcome::NotImplemented => ERROR_CALL_NOT_IMPLEMENTED,
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct ServiceControlContext {
+    stop_sender: Mutex<mpsc::Sender<()>>,
+}
+
+#[cfg(windows)]
+impl ServiceControlContext {
+    fn new(stop_sender: mpsc::Sender<()>) -> Self {
+        Self {
+            stop_sender: Mutex::new(stop_sender),
+        }
+    }
+
+    fn as_handler_context(&self) -> *mut core::ffi::c_void {
+        self as *const Self as *mut core::ffi::c_void
+    }
+
+    fn notify_stop_from_handler_context(context: *mut core::ffi::c_void) {
+        if context.is_null() {
+            return;
+        }
+
+        // SAFETY: `context` must be the pointer returned by
+        // `ServiceControlContext::as_handler_context` for the currently running service main.
+        // `run_service_main` stores that context in a `Box`, so the pointee has a stable address,
+        // and drops it only after the stop notification has been received and the service has
+        // reported `SERVICE_STOPPED`. The SCM may call the handler on a dispatcher thread, so the
+        // sender is accessed only through the context-owned `Mutex`.
+        let service_context = unsafe { &*(context as *const Self) };
+        if let Ok(sender) = service_context.stop_sender.lock() {
+            let _ = sender.send(());
+        }
     }
 }
 
@@ -661,6 +697,25 @@ mod tests {
             handle_service_control(ServiceControlEvent::Unsupported),
             ServiceControlOutcome::NotImplemented
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn service_control_context_exposes_stable_handler_pointer_and_notifies_stop() {
+        let (stop_sender, stop_receiver) = mpsc::channel();
+        let context = ServiceControlContext::new(stop_sender);
+        let context_ptr = context.as_handler_context();
+
+        assert!(!context_ptr.is_null());
+        assert_eq!(context_ptr, context.as_handler_context());
+
+        let result =
+            unsafe { service_control_handler(SERVICE_CONTROL_STOP, 0, null_mut(), context_ptr) };
+
+        assert_eq!(result, NO_ERROR);
+        stop_receiver
+            .try_recv()
+            .expect("stop control should notify service main");
     }
 
     #[cfg(not(windows))]
