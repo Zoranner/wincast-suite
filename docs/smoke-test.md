@@ -1,6 +1,6 @@
 # 稳定版真机烟测清单
 
-本清单只覆盖当前稳定版默认链路：Windows 前台 Host Agent、窗口捕获、raw BGRA 传输、Linux SDL2 客户端显示与基础键鼠输入。不要把通过项外推为 Service 拉起 Host Agent、锁屏恢复、H.264/WebRTC 或 ARM64 真机窗口运行已经完成。`capture.mode = "desktop"` 可作为扩展烟测项验证目标窗口所在显示器捕获，不替代默认窗口捕获链路。
+本清单只覆盖当前稳定版默认链路：Windows 前台 Host Agent、窗口捕获、raw BGRA 传输、Linux SDL2 客户端显示与基础键鼠输入。不要把通过项外推为 Service 拉起 Host Agent、锁屏恢复、H.264/WebRTC 或 ARM64 真机窗口运行已经完成。交叉编译和 Windows 开发机上的 workspace 测试不能替代 Linux x86_64 或 Linux aarch64/ARM64 真机验证。`capture.mode = "desktop"` 可作为扩展烟测项验证目标窗口所在显示器捕获，不替代默认窗口捕获链路。
 
 ## 准备环境
 
@@ -36,11 +36,27 @@ Linux client 指向 Windows host，重点核对以下字段：
 - 在 Windows host 上执行 `wincast-host run`，确认控制通道进入持续监听。
 - 在 Linux client 上执行 `wincast-client validate`，确认目标地址正确。
 - 在 Linux client 上执行 `wincast-client run --retries 3 --retry-delay-ms 1000`，确认能建立连接并打开 SDL2 窗口。
+- `--retries` 只覆盖初始连接阶段，不覆盖会话建立后的链路中断自动恢复；中断后需要重新启动客户端或按现场流程重新连接。
 - 观察客户端窗口，确认能看到 Windows 目标应用窗口画面，且窗口移动或目标应用内容变化后客户端画面随之更新。
 - 在客户端窗口内移动鼠标、点击、滚轮滚动，并在目标应用可输入区域敲入普通字符，确认 Windows 目标应用收到鼠标和键盘输入。
 - 关闭 Linux 客户端 SDL2 窗口，确认客户端退出时发送 `StopSession`，Windows host 结束当前会话并清理捕获/输入链路。
 - 不重启 Windows host，再次启动 Linux client 连接同一 host，确认 host 能接受下一次连接并重新看到画面。
 - 可选：将 Windows host 的 `capture.mode` 改为 `desktop` 后重复前台 `run` 流程，确认客户端显示目标窗口所在显示器画面，且副屏或非零坐标显示器上的鼠标点击位置正确。
+
+## Windows Service 管理员烟测
+
+该烟测只验证 Windows SCM 管理闭环，必须在 Windows 管理员终端执行，不替代前台 Host Agent 与 Linux 客户端端到端烟测。
+
+- 执行 `wincast-host service install`，确认服务安装成功。
+- 执行 `wincast-host service status`，确认服务可查询。
+- 执行 `wincast-host service start`，确认服务能启动。
+- 再次执行 `wincast-host service status`，确认服务状态变化符合预期。
+- 执行 `wincast-host service stop`，确认服务能停止。
+- 执行 `wincast-host service uninstall`，确认服务卸载成功。
+
+## Linux 真机验证入口
+
+Linux x86_64 和 Linux aarch64/ARM64 都需要在对应真机上按本清单执行客户端流程。x86_64 真机验证覆盖常见 Linux 桌面运行路径；aarch64/ARM64 真机验证覆盖目标架构上的 SDL2 链接、窗口创建、渲染和输入回传。交叉编译检查只能作为编译边界补充，不能写作 ARM64 真机通过。
 
 ## 通过标准
 

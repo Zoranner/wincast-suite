@@ -45,7 +45,7 @@ cargo test -p wincast-protocol -p wincast-client
 cargo clippy -p wincast-protocol -p wincast-client --all-targets --all-features -- -D warnings
 ```
 
-在银河麒麟 V10 等不使用 `apt` 的系统上，应改用系统对应包管理器安装 `pkg-config` 和 SDL2 开发包，再执行同一组 Cargo 命令。x86_64 目标机和 aarch64/ARM64 目标机都需要完成这组验证；aarch64 交叉编译检查只能确认 Rust 编译边界，不能替代 ARM64 目标机上的 SDL2 链接和窗口运行验证。
+在银河麒麟 V10 等不使用 `apt` 的系统上，应改用系统对应包管理器安装 `pkg-config` 和 SDL2 开发包，再执行同一组 Cargo 命令。x86_64 目标机和 aarch64/ARM64 目标机都需要完成这组验证，并按稳定版真机烟测清单执行客户端窗口运行与输入回传验证；aarch64 交叉编译检查只能确认 Rust 编译边界，不能替代 ARM64 目标机上的 SDL2 链接和窗口运行验证。
 
 ## 运行与占位边界
 
@@ -89,4 +89,4 @@ cargo test -p wincast-host service_agent
 
 这仍不代表已经接入命名管道权限模型、Service 拉起 Agent、重连、心跳超时、真实 Agent 进程会话编排或消息投递重试策略。
 
-`wincast-host service` 子命令已接入 Windows SCM 的安装、卸载、启动、停止和状态查询最小闭环，并提供隐藏的 `service run` 入口供 SCM 启动服务进程。该能力只覆盖系统服务管理本身，不代表 Service 已经拉起交互桌面 Host Agent，也不代表命名管道权限模型、锁屏恢复、心跳或自动重连已经完成。真实 `service install/start/stop/uninstall` 会修改系统服务状态，需要在 Windows 管理员终端中手动烟测。
+`wincast-host service` 子命令已接入 Windows SCM 的安装、卸载、启动、停止和状态查询最小闭环，并提供隐藏的 `service run` 入口供 SCM 启动服务进程。该能力只覆盖系统服务管理本身，不代表 Service 已经拉起交互桌面 Host Agent，也不代表命名管道权限模型、锁屏恢复、心跳或自动重连已经完成。真实 `service install/start/stop/uninstall` 会修改系统服务状态，需要在 Windows 管理员终端中按烟测清单手动验证。

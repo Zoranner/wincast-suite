@@ -1,9 +1,7 @@
-use std::{
-    net::{Shutdown, TcpStream},
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{net::TcpStream, sync::mpsc, thread, time::Duration};
+
+#[cfg(test)]
+use std::net::Shutdown;
 
 use wincast_capture::CapturedBgraFrame;
 use wincast_input::{CaptureInputBounds, WindowsInputEventSink};
