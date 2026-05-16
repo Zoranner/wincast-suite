@@ -213,7 +213,7 @@ fn client_rejects_invalid_message_after_video_ready() {
 }
 
 #[test]
-fn client_accepts_encoded_video_frame_without_reading_raw_bgra_stream() {
+fn client_accepts_encoded_video_frame_after_fake_h264_decode_without_reading_raw_bgra_stream() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = listener
         .local_addr()
@@ -255,9 +255,31 @@ fn client_accepts_encoded_video_frame_without_reading_raw_bgra_stream() {
         .expect("encoded video frame should validate without raw BGRA read");
 
     host_thread.join().expect("host thread should finish");
-    assert!(message.contains("客户端已完成宿主端首个视频响应的协议边界校验"));
+    assert!(message.contains("客户端已完成宿主端首个视频响应的解码边界校验"));
     assert!(!message.contains("H.264 编码帧"));
     assert!(!message.contains("raw BGRA"));
+}
+
+#[test]
+fn client_decodes_valid_encoded_video_frame_to_complete_bgra_boundary() {
+    let decoded = validate_encoded_video_frame(&EncodedVideoFrame {
+        codec: wincast_protocol::config::VideoCodec::H264,
+        width: 2,
+        height: 3,
+        sequence_number: 9,
+        timestamp_ns: 1_000,
+        keyframe: true,
+        bytes: vec![0x12, 0x34],
+    })
+    .expect("valid H.264 frame should decode through fake decoder boundary");
+
+    assert_eq!(decoded.width, 2);
+    assert_eq!(decoded.height, 3);
+    assert_eq!(decoded.row_pitch, 8);
+    assert_eq!(
+        decoded.bytes_len,
+        decoded.row_pitch as usize * decoded.height as usize
+    );
 }
 
 #[test]
@@ -577,7 +599,7 @@ fn run_message_does_not_claim_runtime_chain_is_ready() {
     let message = control_channel_ready_message(&config);
 
     assert!(message.contains("已建立宿主端控制通道"));
-    assert!(message.contains("客户端已完成宿主端首个视频响应的协议边界校验"));
+    assert!(message.contains("客户端已完成宿主端首个视频响应的解码边界校验"));
     assert!(message.contains("宿主端已接入基础 Windows 输入注入"));
     assert!(!message.contains("H.264 编码帧"));
     assert!(!message.contains("raw BGRA 已接入"));

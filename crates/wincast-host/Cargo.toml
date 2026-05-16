@@ -9,6 +9,7 @@ rust-version.workspace = true
 clap.workspace = true
 wincast-capture.workspace = true
 wincast-input.workspace = true
+wincast-media.workspace = true
 wincast-protocol.workspace = true
 
 [target.'cfg(windows)'.dependencies]

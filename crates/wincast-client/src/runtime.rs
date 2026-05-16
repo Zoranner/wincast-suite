@@ -1,5 +1,6 @@
 use std::{fs, net::TcpStream, path::PathBuf, time::Duration};
 
+use wincast_media::{VideoDecoder, test_support::FakeH264Decoder};
 use wincast_protocol::{
     config::{ClientConfig, VideoCodec},
     frame::read_message,
@@ -194,9 +195,9 @@ fn read_first_readback_frame(
         ControlMessage::RawBgraReadbackFrame(frame) => {
             validate_readback_frame(&frame).map_err(ClientRunError::Fatal)
         }
-        ControlMessage::EncodedVideoFrame(frame) => {
-            validate_encoded_video_frame(&frame).map_err(ClientRunError::Fatal)
-        }
+        ControlMessage::EncodedVideoFrame(frame) => validate_encoded_video_frame(&frame)
+            .map(|_| ())
+            .map_err(ClientRunError::Fatal),
         ControlMessage::VideoReady => {
             read_first_raw_binary_frame(stream, render_mode, width, height)
                 .map_err(ClientRunError::Fatal)
@@ -212,18 +213,51 @@ fn read_first_readback_frame(
 
 pub(crate) fn control_channel_ready_message(config: &ClientConfig) -> String {
     format!(
-        "客户端配置有效，已建立宿主端控制通道 {}，已发送会话启动请求。客户端已完成宿主端首个视频响应的协议边界校验；宿主端已接入基础 Windows 输入注入。",
+        "客户端配置有效，已建立宿主端控制通道 {}，已发送会话启动请求。客户端已完成宿主端首个视频响应的解码边界校验；宿主端已接入基础 Windows 输入注入。",
         config.endpoint()
     )
 }
 
-pub(crate) fn validate_encoded_video_frame(frame: &EncodedVideoFrame) -> Result<(), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodedVideoFrameBoundary {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) row_pitch: u32,
+    pub(crate) bytes_len: usize,
+}
+
+pub(crate) fn validate_encoded_video_frame(
+    frame: &EncodedVideoFrame,
+) -> Result<DecodedVideoFrameBoundary, String> {
     if frame.codec != VideoCodec::H264 {
         return Err(format!("宿主端编码帧 codec 无效: {:?}", frame.codec));
     }
     frame
         .validate()
-        .map_err(|error| format!("宿主端 H.264 编码帧无效: {error:?}"))
+        .map_err(|error| format!("宿主端 H.264 编码帧无效: {error:?}"))?;
+
+    let mut decoder = FakeH264Decoder::new();
+    let decoded = decoder
+        .decode(frame)
+        .map_err(|error| format!("宿主端 H.264 编码帧解码失败: {error}"))?;
+    let row_pitch = decoded.row_pitch();
+    let expected_len = row_pitch
+        .checked_mul(decoded.height)
+        .ok_or_else(|| "宿主端 H.264 编码帧解码失败: decoded frame 尺寸溢出".to_owned())?
+        as usize;
+    if decoded.bytes.len() != expected_len {
+        return Err(format!(
+            "宿主端 H.264 编码帧解码失败: decoded frame 字节数 {} 与 row_pitch * height {expected_len} 不一致",
+            decoded.bytes.len()
+        ));
+    }
+
+    Ok(DecodedVideoFrameBoundary {
+        width: decoded.width,
+        height: decoded.height,
+        row_pitch,
+        bytes_len: decoded.bytes.len(),
+    })
 }
 
 fn format_handshake_error(error: HandshakeError) -> String {

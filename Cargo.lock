@@ -374,6 +374,7 @@ name = "wincast-client"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "wincast-media",
  "wincast-protocol",
  "wincast-render",
 ]
@@ -385,6 +386,7 @@ dependencies = [
  "clap",
  "wincast-capture",
  "wincast-input",
+ "wincast-media",
  "wincast-protocol",
  "windows-sys",
 ]

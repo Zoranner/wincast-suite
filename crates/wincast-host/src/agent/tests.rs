@@ -321,24 +321,37 @@ pub(super) fn captured_bgra_frame() -> CapturedBgraFrame {
 }
 
 pub(super) fn captured_bgra_frame_with_sequence(sequence_number: u64) -> CapturedBgraFrame {
+    captured_bgra_frame_with_dimensions_and_sequence(1280, 720, sequence_number)
+}
+
+pub(super) fn captured_bgra_frame_with_dimensions(width: u32, height: u32) -> CapturedBgraFrame {
+    captured_bgra_frame_with_dimensions_and_sequence(width, height, 0)
+}
+
+fn captured_bgra_frame_with_dimensions_and_sequence(
+    width: u32,
+    height: u32,
+    sequence_number: u64,
+) -> CapturedBgraFrame {
+    let row_pitch = width * 4;
     CapturedBgraFrame {
         metadata: wincast_capture::CapturedTextureMetadata {
             frame: wincast_capture::CapturedFrame {
-                width: 1280,
-                height: 720,
-                stride_bytes: 5120,
+                width,
+                height,
+                stride_bytes: row_pitch,
                 pixel_format: wincast_capture::FramePixelFormat::Bgra8Unorm,
                 sequence_number,
                 timestamp_ns: sequence_number * 1_000_000,
             },
-            texture_width: 1280,
-            texture_height: 720,
+            texture_width: width,
+            texture_height: height,
             mip_levels: 1,
             array_size: 1,
             sample_count: 1,
         },
-        row_pitch: 5120,
-        bytes: vec![0; 5120 * 720],
+        row_pitch,
+        bytes: vec![0; row_pitch as usize * height as usize],
     }
 }
 

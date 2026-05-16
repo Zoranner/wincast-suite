@@ -22,13 +22,14 @@ use crate::session_events::DetectedDesktopSession;
 use crate::session_state::{
     ClientSessionErrorCode, RemoteSessionStatus, SessionEvent, SharedSessionState,
 };
+use wincast_media::{VideoDecoder, test_support::FakeH264Decoder};
 use wincast_protocol::{
     config::VideoCodec,
     frame::{read_message, write_message},
     handshake::send_client_hello,
     ipc::SessionEndReason,
     message::{ControlMessage, ErrorCode},
-    raw_frame::{RawBgraStreamItem, read_raw_bgra_frame, read_raw_bgra_stream_item},
+    raw_frame::read_raw_bgra_frame,
 };
 
 use crate::program::StartedProgram;
@@ -215,7 +216,7 @@ fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
 }
 
 #[test]
-fn host_reports_encoding_failed_for_h264_after_first_capture_frame_without_sending_raw_bgra() {
+fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_bgra() {
     let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = tcp_pair
         .local_addr()
@@ -224,7 +225,11 @@ fn host_reports_encoding_failed_for_h264_after_first_capture_frame_without_sendi
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
     let mut locator = RecordingWindowLocator::default();
-    let mut capture = RecordingCaptureStarter::default();
+    let first_frame = captured_bgra_frame_with_sequence(7);
+    let mut capture = RecordingCaptureStarter {
+        frames: VecDeque::from([Some(first_frame.clone())]),
+        ..RecordingCaptureStarter::default()
+    };
     let started = StartedProgram::from_process_id(42);
 
     let host = thread::spawn(move || {
@@ -251,25 +256,107 @@ fn host_reports_encoding_failed_for_h264_after_first_capture_frame_without_sendi
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("client read timeout should be set");
-    let next_item = read_raw_bgra_stream_item(&mut client);
+    let encoded = read_message(&mut client).expect("encoded frame should decode");
+    let raw_after_encoded = read_raw_bgra_frame(&mut client);
+    host.join()
+        .expect("host thread should finish")
+        .expect("h264 first-frame path should finish cleanly");
+
+    let ControlMessage::EncodedVideoFrame(encoded) = encoded else {
+        panic!("expected encoded video frame, got {encoded:?}");
+    };
+    encoded
+        .validate()
+        .expect("encoded frame should satisfy protocol boundary");
+    assert_eq!(encoded.codec, VideoCodec::H264);
+    assert_eq!(encoded.width, first_frame.metadata.frame.width);
+    assert_eq!(encoded.height, first_frame.metadata.frame.height);
+    assert_eq!(
+        encoded.sequence_number,
+        first_frame.metadata.frame.sequence_number
+    );
+    assert_eq!(
+        encoded.timestamp_ns,
+        first_frame.metadata.frame.timestamp_ns
+    );
+    assert!(encoded.keyframe);
+
+    let mut decoder = FakeH264Decoder::new();
+    let decoded = decoder
+        .decode(&encoded)
+        .expect("encoded frame should decode through fake H.264 boundary");
+    assert_eq!(decoded.width, first_frame.metadata.frame.width);
+    assert_eq!(decoded.height, first_frame.metadata.frame.height);
+    assert_eq!(
+        decoded.bytes.len(),
+        first_frame.row_pitch as usize * first_frame.metadata.frame.height as usize
+    );
+    assert!(
+        raw_after_encoded.is_err(),
+        "h264 path must not fall back to raw BGRA binary frames"
+    );
+}
+
+#[test]
+fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_frame() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    let mut locator = RecordingWindowLocator::default();
+    let too_wide_frame = captured_bgra_frame_with_dimensions(1921, 720);
+    let mut capture = RecordingCaptureStarter {
+        frames: VecDeque::from([Some(too_wide_frame)]),
+        ..RecordingCaptureStarter::default()
+    };
+    let started = StartedProgram::from_process_id(42);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut locator,
+            &mut capture,
+            &started,
+        )
+    });
+
+    assert_eq!(
+        read_message(&mut client).expect("session ready should decode"),
+        ControlMessage::SessionReady {
+            width: 1921,
+            height: 720,
+        }
+    );
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("client read timeout should be set");
+    let error_message = read_message(&mut client).expect("encoding failure should decode");
     let raw_after_error = read_raw_bgra_frame(&mut client);
     let error = host
         .join()
         .expect("host thread should finish")
-        .expect_err("h264 should fail until encoder is wired");
+        .expect_err("h264 encoder rejection should fail the session");
 
     assert_eq!(
-        next_item.expect("encoding failure should decode"),
-        RawBgraStreamItem::Control(ControlMessage::Error {
+        error_message,
+        ControlMessage::Error {
             code: ErrorCode::EncodingFailed,
-            message: "尚未接入 H.264 编码器".to_owned(),
-        })
+            message: "H.264 首帧编码失败: 视频尺寸 1921x720 超过上限 1920x1080".to_owned(),
+        }
     );
     assert!(
         raw_after_error.is_err(),
-        "h264 path must not fall back to raw BGRA binary frames"
+        "h264 failure path must not fall back to raw BGRA binary frames"
     );
-    assert!(error.message.contains("尚未接入 H.264 编码器"));
+    assert!(error.message.contains("H.264 首帧编码失败"));
 }
 
 struct FailingWriter;
