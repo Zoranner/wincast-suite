@@ -11,6 +11,10 @@ use std::{
 
 use wincast_capture::CapturedBgraFrame;
 use wincast_input::{CaptureInputBounds, WindowsInputEventSink};
+use wincast_media::{
+    MediaConfigError, MediaError, RawPixelFormat, RawVideoFrame, RawVideoFrameError, VideoEncoder,
+    VideoPipelineConfig, test_support::FakeH264Encoder,
+};
 use wincast_protocol::{
     frame::{FrameError, read_message, write_message},
     ipc::SessionEndReason,
@@ -188,6 +192,114 @@ pub(super) fn write_raw_bgra_stream_with_input_events(
     }
 }
 
+pub(super) fn write_h264_encoded_stream(
+    writer: &mut impl std::io::Write,
+    input_reader: &TcpStream,
+    first_frame: &CapturedBgraFrame,
+    session: &mut dyn CaptureRuntime,
+    input_bounds: CaptureInputBounds,
+    pipeline_config: VideoPipelineConfig,
+) -> Result<HostSessionEndReason, HostSessionError> {
+    let input_stream = input_reader.try_clone().map_err(|error| {
+        HostSessionError::new(
+            HostSessionEndReason::TransportFailed,
+            format!("克隆客户端输入事件读取端失败: {error}"),
+        )
+    })?;
+    let input_events = spawn_input_event_reader(input_stream, input_bounds);
+    write_h264_encoded_stream_with_input_reader(
+        writer,
+        first_frame,
+        session,
+        input_events,
+        pipeline_config,
+    )
+}
+
+pub(super) fn write_h264_encoded_stream_with_input_reader(
+    writer: &mut impl std::io::Write,
+    first_frame: &CapturedBgraFrame,
+    session: &mut dyn CaptureRuntime,
+    input_reader: InputEventReader,
+    pipeline_config: VideoPipelineConfig,
+) -> Result<HostSessionEndReason, HostSessionError> {
+    let result = write_h264_encoded_stream_with_input_events(
+        writer,
+        first_frame,
+        session,
+        input_reader.receiver(),
+        pipeline_config,
+    );
+    let cleanup_result = match &result {
+        Ok(HostSessionEndReason::StopSession) => join_input_reader(input_reader),
+        _ => stop_and_join_input_reader(input_reader),
+    };
+
+    result.and_then(|reason| {
+        cleanup_result?;
+        Ok(reason)
+    })
+}
+
+pub(super) fn write_h264_encoded_stream_with_input_events(
+    writer: &mut impl std::io::Write,
+    first_frame: &CapturedBgraFrame,
+    session: &mut dyn CaptureRuntime,
+    input_events: &mpsc::Receiver<InputReaderEvent>,
+    pipeline_config: VideoPipelineConfig,
+) -> Result<HostSessionEndReason, HostSessionError> {
+    let mut encoder = FakeH264Encoder::new(pipeline_config).map_err(|error| {
+        write_h264_encoding_error(
+            writer,
+            format!("H.264 编码器初始化失败: {}", media_error_message(&error)),
+        )
+    })?;
+    write_h264_frame_from_capture(writer, &mut encoder, first_frame, "H.264 首帧编码失败")?;
+    if let Some(reason) = check_input_reader_events(input_events)? {
+        write_session_goodbye(writer).map_err(|message| {
+            HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+        })?;
+        return Ok(reason);
+    }
+
+    loop {
+        let frame = match session.try_next_bgra_frame() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                if let Some(reason) = check_input_reader_events(input_events)? {
+                    write_session_goodbye(writer).map_err(|message| {
+                        HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+                    })?;
+                    return Ok(reason);
+                }
+                if !session.is_active() {
+                    write_session_goodbye(writer).map_err(|message| {
+                        HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+                    })?;
+                    return Ok(HostSessionEndReason::CaptureInactive);
+                }
+                thread::sleep(Duration::from_millis(16));
+                continue;
+            }
+            Err(error) => {
+                let message = format!("读取后续 H.264 捕获帧失败: {error}");
+                let _ = write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
+                return Err(HostSessionError::new(
+                    HostSessionEndReason::CaptureFailed,
+                    message,
+                ));
+            }
+        };
+        write_h264_frame_from_capture(writer, &mut encoder, &frame, "H.264 后续帧编码失败")?;
+        if let Some(reason) = check_input_reader_events(input_events)? {
+            write_session_goodbye(writer).map_err(|message| {
+                HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+            })?;
+            return Ok(reason);
+        }
+    }
+}
+
 fn stop_and_join_input_reader(input_reader: InputEventReader) -> Result<(), HostSessionError> {
     input_reader.stop_and_join().map(|_| ()).map_err(|_| {
         HostSessionError::new(
@@ -230,6 +342,135 @@ fn write_raw_bgra_frame_from_capture(
     };
     write_raw_bgra_frame(writer, &raw_frame)
         .map_err(|error| format!("写入 raw BGRA 二进制帧失败: {error}"))
+}
+
+fn write_h264_frame_from_capture(
+    writer: &mut impl std::io::Write,
+    encoder: &mut impl VideoEncoder,
+    frame: &CapturedBgraFrame,
+    failure_prefix: &str,
+) -> Result<(), HostSessionError> {
+    let encoded = encoder
+        .encode(raw_video_frame_from_capture(frame))
+        .map_err(|error| {
+            write_h264_encoding_error(
+                writer,
+                format!("{failure_prefix}: {}", media_error_message(&error)),
+            )
+        })?;
+    write_message(writer, &ControlMessage::EncodedVideoFrame(encoded)).map_err(|error| {
+        HostSessionError::new(
+            HostSessionEndReason::TransportFailed,
+            format!("写入 H.264 编码视频帧失败: {error}"),
+        )
+    })
+}
+
+fn raw_video_frame_from_capture(frame: &CapturedBgraFrame) -> RawVideoFrame<'_> {
+    RawVideoFrame {
+        width: frame.metadata.frame.width,
+        height: frame.metadata.frame.height,
+        row_pitch: frame.row_pitch,
+        format: RawPixelFormat::Bgra8Unorm,
+        sequence_number: frame.metadata.frame.sequence_number,
+        timestamp_ns: frame.metadata.frame.timestamp_ns,
+        bytes: &frame.bytes,
+    }
+}
+
+fn write_h264_encoding_error(
+    writer: &mut impl std::io::Write,
+    message: String,
+) -> HostSessionError {
+    let write_result = write_control_error(writer, ErrorCode::EncodingFailed, message.clone());
+    let message = append_error_response_write_failure(message, write_result);
+    HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
+}
+
+fn media_error_message(error: &MediaError) -> String {
+    match error {
+        MediaError::Config(error) => media_config_error_message(error),
+        MediaError::InvalidRawFrame(error) => raw_video_frame_error_message(error),
+        MediaError::UnsupportedEncodedCodec { codec } => {
+            format!("编码视频帧只支持 H.264，当前为 {codec:?}")
+        }
+        MediaError::InvalidEncodedFrame(error) => format!("编码视频帧无效: {error:?}"),
+        MediaError::DecodedPayloadTooLarge { actual, max } => {
+            format!("fake 解码输出载荷 {actual} 超过上限 {max}")
+        }
+        MediaError::BackendUnavailable(message) => format!("媒体后端不可用: {message}"),
+        MediaError::Backend(message) => format!("媒体后端处理失败: {message}"),
+    }
+}
+
+fn media_config_error_message(error: &MediaConfigError) -> String {
+    match error {
+        MediaConfigError::UnsupportedCodec { codec } => {
+            format!("媒体链路只支持 H.264，当前配置为 {codec:?}")
+        }
+        MediaConfigError::InvalidDimensions { width, height } => {
+            format!("视频尺寸无效: {width}x{height}")
+        }
+        MediaConfigError::ResolutionTooLarge {
+            width,
+            height,
+            max_width,
+            max_height,
+        } => format!("视频尺寸 {width}x{height} 超过上限 {max_width}x{max_height}"),
+        MediaConfigError::InvalidFps { fps, max_fps } => {
+            format!("视频帧率 {fps} 无效，最大支持 {max_fps}")
+        }
+        MediaConfigError::InvalidMaxBitrate => "视频码率上限必须大于 0".to_owned(),
+        MediaConfigError::InvalidBitrate {
+            bitrate_kbps,
+            max_bitrate_kbps,
+        } => format!("视频目标码率 {bitrate_kbps} 无效，上限为 {max_bitrate_kbps}"),
+    }
+}
+
+fn raw_video_frame_error_message(error: &RawVideoFrameError) -> String {
+    match error {
+        RawVideoFrameError::InvalidDimensions { width, height } => {
+            format!("raw 视频尺寸无效: {width}x{height}")
+        }
+        RawVideoFrameError::ResolutionTooLarge {
+            width,
+            height,
+            max_width,
+            max_height,
+        } => format!("视频尺寸 {width}x{height} 超过上限 {max_width}x{max_height}"),
+        RawVideoFrameError::ConfigDimensionMismatch {
+            frame_width,
+            frame_height,
+            config_width,
+            config_height,
+        } => format!(
+            "raw 视频尺寸 {frame_width}x{frame_height} 与配置尺寸 {config_width}x{config_height} 不一致"
+        ),
+        RawVideoFrameError::UnsupportedPixelFormat { format } => {
+            format!("fake H.264 编码器只支持 BGRA8 raw 帧，当前为 {format:?}")
+        }
+        RawVideoFrameError::EmptyPayload => "raw 视频帧载荷为空".to_owned(),
+        RawVideoFrameError::RowPitchOverflow => "raw 视频帧行跨度溢出".to_owned(),
+        RawVideoFrameError::InvalidRowPitch {
+            row_pitch,
+            min_row_pitch,
+        } => format!("raw 视频帧行跨度 {row_pitch} 小于最小值 {min_row_pitch}"),
+        RawVideoFrameError::PayloadLengthOverflow => "raw 视频帧载荷长度溢出".to_owned(),
+        RawVideoFrameError::InvalidPayloadLength { actual, expected } => {
+            format!("raw 视频帧载荷长度 {actual} 与期望长度 {expected} 不一致")
+        }
+    }
+}
+
+fn append_error_response_write_failure(
+    message: String,
+    write_result: Result<(), String>,
+) -> String {
+    match write_result {
+        Ok(()) => message,
+        Err(write_error) => format!("{message}；{write_error}"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

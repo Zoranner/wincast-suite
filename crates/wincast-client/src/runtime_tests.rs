@@ -13,8 +13,8 @@ use crate::{
     runtime::{
         ClientRunError, RetryOptions, RetryReport, control_channel_ready_message,
         format_retry_report, run_client_with_config, run_with_retry, run_with_retry_and_reporter,
-        validate_encoded_video_frame,
     },
+    stream::validate_encoded_video_frame,
     test_support::{raw_bgra_frame, raw_binary_frame},
 };
 
@@ -242,6 +242,32 @@ fn client_accepts_encoded_video_frame_after_fake_h264_decode_without_reading_raw
                 timestamp_ns: 1_000,
                 keyframe: true,
                 bytes: vec![0x00, 0x00, 0x00, 0x01, 0x67],
+            }),
+        )
+        .expect("encoded frame should encode");
+        write_message(
+            &mut stream,
+            &ControlMessage::EncodedVideoFrame(EncodedVideoFrame {
+                codec: wincast_protocol::config::VideoCodec::H264,
+                width: 2,
+                height: 2,
+                sequence_number: 2,
+                timestamp_ns: 2_000,
+                keyframe: false,
+                bytes: vec![0x00, 0x00, 0x00, 0x01, 0x68],
+            }),
+        )
+        .expect("encoded frame should encode");
+        write_message(
+            &mut stream,
+            &ControlMessage::EncodedVideoFrame(EncodedVideoFrame {
+                codec: wincast_protocol::config::VideoCodec::H264,
+                width: 2,
+                height: 2,
+                sequence_number: 3,
+                timestamp_ns: 3_000,
+                keyframe: false,
+                bytes: vec![0x00, 0x00, 0x00, 0x01, 0x65],
             }),
         )
         .expect("encoded frame should encode");

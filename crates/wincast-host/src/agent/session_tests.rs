@@ -298,6 +298,182 @@ fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_b
 }
 
 #[test]
+fn host_streams_multiple_h264_encoded_frames_until_capture_inactive() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    let mut locator = RecordingWindowLocator::default();
+    let mut capture = RecordingCaptureStarter {
+        frames: VecDeque::from([
+            Some(captured_bgra_frame_with_sequence(0)),
+            Some(captured_bgra_frame_with_sequence(1)),
+            Some(captured_bgra_frame_with_sequence(2)),
+            None,
+        ]),
+        ..RecordingCaptureStarter::default()
+    };
+    let started = StartedProgram::from_process_id(42);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut locator,
+            &mut capture,
+            &started,
+        )
+    });
+
+    assert_eq!(
+        read_message(&mut client).expect("session ready should decode"),
+        ControlMessage::SessionReady {
+            width: 1280,
+            height: 720,
+        }
+    );
+    let first = read_message(&mut client).expect("first encoded frame should decode");
+    let second = read_message(&mut client).expect("second encoded frame should decode");
+    let third = read_message(&mut client).expect("third encoded frame should decode");
+    assert_eq!(
+        read_message(&mut client).expect("goodbye should decode after capture ends"),
+        ControlMessage::Goodbye
+    );
+    let reason = host
+        .join()
+        .expect("host thread should finish")
+        .expect("h264 stream should finish cleanly");
+
+    assert_eq!(reason, HostSessionEndReason::CaptureInactive);
+    let first = expect_h264_frame(first);
+    let second = expect_h264_frame(second);
+    let third = expect_h264_frame(third);
+    assert_eq!(first.sequence_number, 0);
+    assert_eq!(second.sequence_number, 1);
+    assert_eq!(third.sequence_number, 2);
+    assert!(first.keyframe);
+    assert!(!second.keyframe);
+    assert!(!third.keyframe);
+}
+
+#[test]
+fn host_keeps_h264_stream_alive_when_no_frame_is_temporarily_available() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    let mut locator = RecordingWindowLocator::default();
+    let mut capture = RecordingCaptureStarter {
+        frames: VecDeque::from([
+            Some(captured_bgra_frame_with_sequence(0)),
+            None,
+            Some(captured_bgra_frame_with_sequence(1)),
+            None,
+        ]),
+        ..RecordingCaptureStarter::default()
+    };
+    let started = StartedProgram::from_process_id(42);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut locator,
+            &mut capture,
+            &started,
+        )
+    });
+
+    read_message(&mut client).expect("session ready should decode");
+    let first = expect_h264_frame(read_message(&mut client).expect("first frame should decode"));
+    let second = expect_h264_frame(read_message(&mut client).expect("second frame should decode"));
+    assert_eq!(
+        read_message(&mut client).expect("goodbye should decode after capture ends"),
+        ControlMessage::Goodbye
+    );
+    let reason = host
+        .join()
+        .expect("host thread should finish")
+        .expect("h264 temporary empty frame should finish cleanly");
+
+    assert_eq!(first.sequence_number, 0);
+    assert_eq!(second.sequence_number, 1);
+    assert_eq!(reason, HostSessionEndReason::CaptureInactive);
+}
+
+#[test]
+fn host_h264_stream_sends_goodbye_and_returns_stop_session() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    let mut locator = RecordingWindowLocator::default();
+    let mut frames = VecDeque::from([Some(captured_bgra_frame_with_sequence(0))]);
+    frames.extend((0..100).map(|_| None));
+    let mut capture = RecordingCaptureStarter {
+        frames,
+        ..RecordingCaptureStarter::default()
+    };
+    let started = StartedProgram::from_process_id(42);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut locator,
+            &mut capture,
+            &started,
+        )
+    });
+
+    read_message(&mut client).expect("session ready should decode");
+    expect_h264_frame(read_message(&mut client).expect("first frame should decode"));
+    write_message(&mut client, &ControlMessage::StopSession).expect("stop session should write");
+    assert_eq!(
+        read_message(&mut client).expect("goodbye should decode after stop"),
+        ControlMessage::Goodbye
+    );
+    let reason = host
+        .join()
+        .expect("host thread should finish")
+        .expect("h264 stop session should finish cleanly");
+
+    assert_eq!(reason, HostSessionEndReason::StopSession);
+}
+
+fn expect_h264_frame(message: ControlMessage) -> wincast_protocol::message::EncodedVideoFrame {
+    let ControlMessage::EncodedVideoFrame(encoded) = message else {
+        panic!("expected encoded video frame, got {message:?}");
+    };
+    encoded
+        .validate()
+        .expect("encoded frame should satisfy protocol boundary");
+    assert_eq!(encoded.codec, VideoCodec::H264);
+    encoded
+}
+
+#[test]
 fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_frame() {
     let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = tcp_pair
@@ -357,6 +533,59 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
         "h264 failure path must not fall back to raw BGRA binary frames"
     );
     assert!(error.message.contains("H.264 首帧编码失败"));
+}
+
+#[test]
+fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_later_capture_frame() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    let mut locator = RecordingWindowLocator::default();
+    let mut capture = RecordingCaptureStarter {
+        frames: VecDeque::from([
+            Some(captured_bgra_frame_with_sequence(0)),
+            Some(captured_bgra_frame_with_dimensions(1921, 720)),
+        ]),
+        ..RecordingCaptureStarter::default()
+    };
+    let started = StartedProgram::from_process_id(42);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut locator,
+            &mut capture,
+            &started,
+        )
+    });
+
+    read_message(&mut client).expect("session ready should decode");
+    let first = expect_h264_frame(read_message(&mut client).expect("first frame should decode"));
+    let error_message = read_message(&mut client).expect("encoding failure should decode");
+    let error = host
+        .join()
+        .expect("host thread should finish")
+        .expect_err("later h264 encoder rejection should fail the session");
+
+    assert_eq!(first.sequence_number, 0);
+    assert_eq!(
+        error_message,
+        ControlMessage::Error {
+            code: ErrorCode::EncodingFailed,
+            message: "H.264 后续帧编码失败: 视频尺寸 1921x720 超过上限 1920x1080".to_owned(),
+        }
+    );
+    assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
+    assert!(error.message.contains("H.264 后续帧编码失败"));
 }
 
 struct FailingWriter;
