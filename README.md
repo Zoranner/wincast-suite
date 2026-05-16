@@ -19,6 +19,19 @@ listen = "0.0.0.0:7856"
 program = "C:\\Program Files\\SomeApp\\app.exe"
 args = []
 work_dir = "C:\\Program Files\\SomeApp"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+mode = "auto"
+window_title_contains = "SomeApp"
+startup_timeout_ms = 15000
 ```
 
 `program` 改成要打开的 Windows 程序路径。`listen` 的端口要和客户端配置一致。
