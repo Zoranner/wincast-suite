@@ -1,7 +1,8 @@
+use std::io::Read;
 use wincast_media::{OpenH264Decoder, VideoDecoder};
 use wincast_protocol::{
     config::VideoCodec,
-    frame::read_message,
+    frame::{MAX_FRAME_LEN, decode_message},
     message::{ControlMessage, EncodedVideoFrame},
 };
 
@@ -57,6 +58,9 @@ pub(crate) fn read_h264_encoded_frames_with_sdl_window_from_first(
     width: u32,
     height: u32,
 ) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(20)))
+        .map_err(|error| format!("设置客户端 H.264 视频流读取超时失败: {error}"))?;
     let mut renderer = wincast_render::SdlBgraPixelRenderer::new(wincast_render::RenderConfig {
         title: "WinCast Client".to_owned(),
         width,
@@ -95,8 +99,12 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
         &mut last_sequence_number,
     )?;
     frames += 1;
+    let mut stream_reader = H264EncodedStreamReader::default();
 
     loop {
+        if frame_limit.is_some_and(|limit| frames >= limit) {
+            break;
+        }
         let render_loop = renderer
             .poll_input()
             .map_err(|error| format!("读取客户端输入事件失败: {error}"))?;
@@ -116,13 +124,11 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
             );
             break;
         }
-        if frame_limit.is_some_and(|limit| frames >= limit) {
-            break;
-        }
-        match read_next_h264_encoded_stream_item(control_stream)
+        match stream_reader
+            .read_next(control_stream)
             .map_err(format_h264_encoded_stream_error)?
         {
-            NextEncodedVideoStreamItem::Frame(frame) => {
+            Some(NextEncodedVideoStreamItem::Frame(frame)) => {
                 render_h264_encoded_frame(
                     &mut decoder,
                     renderer,
@@ -131,7 +137,8 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
                 )?;
                 frames += 1;
             }
-            NextEncodedVideoStreamItem::Goodbye => break,
+            Some(NextEncodedVideoStreamItem::Goodbye) => break,
+            None => continue,
         }
     }
 
@@ -145,20 +152,15 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
 }
 
 fn read_next_h264_encoded_stream_item(
-    reader: &mut impl std::io::Read,
+    reader: &mut impl Read,
 ) -> Result<NextEncodedVideoStreamItem, EncodedVideoStreamReadError> {
-    match read_message(reader)
-        .map_err(|error| EncodedVideoStreamReadError::Interrupted(error.to_string()))?
-    {
-        ControlMessage::EncodedVideoFrame(frame) => Ok(NextEncodedVideoStreamItem::Frame(frame)),
-        ControlMessage::Error { code, message } => Err(EncodedVideoStreamReadError::Host(
-            format_host_error(code, message),
-        )),
-        ControlMessage::Goodbye => Ok(NextEncodedVideoStreamItem::Goodbye),
-        message => Err(EncodedVideoStreamReadError::InvalidControl(format!(
-            "宿主端 H.264 编码流中收到无效控制消息: {message:?}"
-        ))),
+    let mut stream_reader = H264EncodedStreamReader::default();
+    if let Some(item) = stream_reader.read_next(reader)? {
+        return Ok(item);
     }
+    Err(EncodedVideoStreamReadError::Interrupted(
+        "暂时没有收到 H.264 编码流数据".to_owned(),
+    ))
 }
 
 pub(crate) fn format_h264_encoded_read_error(error: impl std::fmt::Display) -> String {
@@ -184,6 +186,105 @@ enum EncodedVideoStreamReadError {
 enum NextEncodedVideoStreamItem {
     Frame(EncodedVideoFrame),
     Goodbye,
+}
+
+#[derive(Default)]
+struct H264EncodedStreamReader {
+    header: [u8; 4],
+    header_read: usize,
+    payload: Vec<u8>,
+    payload_read: usize,
+}
+
+impl H264EncodedStreamReader {
+    fn read_next(
+        &mut self,
+        reader: &mut impl Read,
+    ) -> Result<Option<NextEncodedVideoStreamItem>, EncodedVideoStreamReadError> {
+        while self.header_read < self.header.len() {
+            let read = read_stream_bytes(reader, &mut self.header[self.header_read..])?;
+            let Some(read) = read else {
+                return Ok(None);
+            };
+            if read == 0 {
+                return Err(EncodedVideoStreamReadError::Interrupted(
+                    "控制消息长度头不完整".to_owned(),
+                ));
+            }
+            self.header_read += read;
+        }
+
+        if self.payload.is_empty() {
+            let len = u32::from_be_bytes(self.header) as usize;
+            if len > MAX_FRAME_LEN {
+                return Err(EncodedVideoStreamReadError::InvalidControl(format!(
+                    "控制消息长度 {len} 超过限制 {MAX_FRAME_LEN}"
+                )));
+            }
+            self.payload.resize(len, 0);
+        }
+
+        while self.payload_read < self.payload.len() {
+            let read = read_stream_bytes(reader, &mut self.payload[self.payload_read..])?;
+            let Some(read) = read else {
+                return Ok(None);
+            };
+            if read == 0 {
+                return Err(EncodedVideoStreamReadError::Interrupted(
+                    "控制消息载荷不完整".to_owned(),
+                ));
+            }
+            self.payload_read += read;
+        }
+
+        let mut frame = Vec::with_capacity(4 + self.payload.len());
+        frame.extend_from_slice(&self.header);
+        frame.extend_from_slice(&self.payload);
+        let message = decode_message(&frame)
+            .map_err(|error| EncodedVideoStreamReadError::InvalidControl(error.to_string()))?;
+        self.reset();
+        decode_h264_stream_message(message).map(Some)
+    }
+
+    fn reset(&mut self) {
+        self.header = [0; 4];
+        self.header_read = 0;
+        self.payload.clear();
+        self.payload_read = 0;
+    }
+}
+
+fn read_stream_bytes(
+    reader: &mut impl Read,
+    buffer: &mut [u8],
+) -> Result<Option<usize>, EncodedVideoStreamReadError> {
+    match reader.read(buffer) {
+        Ok(read) => Ok(Some(read)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(EncodedVideoStreamReadError::Interrupted(error.to_string())),
+    }
+}
+
+fn decode_h264_stream_message(
+    message: ControlMessage,
+) -> Result<NextEncodedVideoStreamItem, EncodedVideoStreamReadError> {
+    match message {
+        ControlMessage::EncodedVideoFrame(frame) => Ok(NextEncodedVideoStreamItem::Frame(frame)),
+        ControlMessage::Error { code, message } => Err(EncodedVideoStreamReadError::Host(
+            format_host_error(code, message),
+        )),
+        ControlMessage::Goodbye => Ok(NextEncodedVideoStreamItem::Goodbye),
+        message => Err(EncodedVideoStreamReadError::InvalidControl(format!(
+            "宿主端 H.264 编码流中收到无效控制消息: {message:?}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,7 +398,7 @@ mod tests {
     };
     use wincast_protocol::{
         config::VideoCodec,
-        frame::write_message,
+        frame::{read_message, write_message},
         message::{ControlMessage, EncodedVideoFrame},
     };
 
@@ -426,6 +527,46 @@ mod tests {
     }
 
     #[test]
+    fn client_keeps_polling_input_and_sending_heartbeat_when_next_h264_frame_times_out() {
+        let frames = valid_h264_frames(2);
+        let mut bytes = Vec::new();
+        write_message(
+            &mut bytes,
+            &ControlMessage::EncodedVideoFrame(frames[1].clone()),
+        )
+        .expect("second encoded frame should encode");
+        let mut stream = DuplexTestStream::with_initial_timeout(bytes);
+        let mut renderer = RecordingRenderer::default();
+
+        let summary = read_h264_encoded_frames_with_renderer_from_first(
+            &mut stream,
+            frames[0].clone(),
+            Some(2),
+            &mut renderer,
+        )
+        .expect("temporary frame read timeout should not stop the render loop");
+
+        assert_eq!(
+            summary,
+            EncodedVideoReceiveSummary {
+                frames: 2,
+                last_sequence_number: 2,
+            }
+        );
+        assert_eq!(renderer.poll_count, 2);
+
+        let mut written = stream.written.as_slice();
+        assert_eq!(
+            read_message(&mut written).expect("first heartbeat should be sent"),
+            ControlMessage::Heartbeat
+        );
+        assert_eq!(
+            read_message(&mut written).expect("second heartbeat should be sent"),
+            ControlMessage::Heartbeat
+        );
+    }
+
+    #[test]
     fn client_rejects_empty_h264_payload_inside_h264_stream_in_chinese() {
         let mut bytes = Vec::new();
         write_message(
@@ -445,6 +586,19 @@ mod tests {
 
         assert!(error.contains("宿主端 H.264 编码帧无效"));
         assert!(!error.contains("raw BGRA 流"));
+    }
+
+    #[test]
+    fn protocol_only_h264_reader_reports_timeout_instead_of_spinning() {
+        let first_frame = valid_h264_frames(1).remove(0);
+        let mut stream = DuplexTestStream::with_initial_timeout(Vec::new());
+
+        let error = read_h264_encoded_frames_from_first(&mut stream, first_frame, 2)
+            .expect_err("protocol-only reader should report temporary timeout");
+
+        assert!(error.contains("视频流中断"));
+        assert!(error.contains("读取宿主端 H.264 编码视频帧失败"));
+        assert!(error.contains("暂时没有收到 H.264 编码流数据"));
     }
 
     #[test]
@@ -602,6 +756,7 @@ mod tests {
     struct DuplexTestStream {
         reader: std::io::Cursor<Vec<u8>>,
         written: Vec<u8>,
+        timeouts_before_read: usize,
     }
 
     impl DuplexTestStream {
@@ -609,12 +764,28 @@ mod tests {
             Self {
                 reader: std::io::Cursor::new(read_bytes),
                 written: Vec::new(),
+                timeouts_before_read: 0,
+            }
+        }
+
+        fn with_initial_timeout(read_bytes: Vec<u8>) -> Self {
+            Self {
+                reader: std::io::Cursor::new(read_bytes),
+                written: Vec::new(),
+                timeouts_before_read: 1,
             }
         }
     }
 
     impl std::io::Read for DuplexTestStream {
         fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.timeouts_before_read > 0 {
+                self.timeouts_before_read -= 1;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "temporary frame timeout",
+                ));
+            }
             std::io::Read::read(&mut self.reader, buffer)
         }
     }
