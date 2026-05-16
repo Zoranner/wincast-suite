@@ -5,6 +5,7 @@ use crate::{
     RawVideoFrame, RawVideoFrameError, VideoEncoder, VideoPipelineConfig,
 };
 
+#[cfg(feature = "test-support")]
 const FAKE_H264_MAGIC: &[u8] = b"WINCAST_FAKE_H264";
 
 pub struct OpenH264Encoder {
@@ -83,13 +84,15 @@ impl VideoEncoder for OpenH264Encoder {
     }
 }
 
-#[derive(Debug)]
 /// Test-only H.264 boundary encoder; payloads are deterministic stubs, not playable H.264 bitstreams.
+#[cfg(feature = "test-support")]
+#[derive(Debug)]
 pub struct FakeH264Encoder {
     config: VideoPipelineConfig,
     force_keyframe: bool,
 }
 
+#[cfg(feature = "test-support")]
 impl FakeH264Encoder {
     pub fn new(config: VideoPipelineConfig) -> MediaResult<Self> {
         config.validate()?;
@@ -101,6 +104,7 @@ impl FakeH264Encoder {
     }
 }
 
+#[cfg(feature = "test-support")]
 impl VideoEncoder for FakeH264Encoder {
     fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<EncodedVideoFrame> {
         validate_raw_frame(self.config, frame)?;

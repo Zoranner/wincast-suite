@@ -2,12 +2,12 @@ use openh264::formats::YUVSource;
 use wincast_protocol::config::VideoCodec;
 
 use crate::{
-    DecodedPixelFormat, DecodedVideoFrame, EncodedVideoFrame, MAX_H264_HEIGHT, MAX_H264_WIDTH,
-    MediaError, MediaResult, VideoDecoder,
+    DecodedPixelFormat, DecodedVideoFrame, EncodedVideoFrame, MediaError, MediaResult, VideoDecoder,
 };
 
+#[cfg(feature = "test-support")]
 pub const FAKE_H264_DECODED_PAYLOAD_LIMIT: usize =
-    MAX_H264_WIDTH as usize * MAX_H264_HEIGHT as usize * 4;
+    crate::MAX_H264_WIDTH as usize * crate::MAX_H264_HEIGHT as usize * 4;
 
 pub struct OpenH264Decoder {
     decoder: openh264::decoder::Decoder,
@@ -64,17 +64,20 @@ impl VideoDecoder for OpenH264Decoder {
     }
 }
 
+#[cfg(feature = "test-support")]
 #[derive(Debug, Default)]
 pub struct FakeH264Decoder {
     buffer: Vec<u8>,
 }
 
+#[cfg(feature = "test-support")]
 impl FakeH264Decoder {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(feature = "test-support")]
 impl VideoDecoder for FakeH264Decoder {
     fn decode<'a>(&'a mut self, frame: &EncodedVideoFrame) -> MediaResult<DecodedVideoFrame<'a>> {
         validate_h264_frame(frame)?;

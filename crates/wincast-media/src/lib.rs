@@ -1,3 +1,12 @@
+#![cfg_attr(
+    not(feature = "test-support"),
+    doc = r#"
+```compile_fail
+use wincast_media::test_support::FakeH264Encoder;
+```
+"#
+)]
+
 use thiserror::Error;
 use wincast_protocol::config::VideoCodec;
 
@@ -13,6 +22,7 @@ pub use wincast_protocol::message::EncodedVideoFrame;
 /// These helpers produce deterministic fake H.264 payloads and BGRA frames for
 /// media API tests. They are not real encoders/decoders and their payloads are
 /// not playable H.264 bitstreams.
+#[cfg(feature = "test-support")]
 pub mod test_support {
     pub use crate::decoder::{FAKE_H264_DECODED_PAYLOAD_LIMIT, FakeH264Decoder};
     pub use crate::encoder::FakeH264Encoder;

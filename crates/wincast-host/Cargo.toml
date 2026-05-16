@@ -11,6 +11,9 @@ wincast-input.workspace = true
 wincast-media.workspace = true
 wincast-protocol.workspace = true
 
+[dev-dependencies]
+wincast-media = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
