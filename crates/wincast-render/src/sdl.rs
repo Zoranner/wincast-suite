@@ -7,17 +7,15 @@ use sdl2::{
     render::{Canvas, TextureCreator},
     video::{Window, WindowContext},
 };
-use wincast_protocol::{
-    input::{ButtonState, InputEvent, Modifiers, MouseButton},
-    raw_frame::RawBgraFrame,
-};
+use wincast_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 
 use crate::{
-    PixelDimensions, RawBgraRenderer, RenderConfig, RenderError, RenderLoopAction,
-    RenderLoopResult, map_window_point_to_frame_pixels, mouse_button_input_events,
+    BgraPixelFrame, BgraPixelRenderer, PixelDimensions, RenderConfig, RenderError,
+    RenderLoopAction, RenderLoopResult, map_window_point_to_frame_pixels,
+    mouse_button_input_events,
 };
 
-pub struct SdlRawBgraRenderer {
+pub struct SdlBgraPixelRenderer {
     _sdl: Sdl,
     canvas: Canvas<Window>,
     texture_creator: TextureCreator<WindowContext>,
@@ -25,7 +23,7 @@ pub struct SdlRawBgraRenderer {
     frame_dimensions: PixelDimensions,
 }
 
-impl SdlRawBgraRenderer {
+impl SdlBgraPixelRenderer {
     pub fn new(config: RenderConfig) -> Result<Self, RenderError> {
         config.validate()?;
         let sdl = sdl2::init().map_err(RenderError::Backend)?;
@@ -63,11 +61,9 @@ impl SdlRawBgraRenderer {
     }
 }
 
-impl RawBgraRenderer for SdlRawBgraRenderer {
-    fn render_frame(&mut self, frame: &RawBgraFrame) -> Result<(), RenderError> {
-        frame
-            .validate()
-            .map_err(|error| RenderError::InvalidFrame(error.to_string()))?;
+impl BgraPixelRenderer for SdlBgraPixelRenderer {
+    fn render_frame(&mut self, frame: &BgraPixelFrame) -> Result<(), RenderError> {
+        frame.validate()?;
         let mut texture = self
             .texture_creator
             .create_texture_streaming(PixelFormatEnum::BGRA8888, frame.width, frame.height)

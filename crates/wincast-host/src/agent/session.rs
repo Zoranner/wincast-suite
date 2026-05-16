@@ -2,7 +2,10 @@ use std::net::TcpStream;
 
 use crate::{
     program::{ProgramRunner, StartedProgram},
-    session_events::{DetectedDesktopSession, detect_desktop_session},
+    session_events::{
+        DesktopSessionDetector, DetectedDesktopSession, PlatformDesktopSessionDetector,
+        detect_desktop_session,
+    },
     session_state::{RemoteSessionStatus, SessionEvent, SharedSessionState},
 };
 use wincast_media::{VideoLatencyMode, VideoPipelineConfig};
@@ -20,7 +23,7 @@ use super::{
     },
     stream::{
         HostSessionEndReason, HostSessionError, write_control_error, write_h264_encoded_stream,
-        write_raw_bgra_stream, write_session_ready,
+        write_session_ready,
     },
 };
 
@@ -31,7 +34,11 @@ pub(super) fn handle_control_client(
     locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
 ) -> Result<(), String> {
-    let mut session_gate = SharedSessionGate::new(foreground_run_session_state());
+    let mut session_gate = PollingSessionGate::new(
+        foreground_run_session_state(),
+        PlatformDesktopSessionDetector,
+        foreground_detection_failure_should_fallback_to_development(),
+    );
     handle_control_client_with_session_gate(
         stream,
         config,
@@ -68,8 +75,15 @@ pub(super) fn handle_control_client_with_session_gate(
                     );
                     message
                 })?;
-            let result =
-                run_started_session(&mut writer, stream, config, locator, capture, &started);
+            let result = run_started_session(
+                &mut writer,
+                stream,
+                config,
+                locator,
+                capture,
+                &started,
+                session_gate,
+            );
             let cleanup_result = runner
                 .cleanup(&mut started)
                 .map_err(|error| format!("清理宿主端程序失败: {error}"));
@@ -94,21 +108,52 @@ pub(super) fn handle_control_client_with_session_gate(
 }
 
 pub(super) trait SessionGate {
-    fn remote_session_status(&mut self) -> RemoteSessionStatus;
+    fn remote_session_status(&self) -> RemoteSessionStatus;
 }
 
-pub(super) struct SharedSessionGate {
+pub(super) struct PollingSessionGate<D>
+where
+    D: DesktopSessionDetector,
+{
     state: SharedSessionState,
+    detector: D,
+    fallback_to_development: bool,
 }
 
-impl SharedSessionGate {
-    pub(super) fn new(state: SharedSessionState) -> Self {
-        Self { state }
+impl<D> PollingSessionGate<D>
+where
+    D: DesktopSessionDetector,
+{
+    pub(super) fn new(
+        state: SharedSessionState,
+        detector: D,
+        fallback_to_development: bool,
+    ) -> Self {
+        Self {
+            state,
+            detector,
+            fallback_to_development,
+        }
     }
 }
 
-impl SessionGate for SharedSessionGate {
-    fn remote_session_status(&mut self) -> RemoteSessionStatus {
+impl<D> SessionGate for PollingSessionGate<D>
+where
+    D: DesktopSessionDetector,
+{
+    fn remote_session_status(&self) -> RemoteSessionStatus {
+        match self.detector.detect_desktop_session() {
+            Ok(detected) => {
+                self.state.apply_detected_desktop_session(detected);
+            }
+            Err(_) if self.fallback_to_development => {}
+            Err(_) => {
+                return RemoteSessionStatus::Rejected {
+                    code: crate::session_state::ClientSessionErrorCode::NoUserLoggedIn,
+                    message: "当前没有 Windows 用户登录，无法启动远程会话。",
+                };
+            }
+        }
         self.state.remote_session_status()
     }
 }
@@ -186,6 +231,7 @@ pub(super) fn run_started_session(
     locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
     started: &StartedProgram,
+    session_gate: &impl SessionGate,
 ) -> Result<HostSessionEndReason, HostSessionError> {
     let window = locate_started_window(config, started, locator).map_err(|error| {
         let message = format!("定位宿主端程序窗口失败: {error}");
@@ -203,23 +249,15 @@ pub(super) fn run_started_session(
         })?;
     write_session_ready(writer, &first_frame)
         .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
-    match config.video.codec {
-        VideoCodec::RawBgra => write_raw_bgra_stream(
-            writer,
-            stream,
-            &first_frame,
-            session.as_mut(),
-            capture_input_bounds(active_capture_mode, &window, &first_frame),
-        ),
-        VideoCodec::H264 => write_h264_encoded_stream(
-            writer,
-            stream,
-            &first_frame,
-            session.as_mut(),
-            capture_input_bounds(active_capture_mode, &window, &first_frame),
-            h264_pipeline_config(config),
-        ),
-    }
+    write_h264_encoded_stream(
+        writer,
+        stream,
+        &first_frame,
+        session.as_mut(),
+        capture_input_bounds(active_capture_mode, &window, &first_frame),
+        h264_pipeline_config(config),
+        session_gate,
+    )
 }
 
 fn h264_pipeline_config(config: &HostConfig) -> VideoPipelineConfig {

@@ -10,7 +10,6 @@ use wincast_protocol::{
     frame::{read_message, write_message},
     handshake::{HandshakeError, send_client_hello},
     message::{ControlMessage, EncodedVideoFrame, ErrorCode},
-    raw_frame::write_raw_bgra_frame,
 };
 
 use crate::{
@@ -20,7 +19,6 @@ use crate::{
         format_retry_report, run_client_with_config, run_with_retry, run_with_retry_and_reporter,
     },
     stream::validate_encoded_video_frame,
-    test_support::{raw_bgra_frame, raw_binary_frame},
 };
 
 #[test]
@@ -44,9 +42,10 @@ fn client_run_performs_tcp_control_handshake() {
             },
         )
         .expect("session ready should encode");
-        write_message(&mut stream, &ControlMessage::VideoReady).expect("video ready should encode");
-        write_raw_bgra_frame(&mut stream, &raw_binary_frame())
-            .expect("raw binary frame should encode");
+        for frame in test_h264_frames(3) {
+            write_message(&mut stream, &ControlMessage::EncodedVideoFrame(frame))
+                .expect("encoded frame should encode");
+        }
         observed_messages_tx
             .send((hello, start_session))
             .expect("observed messages should send");
@@ -144,77 +143,6 @@ fn client_formats_host_session_errors_with_specific_chinese_prefixes() {
         assert!(error.contains("测试错误详情"));
         assert!(!error.contains("宿主端拒绝连接"));
     }
-}
-
-#[test]
-fn client_rejects_invalid_raw_bgra_frame_from_host() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let endpoint = listener
-        .local_addr()
-        .expect("listener address should exist");
-
-    let host_thread = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("client should connect");
-        read_message(&mut stream).expect("client hello should decode");
-        send_client_hello(&mut stream).expect("host hello should encode");
-        read_message(&mut stream).expect("start session should decode");
-        write_message(
-            &mut stream,
-            &ControlMessage::SessionReady {
-                width: 2,
-                height: 2,
-            },
-        )
-        .expect("session ready should encode");
-        let mut frame = raw_bgra_frame();
-        frame.bytes.pop();
-        write_message(&mut stream, &ControlMessage::RawBgraReadbackFrame(frame))
-            .expect("raw frame should encode");
-    });
-
-    let config = ClientConfig {
-        host: endpoint.ip().to_string(),
-        port: endpoint.port(),
-    };
-    let error = run_client_with_config(&config).expect_err("invalid frame should fail");
-
-    host_thread.join().expect("host thread should finish");
-    assert!(error.contains("首帧 BGRA readback 无效"));
-}
-
-#[test]
-fn client_rejects_invalid_message_after_video_ready() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let endpoint = listener
-        .local_addr()
-        .expect("listener address should exist");
-
-    let host_thread = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("client should connect");
-        read_message(&mut stream).expect("client hello should decode");
-        send_client_hello(&mut stream).expect("host hello should encode");
-        read_message(&mut stream).expect("start session should decode");
-        write_message(
-            &mut stream,
-            &ControlMessage::SessionReady {
-                width: 2,
-                height: 2,
-            },
-        )
-        .expect("session ready should encode");
-        write_message(&mut stream, &ControlMessage::VideoReady).expect("video ready should encode");
-        write_message(&mut stream, &ControlMessage::Heartbeat).expect("heartbeat should encode");
-    });
-
-    let config = ClientConfig {
-        host: endpoint.ip().to_string(),
-        port: endpoint.port(),
-    };
-    let error = run_client_with_config(&config).expect_err("invalid message should fail");
-
-    host_thread.join().expect("host thread should finish");
-    assert!(error.contains("宿主端 raw BGRA 流中收到无效控制消息"));
-    assert!(!error.contains("视频流中断"));
 }
 
 #[test]
@@ -317,24 +245,6 @@ fn client_rejects_invalid_encoded_video_frame_from_host() {
 }
 
 #[test]
-fn client_rejects_non_h264_encoded_video_frame_from_host() {
-    let error = validate_encoded_video_frame(&EncodedVideoFrame {
-        codec: wincast_protocol::config::VideoCodec::RawBgra,
-        width: 2,
-        height: 2,
-        sequence_number: 1,
-        timestamp_ns: 1_000,
-        keyframe: true,
-        bytes: vec![0x00, 0x00, 0x00, 0x01, 0x67],
-    })
-    .expect_err("non-H.264 frame should fail");
-
-    assert!(error.contains("宿主端编码帧 codec 无效"));
-    assert!(error.contains("RawBgra"));
-    assert!(!error.contains("raw BGRA"));
-}
-
-#[test]
 fn default_retry_policy_does_not_retry() {
     let mut attempts = 0;
     let mut sleeps = Vec::new();
@@ -389,6 +299,36 @@ fn retry_policy_succeeds_after_busy_status_recovers() {
     .expect("busy status should be retried and recover");
 
     assert_eq!(message, "已连接");
+    assert_eq!(attempts, 2);
+    assert_eq!(sleeps, vec![Duration::from_millis(25)]);
+}
+
+#[test]
+fn retry_policy_reconnects_after_video_stream_interruption() {
+    let mut attempts = 0;
+    let mut sleeps = Vec::new();
+    let options = RetryOptions {
+        retries: 2,
+        retry_delay: Duration::from_millis(25),
+    };
+
+    let message = run_with_retry(
+        &options,
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(ClientRunError::VideoStreamInterrupted(
+                    "视频流中断: 读取宿主端 H.264 编码视频帧失败: 连接被重置".to_owned(),
+                ))
+            } else {
+                Ok("已重新连接".to_owned())
+            }
+        },
+        |delay| sleeps.push(delay),
+    )
+    .expect("video stream interruption should be retried and recover");
+
+    assert_eq!(message, "已重新连接");
     assert_eq!(attempts, 2);
     assert_eq!(sleeps, vec![Duration::from_millis(25)]);
 }

@@ -1,5 +1,6 @@
 use std::sync::{Arc, RwLock};
 
+use crate::session_events::{DetectedDesktopSession, apply_detected_desktop_session};
 use wincast_protocol::message::ErrorCode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,17 +188,44 @@ impl SharedSessionState {
     }
 
     pub fn apply(&self, event: SessionEvent) {
-        self.inner
-            .write()
-            .expect("shared session state lock should not be poisoned")
-            .apply(event);
+        match self.inner.write() {
+            Ok(mut machine) => machine.apply(event),
+            Err(_) => {
+                eprintln!("共享会话状态锁已中毒，忽略会话状态更新: {event:?}");
+            }
+        }
     }
 
     pub fn remote_session_status(&self) -> RemoteSessionStatus {
-        self.inner
-            .read()
-            .expect("shared session state lock should not be poisoned")
-            .remote_session_status()
+        match self.inner.read() {
+            Ok(machine) => machine.remote_session_status(),
+            Err(_) => {
+                eprintln!("共享会话状态锁已中毒，保守拒绝远程会话");
+                RemoteSessionStatus::Rejected {
+                    code: ClientSessionErrorCode::AgentUnavailable,
+                    message: "宿主端会话状态不可用，正在等待恢复。",
+                }
+            }
+        }
+    }
+
+    pub fn apply_detected_desktop_session(&self, detected: DetectedDesktopSession) {
+        match self.inner.write() {
+            Ok(mut machine) => apply_detected_desktop_session(&mut machine, detected),
+            Err(_) => {
+                eprintln!("共享会话状态锁已中毒，忽略桌面会话检测结果: {detected:?}");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn poison_for_test(&self) {
+        let inner = self.inner.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = inner.write().expect("test lock should be available");
+            panic!("poison shared session state for test");
+        })
+        .join();
     }
 }
 
@@ -405,5 +433,31 @@ mod tests {
             RemoteSessionStatus::Allowed
         );
         assert_eq!(machine.remote_session_status().to_protocol_error(), None);
+    }
+
+    #[test]
+    fn shared_state_conservatively_rejects_remote_session_after_lock_poison() {
+        let state = SharedSessionState::new();
+        state.poison_for_test();
+
+        assert_eq!(
+            state.remote_session_status(),
+            RemoteSessionStatus::Rejected {
+                code: ClientSessionErrorCode::AgentUnavailable,
+                message: "宿主端会话状态不可用，正在等待恢复。",
+            }
+        );
+    }
+
+    #[test]
+    fn shared_state_apply_does_not_panic_after_lock_poison() {
+        let state = SharedSessionState::new();
+        state.poison_for_test();
+
+        state.apply(SessionEvent::AgentStarted);
+        state.apply_detected_desktop_session(DetectedDesktopSession {
+            user_logged_in: true,
+            locked: false,
+        });
     }
 }

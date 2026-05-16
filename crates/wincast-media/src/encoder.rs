@@ -21,8 +21,9 @@ impl OpenH264Encoder {
                 config.bitrate_kbps.saturating_mul(1_000),
             ))
             .max_frame_rate(openh264::encoder::FrameRate::from_hz(config.fps as f32))
+            // OpenH264 requires frame skipping for bitrate RC to enforce the target bitrate.
+            // Keep the crate default skip-frame behavior instead of overriding it to false.
             .rate_control_mode(openh264::encoder::RateControlMode::Bitrate)
-            .skip_frames(false)
             .num_threads(1)
             .vui(openh264::encoder::VuiConfig::srgb().full_range(true));
         let encoder = openh264::encoder::Encoder::with_api_config(

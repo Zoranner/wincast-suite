@@ -239,3 +239,111 @@ fn read_raw_bgra_frame_after_magic(reader: &mut impl Read) -> Result<RawBgraFram
     frame.validate()?;
     Ok(frame)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+    use crate::{frame::write_message, message::ControlMessage};
+
+    #[test]
+    fn raw_bgra_binary_frame_round_trips_inside_crate_only() {
+        let frame = RawBgraFrame {
+            width: 2,
+            height: 2,
+            row_pitch: 8,
+            sequence_number: 9,
+            timestamp_ns: 123_456,
+            bytes: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        };
+        let mut bytes = Vec::new();
+
+        write_raw_bgra_frame(&mut bytes, &frame).expect("raw BGRA frame should encode");
+
+        assert_eq!(&bytes[..4], b"WCBG");
+        let decoded =
+            read_raw_bgra_frame(&mut Cursor::new(bytes)).expect("raw BGRA frame should decode");
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn raw_bgra_stream_item_reads_raw_and_control_messages_inside_crate_only() {
+        let first = RawBgraFrame {
+            width: 2,
+            height: 2,
+            row_pitch: 8,
+            sequence_number: 1,
+            timestamp_ns: 10,
+            bytes: vec![1; 16],
+        };
+        let message = ControlMessage::Goodbye;
+        let second = RawBgraFrame {
+            width: 1,
+            height: 1,
+            row_pitch: 4,
+            sequence_number: 2,
+            timestamp_ns: 20,
+            bytes: vec![2; 4],
+        };
+        let mut bytes = Vec::new();
+        write_raw_bgra_frame(&mut bytes, &first).expect("first raw frame should encode");
+        write_message(&mut bytes, &message).expect("control message should encode");
+        write_raw_bgra_frame(&mut bytes, &second).expect("second raw frame should encode");
+
+        let mut cursor = Cursor::new(bytes);
+        let decoded_first =
+            read_raw_bgra_stream_item(&mut cursor).expect("first stream item should decode");
+        let decoded_message =
+            read_raw_bgra_stream_item(&mut cursor).expect("control stream item should decode");
+        let decoded_second =
+            read_raw_bgra_stream_item(&mut cursor).expect("second stream item should decode");
+
+        assert_eq!(decoded_first, RawBgraStreamItem::Frame(first));
+        assert_eq!(decoded_message, RawBgraStreamItem::Control(message));
+        assert_eq!(decoded_second, RawBgraStreamItem::Frame(second));
+    }
+
+    #[test]
+    fn raw_bgra_binary_frame_rejects_payload_above_limit_before_reading_payload() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"WCBG");
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.extend_from_slice(&((MAX_RAW_BGRA_FRAME_BYTES / 4 + 1) as u32).to_be_bytes());
+        bytes.extend_from_slice(&4_u32.to_be_bytes());
+        bytes.extend_from_slice(&9_u64.to_be_bytes());
+        bytes.extend_from_slice(&123_456_u64.to_be_bytes());
+        bytes.extend_from_slice(&((MAX_RAW_BGRA_FRAME_BYTES + 4) as u32).to_be_bytes());
+
+        let err = read_raw_bgra_frame(&mut Cursor::new(bytes))
+            .expect_err("oversized raw payload should fail before payload read");
+
+        assert_eq!(
+            err,
+            RawFrameError::PayloadTooLarge {
+                actual: MAX_RAW_BGRA_FRAME_BYTES + 4,
+                max: MAX_RAW_BGRA_FRAME_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn raw_bgra_binary_frame_rejects_invalid_payload_shape() {
+        let frame = RawBgraFrame {
+            width: 2,
+            height: 2,
+            row_pitch: 8,
+            sequence_number: 9,
+            timestamp_ns: 123_456,
+            bytes: vec![0; 15],
+        };
+
+        assert_eq!(
+            frame.validate(),
+            Err(RawFrameError::InvalidPayloadLength {
+                actual: 15,
+                expected: 16,
+            })
+        );
+    }
+}

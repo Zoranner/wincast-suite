@@ -31,6 +31,8 @@ pub(super) fn inject_windows_actions(
         },
     };
 
+    // SAFETY: GetSystemMetrics reads process-global virtual desktop metrics and takes no Rust
+    // pointers. Zero or invalid dimensions are normalized by VirtualDesktop::normalize_absolute.
     let virtual_desktop = VirtualDesktop {
         origin_x: unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) },
         origin_y: unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) },
@@ -72,6 +74,8 @@ pub(super) fn inject_windows_actions(
         return Ok(());
     }
 
+    // SAFETY: inputs is a stable contiguous Vec<INPUT> for the duration of the call, and cbSize
+    // matches INPUT. A partial or failed send is reported as WindowsSendInputFailed.
     let sent = unsafe {
         SendInput(
             inputs.len() as u32,

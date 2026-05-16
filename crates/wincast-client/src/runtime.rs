@@ -11,8 +11,7 @@ use crate::{
     errors::format_host_error,
     render_loop::ClientRenderMode,
     stream::{
-        read_first_raw_binary_frame, read_h264_encoded_frames_from_first,
-        read_h264_encoded_frames_with_sdl_window_from_first, validate_readback_frame,
+        read_h264_encoded_frames_from_first, read_h264_encoded_frames_with_sdl_window_from_first,
     },
 };
 
@@ -73,6 +72,7 @@ pub(crate) enum ClientRunError {
     Connection(String),
     Handshake(HandshakeError),
     HostStatus { code: ErrorCode, message: String },
+    VideoStreamInterrupted(String),
     Fatal(String),
 }
 
@@ -87,7 +87,7 @@ impl ClientRunError {
 
     fn is_retriable(&self) -> bool {
         match self {
-            Self::Connection(_) => true,
+            Self::Connection(_) | Self::VideoStreamInterrupted(_) => true,
             Self::Handshake(HandshakeError::HostRejected { code, .. })
             | Self::HostStatus { code, .. } => is_retriable_host_status(*code),
             Self::Handshake(_) | Self::Fatal(_) => false,
@@ -96,7 +96,9 @@ impl ClientRunError {
 
     fn into_message(self) -> String {
         match self {
-            Self::Connection(message) | Self::Fatal(message) => message,
+            Self::Connection(message)
+            | Self::VideoStreamInterrupted(message)
+            | Self::Fatal(message) => message,
             Self::Handshake(error) => format_handshake_error(error),
             Self::HostStatus { code, message } => format_host_error(code, message),
         }
@@ -196,30 +198,31 @@ fn read_first_readback_frame(
     match read_message(stream)
         .map_err(|error| ClientRunError::Fatal(format!("读取宿主端首帧失败: {error}")))?
     {
-        ControlMessage::RawBgraReadbackFrame(frame) => {
-            validate_readback_frame(&frame).map_err(ClientRunError::Fatal)
-        }
         ControlMessage::EncodedVideoFrame(frame) => match render_mode {
             ClientRenderMode::SdlWindow => {
                 read_h264_encoded_frames_with_sdl_window_from_first(stream, frame, width, height)
-                    .map_err(ClientRunError::Fatal)
+                    .map_err(classify_video_stream_error)
             }
             ClientRenderMode::ProtocolOnly => {
                 read_h264_encoded_frames_from_first(stream, frame, H264_VALIDATION_FRAME_COUNT)
                     .map(|_| ())
-                    .map_err(ClientRunError::Fatal)
+                    .map_err(classify_video_stream_error)
             }
         },
-        ControlMessage::VideoReady => {
-            read_first_raw_binary_frame(stream, render_mode, width, height)
-                .map_err(ClientRunError::Fatal)
-        }
         ControlMessage::Error { code, message } => {
             Err(ClientRunError::HostStatus { code, message })
         }
         message => Err(ClientRunError::Fatal(format!(
             "宿主端首帧消息无效: {message:?}"
         ))),
+    }
+}
+
+fn classify_video_stream_error(message: String) -> ClientRunError {
+    if message.contains("视频流中断") {
+        ClientRunError::VideoStreamInterrupted(message)
+    } else {
+        ClientRunError::Fatal(message)
     }
 }
 

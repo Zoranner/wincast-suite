@@ -7,8 +7,6 @@ mod stream;
 
 #[cfg(test)]
 mod runtime_tests;
-#[cfg(test)]
-mod test_support;
 
 const DEFAULT_RETRIES: u32 = 3;
 const DEFAULT_RETRY_DELAY_MS: u64 = 1_000;
@@ -50,7 +48,7 @@ fn default_config_path() -> PathBuf {
                     .join("Roaming")
             })
             .join("WinCast")
-            .join("wincast-client.toml")
+            .join("client.toml")
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -73,7 +71,7 @@ fn xdg_config_path(
                 .join(".config")
         })
         .join("wincast")
-        .join("wincast-client.toml")
+        .join("client.toml")
 }
 
 #[cfg(test)]
@@ -120,8 +118,6 @@ mod tests {
     }
 
     fn expected_client_config_under_home(home: &std::path::Path) -> PathBuf {
-        home.join(".config")
-            .join("wincast")
-            .join("wincast-client.toml")
+        home.join(".config").join("wincast").join("client.toml")
     }
 }

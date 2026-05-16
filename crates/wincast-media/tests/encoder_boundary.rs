@@ -50,16 +50,6 @@ fn fake_h264_encoder_marks_next_frame_keyframe_after_request() {
 }
 
 #[test]
-fn fake_h264_encoder_rejects_non_h264_config() {
-    let result = FakeH264Encoder::new(VideoPipelineConfig {
-        codec: VideoCodec::RawBgra,
-        ..valid_config()
-    });
-
-    assert!(matches!(result, Err(MediaError::Config(_))));
-}
-
-#[test]
 fn fake_h264_encoder_rejects_invalid_or_oversized_dimensions() {
     let zero_width = FakeH264Encoder::new(VideoPipelineConfig {
         width: 0,

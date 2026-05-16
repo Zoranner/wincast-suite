@@ -14,7 +14,7 @@ fn example_config(name: &str) -> String {
 
 #[test]
 fn parses_stable_host_example_config() {
-    let config = HostConfig::from_toml_str(&example_config("wincast-host.toml"))
+    let config = HostConfig::from_toml_str(&example_config("host.toml"))
         .expect("stable host example config should parse");
 
     assert_eq!(config.capture.mode, CaptureMode::Auto);
@@ -27,7 +27,7 @@ fn parses_stable_host_example_config() {
 
 #[test]
 fn parses_stable_client_example_config() {
-    let config = ClientConfig::from_toml_str(&example_config("wincast-client.toml"))
+    let config = ClientConfig::from_toml_str(&example_config("client.toml"))
         .expect("stable client example config should parse");
 
     assert!(

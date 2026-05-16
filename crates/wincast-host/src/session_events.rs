@@ -129,6 +129,8 @@ pub fn register_session_notifications(
 
 #[cfg(windows)]
 fn detect_windows_desktop_session() -> Result<DetectedDesktopSession, String> {
+    // SAFETY: WTSGetActiveConsoleSessionId takes no pointers and has no Rust-side lifetime
+    // requirements. The sentinel u32::MAX is handled as "no active console session".
     let session_id = unsafe { WTSGetActiveConsoleSessionId() };
     if session_id == NO_ACTIVE_CONSOLE_SESSION {
         return Ok(DetectedDesktopSession {
@@ -144,6 +146,8 @@ fn detect_windows_desktop_session() -> Result<DetectedDesktopSession, String> {
 fn query_session_info_ex(session_id: u32) -> Result<DetectedDesktopSession, String> {
     let mut buffer = std::ptr::null_mut();
     let mut bytes_returned = 0_u32;
+    // SAFETY: buffer and bytes_returned are valid out-parameters. WTS returns an allocated buffer
+    // on success, which is released with WTSFreeMemory below after the contents are copied.
     let result = unsafe {
         WTSQuerySessionInformationW(
             WTS_CURRENT_SERVER_HANDLE,
@@ -162,6 +166,8 @@ fn query_session_info_ex(session_id: u32) -> Result<DetectedDesktopSession, Stri
 
     let detected = read_session_info_ex_buffer(buffer, bytes_returned);
     if !buffer.is_null() {
+        // SAFETY: buffer was allocated by WTSQuerySessionInformationW on success and is freed once
+        // after read_session_info_ex_buffer has copied the fixed-size WTSINFOEXW value.
         unsafe { WTSFreeMemory(buffer.cast()) };
     }
     detected
@@ -176,11 +182,14 @@ fn read_session_info_ex_buffer(
         return Err("Windows 会话扩展状态返回数据无效".to_owned());
     }
 
+    // SAFETY: buffer is non-null and bytes_returned proves it contains at least one WTSINFOEXW.
+    // The value is copied before the WTS buffer is freed by the caller.
     let info = unsafe { *(buffer.cast::<WTSINFOEXW>()) };
     if info.Level != 1 {
         return Err(format!("Windows 会话扩展状态层级无效: {}", info.Level));
     }
 
+    // SAFETY: info.Level == 1 selects the WTSInfoExLevel1 union field according to the WTS API.
     let level1 = unsafe { info.Data.WTSInfoExLevel1 };
     Ok(detected_desktop_session_from_session_info_ex_level1(
         level1.SessionState,
@@ -273,6 +282,8 @@ struct PlatformSessionNotificationApi;
 #[cfg(windows)]
 impl SessionNotificationApi for PlatformSessionNotificationApi {
     fn register(&self, hwnd: SessionNotificationWindow) -> Result<(), String> {
+        // SAFETY: hwnd is supplied by the host window/message-loop owner. The API only registers
+        // notification delivery for that window; a zero return is reported as failure.
         let result = unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) };
         if result == 0 {
             Err("注册 Windows 会话通知失败".to_owned())
@@ -282,6 +293,8 @@ impl SessionNotificationApi for PlatformSessionNotificationApi {
     }
 
     fn unregister(&self, hwnd: SessionNotificationWindow) -> Result<(), String> {
+        // SAFETY: hwnd is the same handle previously registered by this owner. If Windows rejects
+        // it or it is already invalid, the zero return is reported to the caller.
         let result = unsafe { WTSUnRegisterSessionNotification(hwnd) };
         if result == 0 {
             Err("注销 Windows 会话通知失败".to_owned())

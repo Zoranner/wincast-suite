@@ -167,8 +167,12 @@ fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupErr
     }
 
     unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> i32 {
+        // SAFETY: EnumWindows calls this callback synchronously with the LPARAM pointer supplied
+        // below. That pointer is a live, exclusive &mut EnumState for the duration of the call.
         let state = unsafe { &mut *(lparam as *mut EnumState) };
 
+        // SAFETY: hwnd is provided by EnumWindows and remains valid for Win32 inspection calls
+        // during this callback. inspect_window converts Win32 failures into Err.
         match unsafe { inspect_window(hwnd) } {
             Ok(candidate) => state.windows.push(candidate),
             Err(error) => {
@@ -182,25 +186,34 @@ fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupErr
 
     unsafe fn inspect_window(hwnd: HWND) -> Result<WindowCandidate, String> {
         let mut process_id = 0_u32;
+        // SAFETY: hwnd comes from EnumWindows. process_id points to a valid local u32 output
+        // buffer for the duration of the call; failure leaves it as zero and is non-fatal here.
         unsafe {
             GetWindowThreadProcessId(hwnd, &mut process_id);
         }
 
         let mut rect = RECT::default();
+        // SAFETY: hwnd comes from EnumWindows and rect is a valid writable RECT out-parameter.
         let got_rect = unsafe { GetWindowRect(hwnd, &mut rect) };
         if got_rect == 0 {
             return Err("GetWindowRect 返回失败".to_owned());
         }
 
+        // SAFETY: hwnd comes from EnumWindows; read_window_title handles empty or failed reads
+        // by returning an empty string.
         let title = unsafe { read_window_title(hwnd) };
+        // SAFETY: hwnd comes from EnumWindows. GetWindowLongPtrW returns zero on failure or a
+        // valid style value; zero is treated as "not a tool window".
         let extended_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
         let tool_window = (extended_style & WS_EX_TOOLWINDOW as isize) != 0;
+        // SAFETY: hwnd comes from EnumWindows and monitor lookup failures are returned as Err.
         let monitor_rect = unsafe { monitor_rect_for_window(hwnd) }?;
 
         Ok(WindowCandidate {
             handle: hwnd as isize,
             process_id,
             title,
+            // SAFETY: hwnd comes from EnumWindows; false is a valid conservative result.
             visible: unsafe { IsWindowVisible(hwnd) != 0 },
             tool_window,
             rect: WindowRect {
@@ -214,6 +227,8 @@ fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupErr
     }
 
     unsafe fn monitor_rect_for_window(hwnd: HWND) -> Result<WindowRect, String> {
+        // SAFETY: hwnd comes from EnumWindows. MONITOR_DEFAULTTONEAREST guarantees a nearest
+        // monitor for valid windows; a null return is handled as an error.
         let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
         if monitor.is_null() {
             return Err("MonitorFromWindow 未返回显示器".to_owned());
@@ -223,6 +238,8 @@ fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupErr
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
+        // SAFETY: monitor was returned by MonitorFromWindow and monitor_info is a valid writable
+        // MONITORINFO with cbSize initialized as required by Win32.
         let got_monitor = unsafe { GetMonitorInfoW(monitor, &mut monitor_info) };
         if got_monitor == 0 {
             return Err("GetMonitorInfoW 返回失败".to_owned());
@@ -237,12 +254,15 @@ fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupErr
     }
 
     unsafe fn read_window_title(hwnd: HWND) -> String {
+        // SAFETY: hwnd comes from EnumWindows. A zero or negative length is handled as no title.
         let length = unsafe { GetWindowTextLengthW(hwnd) };
         if length <= 0 {
             return String::new();
         }
 
         let mut buffer = vec![0_u16; length as usize + 1];
+        // SAFETY: buffer is writable and sized to the reported title length plus NUL terminator.
+        // GetWindowTextW writes at most buffer.len() UTF-16 code units and returns copied length.
         let copied = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
         String::from_utf16_lossy(&buffer[..copied as usize])
     }
@@ -252,6 +272,8 @@ fn enumerate_top_level_windows() -> Result<Vec<WindowCandidate>, WindowLookupErr
         error: None,
     };
 
+    // SAFETY: state lives until EnumWindows returns, and EnumWindows invokes enum_window
+    // synchronously with this exact LPARAM. The callback stops enumeration on inspection errors.
     let ok = unsafe { EnumWindows(Some(enum_window), (&mut state as *mut EnumState) as LPARAM) };
     if ok == 0 {
         return Err(WindowLookupError::EnumerationFailed(

@@ -18,10 +18,13 @@ use wincast_media::{
 use wincast_protocol::{
     frame::{FrameError, read_message, write_message},
     message::{ControlMessage, ErrorCode},
-    raw_frame::{RawBgraFrame, write_raw_bgra_frame},
 };
 
 use super::capture::{CaptureRuntime, InputEventSink};
+use super::session::SessionGate;
+
+const INPUT_READER_READ_TIMEOUT: Duration = Duration::from_millis(100);
+const INPUT_READER_TIMEOUT_LIMIT: u32 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostSessionEndReason {
@@ -31,6 +34,7 @@ pub(super) enum HostSessionEndReason {
     CaptureFailed,
     InputFailed,
     TransportFailed,
+    SessionUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,107 +74,6 @@ pub(super) fn write_session_ready(
     .map_err(|error| format!("写入会话就绪消息失败: {error}"))
 }
 
-pub(super) fn write_raw_bgra_stream(
-    writer: &mut impl std::io::Write,
-    input_reader: &TcpStream,
-    first_frame: &CapturedBgraFrame,
-    session: &mut dyn CaptureRuntime,
-    input_bounds: CaptureInputBounds,
-) -> Result<HostSessionEndReason, HostSessionError> {
-    let input_stream = input_reader.try_clone().map_err(|error| {
-        HostSessionError::new(
-            HostSessionEndReason::TransportFailed,
-            format!("克隆客户端输入事件读取端失败: {error}"),
-        )
-    })?;
-    let input_events = spawn_input_event_reader(input_stream, input_bounds);
-    write_raw_bgra_stream_with_input_reader(writer, first_frame, session, input_events)
-}
-
-pub(super) fn write_raw_bgra_stream_with_input_reader(
-    writer: &mut impl std::io::Write,
-    first_frame: &CapturedBgraFrame,
-    session: &mut dyn CaptureRuntime,
-    input_reader: InputEventReader,
-) -> Result<HostSessionEndReason, HostSessionError> {
-    let result = write_raw_bgra_stream_with_input_events(
-        writer,
-        first_frame,
-        session,
-        input_reader.receiver(),
-    );
-    let cleanup_result = match &result {
-        Ok(HostSessionEndReason::StopSession) => join_input_reader(input_reader),
-        _ => stop_and_join_input_reader(input_reader),
-    };
-
-    result.and_then(|reason| {
-        cleanup_result?;
-        Ok(reason)
-    })
-}
-
-pub(super) fn write_raw_bgra_stream_with_input_events(
-    writer: &mut impl std::io::Write,
-    first_frame: &CapturedBgraFrame,
-    session: &mut dyn CaptureRuntime,
-    input_events: &mpsc::Receiver<InputReaderEvent>,
-) -> Result<HostSessionEndReason, HostSessionError> {
-    write_message(writer, &ControlMessage::VideoReady).map_err(|error| {
-        HostSessionError::new(
-            HostSessionEndReason::TransportFailed,
-            format!("写入视频就绪消息失败: {error}"),
-        )
-    })?;
-    write_raw_bgra_frame_from_capture(writer, first_frame)
-        .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
-    if let Some(reason) = check_input_reader_events(input_events)? {
-        write_session_goodbye(writer).map_err(|message| {
-            HostSessionError::new(HostSessionEndReason::TransportFailed, message)
-        })?;
-        return Ok(reason);
-    }
-
-    loop {
-        let frame = match session.try_next_bgra_frame() {
-            Ok(Some(frame)) => frame,
-            Ok(None) => {
-                if let Some(reason) = check_input_reader_events(input_events)? {
-                    write_session_goodbye(writer).map_err(|message| {
-                        HostSessionError::new(HostSessionEndReason::TransportFailed, message)
-                    })?;
-                    return Ok(reason);
-                }
-                if !session.is_active() {
-                    write_session_goodbye(writer).map_err(|message| {
-                        HostSessionError::new(HostSessionEndReason::TransportFailed, message)
-                    })?;
-                    return Ok(HostSessionEndReason::CaptureInactive);
-                }
-                thread::sleep(Duration::from_millis(16));
-                continue;
-            }
-            Err(error) => {
-                let message = format!("读取后续 raw BGRA 捕获帧失败: {error}");
-                let _ = write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
-                return Err(HostSessionError::new(
-                    HostSessionEndReason::CaptureFailed,
-                    message,
-                ));
-            }
-        };
-        write_raw_bgra_frame_from_capture(writer, &frame).map_err(|message| {
-            HostSessionError::new(HostSessionEndReason::TransportFailed, message)
-        })?;
-        if let Some(reason) = check_input_reader_events(input_events)? {
-            write_session_goodbye(writer).map_err(|message| {
-                HostSessionError::new(HostSessionEndReason::TransportFailed, message)
-            })?;
-            return Ok(reason);
-        }
-    }
-}
-
 pub(super) fn write_h264_encoded_stream(
     writer: &mut impl std::io::Write,
     input_reader: &TcpStream,
@@ -178,6 +81,7 @@ pub(super) fn write_h264_encoded_stream(
     session: &mut dyn CaptureRuntime,
     input_bounds: CaptureInputBounds,
     pipeline_config: VideoPipelineConfig,
+    session_gate: &impl SessionGate,
 ) -> Result<HostSessionEndReason, HostSessionError> {
     let input_stream = input_reader.try_clone().map_err(|error| {
         HostSessionError::new(
@@ -192,6 +96,7 @@ pub(super) fn write_h264_encoded_stream(
         session,
         input_events,
         pipeline_config,
+        session_gate,
     )
 }
 
@@ -201,6 +106,7 @@ pub(super) fn write_h264_encoded_stream_with_input_reader(
     session: &mut dyn CaptureRuntime,
     input_reader: InputEventReader,
     pipeline_config: VideoPipelineConfig,
+    session_gate: &impl SessionGate,
 ) -> Result<HostSessionEndReason, HostSessionError> {
     let result = write_h264_encoded_stream_with_input_events(
         writer,
@@ -208,6 +114,7 @@ pub(super) fn write_h264_encoded_stream_with_input_reader(
         session,
         input_reader.receiver(),
         pipeline_config,
+        session_gate,
     );
     let cleanup_result = match &result {
         Ok(HostSessionEndReason::StopSession) => join_input_reader(input_reader),
@@ -226,6 +133,7 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
     session: &mut dyn CaptureRuntime,
     input_events: &mpsc::Receiver<InputReaderEvent>,
     pipeline_config: VideoPipelineConfig,
+    session_gate: &impl SessionGate,
 ) -> Result<HostSessionEndReason, HostSessionError> {
     let mut encoder = OpenH264Encoder::new(pipeline_config).map_err(|error| {
         write_h264_encoding_error(
@@ -238,6 +146,9 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
         write_session_goodbye(writer).map_err(|message| {
             HostSessionError::new(HostSessionEndReason::TransportFailed, message)
         })?;
+        return Ok(reason);
+    }
+    if let Some(reason) = check_session_gate(writer, session_gate)? {
         return Ok(reason);
     }
 
@@ -256,6 +167,9 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
                         HostSessionError::new(HostSessionEndReason::TransportFailed, message)
                     })?;
                     return Ok(HostSessionEndReason::CaptureInactive);
+                }
+                if let Some(reason) = check_session_gate(writer, session_gate)? {
+                    return Ok(reason);
                 }
                 thread::sleep(Duration::from_millis(16));
                 continue;
@@ -276,7 +190,24 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
             })?;
             return Ok(reason);
         }
+        if let Some(reason) = check_session_gate(writer, session_gate)? {
+            return Ok(reason);
+        }
     }
+}
+
+fn check_session_gate(
+    writer: &mut impl std::io::Write,
+    session_gate: &impl SessionGate,
+) -> Result<Option<HostSessionEndReason>, HostSessionError> {
+    let Some((code, message)) = session_gate.remote_session_status().to_protocol_error() else {
+        return Ok(None);
+    };
+    write_control_error(writer, code, message.to_owned())
+        .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
+    write_session_goodbye(writer)
+        .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
+    Ok(Some(HostSessionEndReason::SessionUnavailable))
 }
 
 fn stop_and_join_input_reader(input_reader: InputEventReader) -> Result<(), HostSessionError> {
@@ -305,22 +236,6 @@ pub(super) fn write_session_goodbye(writer: &mut impl std::io::Write) -> Result<
         Err(error) if is_control_stream_closed(&error) => Ok(()),
         Err(error) => Err(format!("写入会话结束消息失败: {error}")),
     }
-}
-
-fn write_raw_bgra_frame_from_capture(
-    writer: &mut impl std::io::Write,
-    frame: &CapturedBgraFrame,
-) -> Result<(), String> {
-    let raw_frame = RawBgraFrame {
-        width: frame.metadata.frame.width,
-        height: frame.metadata.frame.height,
-        row_pitch: frame.row_pitch,
-        sequence_number: frame.metadata.frame.sequence_number,
-        timestamp_ns: frame.metadata.frame.timestamp_ns,
-        bytes: frame.bytes.clone(),
-    };
-    write_raw_bgra_frame(writer, &raw_frame)
-        .map_err(|error| format!("写入 raw BGRA 二进制帧失败: {error}"))
 }
 
 fn write_h264_frame_from_capture(
@@ -473,7 +388,7 @@ pub(super) fn spawn_input_event_reader(
     let stop_requested = Arc::new(AtomicBool::new(false));
     let reader_stop_requested = Arc::clone(&stop_requested);
     let handle = thread::spawn(move || {
-        let _ = input_reader.set_read_timeout(Some(Duration::from_millis(100)));
+        let _ = input_reader.set_read_timeout(Some(INPUT_READER_READ_TIMEOUT));
         let mut input_sink = WindowsInputEventSink::new(input_bounds);
         let event = read_input_events_until_stop(
             &mut input_reader,
@@ -533,6 +448,21 @@ pub(super) fn read_input_events_until_stop(
     sink: &mut impl InputEventSink,
     stop_requested: &AtomicBool,
 ) -> InputReaderEvent {
+    read_input_events_until_stop_with_timeout_limit(
+        reader,
+        sink,
+        stop_requested,
+        INPUT_READER_TIMEOUT_LIMIT,
+    )
+}
+
+pub(super) fn read_input_events_until_stop_with_timeout_limit(
+    reader: &mut impl std::io::Read,
+    sink: &mut impl InputEventSink,
+    stop_requested: &AtomicBool,
+    timeout_limit: u32,
+) -> InputReaderEvent {
+    let mut consecutive_timeouts = 0;
     loop {
         if stop_requested.load(Ordering::SeqCst) {
             return InputReaderEvent::Disconnected;
@@ -540,9 +470,13 @@ pub(super) fn read_input_events_until_stop(
 
         match read_message(reader) {
             Ok(ControlMessage::InputEvent(event)) => {
+                consecutive_timeouts = 0;
                 if let Err(error) = sink.handle_input_event(event) {
                     return InputReaderEvent::Failed(format!("处理客户端输入事件失败: {error}"));
                 }
+            }
+            Ok(ControlMessage::Heartbeat) => {
+                consecutive_timeouts = 0;
             }
             Ok(ControlMessage::StopSession) | Ok(ControlMessage::Goodbye) => {
                 return InputReaderEvent::StopSession;
@@ -552,6 +486,10 @@ pub(super) fn read_input_events_until_stop(
             }
             Err(error) => {
                 if is_temporary_read_timeout(&error) {
+                    consecutive_timeouts += 1;
+                    if consecutive_timeouts >= timeout_limit {
+                        return InputReaderEvent::Disconnected;
+                    }
                     continue;
                 }
                 if is_control_stream_closed(&error) {

@@ -68,7 +68,7 @@ where
         if let Some(max_connections) = max_connections
             && accepted_connections >= max_connections
         {
-            join_finished_session(state);
+            join_finished_session(state)?;
             return Ok(());
         }
 
@@ -76,7 +76,7 @@ where
             .accept()
             .map_err(|error| format!("接受客户端连接失败: {error}"))?;
         accepted_connections += 1;
-        state = join_finished_session_if_reported(state, &session_finished_receiver);
+        state = join_finished_session_if_reported(state, &session_finished_receiver)?;
 
         state = match state {
             ListenerSessionState::Idle {
@@ -103,7 +103,7 @@ where
                     ListenerSessionState::Busy(session),
                     &session_finished_receiver,
                     SESSION_RECLAIM_GRACE,
-                );
+                )?;
                 match state {
                     ListenerSessionState::Idle {
                         runner,
@@ -194,7 +194,7 @@ where
 fn join_finished_session_if_reported<'scope, R, L, C>(
     state: ListenerSessionState<'scope, R, L, C>,
     session_finished: &mpsc::Receiver<SessionFinished>,
-) -> ListenerSessionState<'scope, R, L, C>
+) -> Result<ListenerSessionState<'scope, R, L, C>, String>
 where
     R: ProgramRunner + Send + 'scope,
     L: WindowLocator + Send + 'scope,
@@ -203,7 +203,7 @@ where
     if session_finished.try_recv().is_ok() {
         join_reported_finished_session(state)
     } else {
-        state
+        Ok(state)
     }
 }
 
@@ -211,7 +211,7 @@ fn wait_for_finished_session<'scope, R, L, C>(
     state: ListenerSessionState<'scope, R, L, C>,
     session_finished: &mpsc::Receiver<SessionFinished>,
     timeout: Duration,
-) -> ListenerSessionState<'scope, R, L, C>
+) -> Result<ListenerSessionState<'scope, R, L, C>, String>
 where
     R: ProgramRunner + Send + 'scope,
     L: WindowLocator + Send + 'scope,
@@ -222,15 +222,15 @@ where
             Ok(SessionFinished) => {
                 join_reported_finished_session(ListenerSessionState::Busy(session))
             }
-            Err(_) => ListenerSessionState::Busy(session),
+            Err(_) => Ok(ListenerSessionState::Busy(session)),
         },
-        state => state,
+        state => Ok(state),
     }
 }
 
 fn join_reported_finished_session<'scope, R, L, C>(
     state: ListenerSessionState<'scope, R, L, C>,
-) -> ListenerSessionState<'scope, R, L, C>
+) -> Result<ListenerSessionState<'scope, R, L, C>, String>
 where
     R: ProgramRunner + Send + 'scope,
     L: WindowLocator + Send + 'scope,
@@ -241,19 +241,19 @@ where
             runner,
             locator,
             capture,
-        } => ListenerSessionState::Idle {
+        } => Ok(ListenerSessionState::Idle {
             runner,
             locator,
             capture,
-        },
+        }),
         ListenerSessionState::Busy(session) => {
             let (_peer_addr, _result, runner, locator, capture) =
-                log_session_result(session.join());
-            ListenerSessionState::Idle {
+                log_session_result(session.join())?;
+            Ok(ListenerSessionState::Idle {
                 runner,
                 locator,
                 capture,
-            }
+            })
         }
     }
 }
@@ -271,7 +271,7 @@ type SessionThreadResult<'scope, R, L, C> = (
 
 fn join_finished_session<'scope, R, L, C>(
     state: ListenerSessionState<'scope, R, L, C>,
-) -> ListenerSessionState<'scope, R, L, C>
+) -> Result<ListenerSessionState<'scope, R, L, C>, String>
 where
     R: ProgramRunner + Send + 'scope,
     L: WindowLocator + Send + 'scope,
@@ -282,27 +282,27 @@ where
             runner,
             locator,
             capture,
-        } => ListenerSessionState::Idle {
+        } => Ok(ListenerSessionState::Idle {
             runner,
             locator,
             capture,
-        },
+        }),
         ListenerSessionState::Busy(session) if session.is_finished() => {
             let (_peer_addr, _result, runner, locator, capture) =
-                log_session_result(session.join());
-            ListenerSessionState::Idle {
+                log_session_result(session.join())?;
+            Ok(ListenerSessionState::Idle {
                 runner,
                 locator,
                 capture,
-            }
+            })
         }
-        ListenerSessionState::Busy(session) => ListenerSessionState::Busy(session),
+        ListenerSessionState::Busy(session) => Ok(ListenerSessionState::Busy(session)),
     }
 }
 
-fn log_session_result<'scope, R, L, C>(
+pub(super) fn log_session_result<'scope, R, L, C>(
     result: std::thread::Result<SessionThreadResult<'scope, R, L, C>>,
-) -> SessionThreadResult<'scope, R, L, C> {
+) -> Result<SessionThreadResult<'scope, R, L, C>, String> {
     match result {
         Ok((peer_addr, session_result, runner, locator, capture)) => {
             if let Err(error) = &session_result {
@@ -310,10 +310,12 @@ fn log_session_result<'scope, R, L, C>(
             } else {
                 eprintln!("客户端 {peer_addr} 会话结束");
             }
-            (peer_addr, session_result, runner, locator, capture)
+            Ok((peer_addr, session_result, runner, locator, capture))
         }
         Err(_) => {
-            panic!("客户端会话线程异常结束且无法恢复会话资源");
+            let error = "客户端会话线程异常结束且无法恢复会话资源".to_owned();
+            eprintln!("{error}");
+            Err(error)
         }
     }
 }

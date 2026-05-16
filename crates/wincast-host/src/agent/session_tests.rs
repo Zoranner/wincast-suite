@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     io,
     net::{TcpListener, TcpStream},
-    sync::{Arc, atomic::AtomicUsize, mpsc},
+    sync::Mutex,
     thread,
     time::Duration,
 };
@@ -12,13 +12,11 @@ use crate::agent::{
         run_control_listener_n_with_runtime,
         run_control_listener_once_with_runtime_and_session_gate,
     },
-    session::{SessionGate, SharedSessionGate, run_started_session},
-    stream::{
-        HostSessionEndReason, write_raw_bgra_stream_with_input_events, write_session_goodbye,
-    },
+    session::{PollingSessionGate, SessionGate, run_started_session},
+    stream::{HostSessionEndReason, write_session_goodbye},
     tests::*,
 };
-use crate::session_events::DetectedDesktopSession;
+use crate::session_events::{DesktopSessionDetector, DetectedDesktopSession};
 use crate::session_state::{
     ClientSessionErrorCode, RemoteSessionStatus, SessionEvent, SharedSessionState,
 };
@@ -28,7 +26,6 @@ use wincast_protocol::{
     frame::{read_message, write_message},
     handshake::send_client_hello,
     message::{ControlMessage, ErrorCode},
-    raw_frame::read_raw_bgra_frame,
 };
 
 use crate::program::StartedProgram;
@@ -36,10 +33,9 @@ use crate::program::StartedProgram;
 #[test]
 fn shared_session_gate_reports_no_user_locked_and_agent_unavailable() {
     let shared_state = SharedSessionState::new();
-    let mut gate = SharedSessionGate::new(shared_state.clone());
 
     assert_eq!(
-        gate.remote_session_status(),
+        shared_state.remote_session_status(),
         RemoteSessionStatus::Rejected {
             code: ClientSessionErrorCode::NoUserLoggedIn,
             message: "当前没有 Windows 用户登录，无法启动远程会话。",
@@ -48,7 +44,7 @@ fn shared_session_gate_reports_no_user_locked_and_agent_unavailable() {
 
     shared_state.apply(SessionEvent::UserLoggedIn);
     assert_eq!(
-        gate.remote_session_status(),
+        shared_state.remote_session_status(),
         RemoteSessionStatus::Rejected {
             code: ClientSessionErrorCode::AgentUnavailable,
             message: "宿主端 Agent 不可用，正在等待重新拉起。",
@@ -58,7 +54,7 @@ fn shared_session_gate_reports_no_user_locked_and_agent_unavailable() {
     shared_state.apply(SessionEvent::AgentStarted);
     shared_state.apply(SessionEvent::SessionLocked);
     assert_eq!(
-        gate.remote_session_status(),
+        shared_state.remote_session_status(),
         RemoteSessionStatus::Rejected {
             code: ClientSessionErrorCode::SessionLocked,
             message: "Windows 会话已锁定，请先解锁后再启动远程会话。",
@@ -93,6 +89,29 @@ fn explicit_development_fallback_keeps_detection_failure_allowed() {
 }
 
 #[test]
+fn polling_session_gate_refreshes_locked_desktop_before_status_check() {
+    let state = SharedSessionState::new();
+    state.apply(SessionEvent::UserLoggedIn);
+    state.apply(SessionEvent::AgentStarted);
+    let gate = PollingSessionGate::new(
+        state,
+        SequenceDesktopSessionDetector::new([Ok(DetectedDesktopSession {
+            user_logged_in: true,
+            locked: true,
+        })]),
+        false,
+    );
+
+    assert_eq!(
+        gate.remote_session_status(),
+        RemoteSessionStatus::Rejected {
+            code: ClientSessionErrorCode::SessionLocked,
+            message: "Windows 会话已锁定，请先解锁后再启动远程会话。",
+        }
+    );
+}
+
+#[test]
 fn foreground_detection_rejects_no_user_before_launching_program() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = listener
@@ -102,13 +121,10 @@ fn foreground_detection_rejects_no_user_before_launching_program() {
     let mut runner = RecordingProgramRunner::default();
     let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter::default();
-    let state = crate::agent::session::foreground_run_session_state_from_detection(Ok(
-        DetectedDesktopSession {
-            user_logged_in: false,
-            locked: false,
-        },
-    ));
-    let mut session_gate = SharedSessionGate::new(state);
+    let mut session_gate = FixedSessionGate(RemoteSessionStatus::Rejected {
+        code: ClientSessionErrorCode::NoUserLoggedIn,
+        message: "当前没有 Windows 用户登录，无法启动远程会话。",
+    });
     let host = thread::spawn(move || {
         let result = run_control_listener_once_with_runtime_and_session_gate(
             listener,
@@ -175,6 +191,7 @@ fn host_reports_error_response_write_failure_without_hiding_window_failure() {
         &mut locator,
         &mut capture,
         &started,
+        &FixedSessionGate(RemoteSessionStatus::Allowed),
     )
     .expect_err("host should report session failure");
 
@@ -205,6 +222,7 @@ fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
         &mut locator,
         &mut capture,
         &started,
+        &FixedSessionGate(RemoteSessionStatus::Allowed),
     )
     .expect_err("host should report session failure");
 
@@ -242,6 +260,7 @@ fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_b
             &mut locator,
             &mut capture,
             &started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
 
@@ -256,7 +275,7 @@ fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_b
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("client read timeout should be set");
     let encoded = read_message(&mut client).expect("encoded frame should decode");
-    let raw_after_encoded = read_raw_bgra_frame(&mut client);
+    let next_after_encoded = read_message(&mut client);
     host.join()
         .expect("host thread should finish")
         .expect("h264 first-frame path should finish cleanly");
@@ -290,10 +309,7 @@ fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_b
         decoded.bytes.len(),
         first_frame.row_pitch as usize * first_frame.metadata.frame.height as usize
     );
-    assert!(
-        raw_after_encoded.is_err(),
-        "h264 path must not fall back to raw BGRA binary frames"
-    );
+    assert_eq!(next_after_encoded, Ok(ControlMessage::Goodbye));
 }
 
 #[test]
@@ -328,6 +344,7 @@ fn host_streams_multiple_h264_encoded_frames_until_capture_inactive() {
             &mut locator,
             &mut capture,
             &started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
 
@@ -394,6 +411,7 @@ fn host_keeps_h264_stream_alive_when_no_frame_is_temporarily_available() {
             &mut locator,
             &mut capture,
             &started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
 
@@ -443,6 +461,7 @@ fn host_h264_stream_sends_goodbye_and_returns_stop_session() {
             &mut locator,
             &mut capture,
             &started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
 
@@ -459,6 +478,67 @@ fn host_h264_stream_sends_goodbye_and_returns_stop_session() {
         .expect("h264 stop session should finish cleanly");
 
     assert_eq!(reason, HostSessionEndReason::StopSession);
+}
+
+#[test]
+fn host_h264_stream_stops_session_when_desktop_becomes_locked() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    let mut locator = RecordingWindowLocator::default();
+    let mut frames = VecDeque::from([Some(captured_bgra_frame_with_sequence(0))]);
+    frames.extend((0..10).map(|_| None));
+    let mut capture = RecordingCaptureStarter {
+        frames,
+        ..RecordingCaptureStarter::default()
+    };
+    let started = StartedProgram::from_process_id(42);
+    let session_gate = SequenceSessionGate::new([
+        RemoteSessionStatus::Allowed,
+        RemoteSessionStatus::Rejected {
+            code: ClientSessionErrorCode::SessionLocked,
+            message: "Windows 会话已锁定，请先解锁后再启动远程会话。",
+        },
+    ]);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut locator,
+            &mut capture,
+            &started,
+            &session_gate,
+        )
+    });
+
+    read_message(&mut client).expect("session ready should decode");
+    expect_h264_frame(read_message(&mut client).expect("first frame should decode"));
+    assert_eq!(
+        read_message(&mut client).expect("session locked error should decode"),
+        ControlMessage::Error {
+            code: ErrorCode::SessionLocked,
+            message: "Windows 会话已锁定，请先解锁后再启动远程会话。".to_owned(),
+        }
+    );
+    assert_eq!(
+        read_message(&mut client).expect("goodbye should decode after lock"),
+        ControlMessage::Goodbye
+    );
+    let reason = host
+        .join()
+        .expect("host thread should finish")
+        .expect("locked desktop should end session cleanly");
+
+    assert_eq!(reason, HostSessionEndReason::SessionUnavailable);
 }
 
 fn expect_h264_frame(message: ControlMessage) -> wincast_protocol::message::EncodedVideoFrame {
@@ -500,6 +580,7 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
             &mut locator,
             &mut capture,
             &started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
 
@@ -514,7 +595,7 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("client read timeout should be set");
     let error_message = read_message(&mut client).expect("encoding failure should decode");
-    let raw_after_error = read_raw_bgra_frame(&mut client);
+    let next_after_error = read_message(&mut client);
     let error = host
         .join()
         .expect("host thread should finish")
@@ -527,10 +608,7 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
             message: "H.264 首帧编码失败: 视频尺寸 1921x720 超过上限 1920x1080".to_owned(),
         }
     );
-    assert!(
-        raw_after_error.is_err(),
-        "h264 failure path must not fall back to raw BGRA binary frames"
-    );
+    assert!(next_after_error.is_err());
     assert!(error.message.contains("H.264 首帧编码失败"));
 }
 
@@ -564,6 +642,7 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_later_capture_fra
             &mut locator,
             &mut capture,
             &started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
 
@@ -602,6 +681,31 @@ impl io::Write for FailingWriter {
     }
 }
 
+struct SequenceDesktopSessionDetector {
+    detections: Mutex<VecDeque<Result<DetectedDesktopSession, String>>>,
+}
+
+impl SequenceDesktopSessionDetector {
+    fn new(detections: impl IntoIterator<Item = Result<DetectedDesktopSession, String>>) -> Self {
+        Self {
+            detections: Mutex::new(detections.into_iter().collect()),
+        }
+    }
+}
+
+impl DesktopSessionDetector for SequenceDesktopSessionDetector {
+    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, String> {
+        self.detections
+            .lock()
+            .expect("desktop detector lock should not be poisoned")
+            .pop_front()
+            .unwrap_or(Ok(DetectedDesktopSession {
+                user_logged_in: true,
+                locked: false,
+            }))
+    }
+}
+
 #[test]
 fn host_cleans_program_after_stop_session_and_waits_for_next_client() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -626,8 +730,7 @@ fn host_cleans_program_after_stop_session_and_waits_for_next_client() {
 
     let mut first_client = connect_and_start_session(endpoint);
     read_message(&mut first_client).expect("session ready should read");
-    read_message(&mut first_client).expect("video ready should read");
-    read_raw_bgra_frame(&mut first_client).expect("first raw frame should read");
+    expect_h264_frame(read_message(&mut first_client).expect("first encoded frame should read"));
     write_message(&mut first_client, &ControlMessage::StopSession)
         .expect("stop session should write");
     assert_eq!(
@@ -641,78 +744,6 @@ fn host_cleans_program_after_stop_session_and_waits_for_next_client() {
     let (host_result, cleaned) = host.join().expect("host thread should finish");
     assert_eq!(host_result.expect("host should keep listening"), endpoint);
     assert_eq!(cleaned, vec![42, 43]);
-}
-
-#[test]
-fn host_sends_goodbye_when_capture_session_finishes() {
-    let mut writer = Vec::new();
-    let mut session = RecordingCaptureRuntime {
-        frames: VecDeque::from([None]),
-        attempts: Arc::new(AtomicUsize::new(0)),
-        block_after_empty: None,
-    };
-    let (_sender, receiver) = mpsc::channel();
-
-    let reason = write_raw_bgra_stream_with_input_events(
-        &mut writer,
-        &captured_bgra_frame(),
-        &mut session,
-        &receiver,
-    )
-    .expect("capture end should be reported as a clean session end");
-
-    assert_eq!(reason, HostSessionEndReason::CaptureInactive);
-
-    let mut reader = writer.as_slice();
-    assert_eq!(
-        read_message(&mut reader).expect("video ready should decode"),
-        ControlMessage::VideoReady
-    );
-    let frame = read_raw_bgra_frame(&mut reader).expect("first frame should decode");
-    assert_eq!(frame.sequence_number, 0);
-    assert_eq!(
-        read_message(&mut reader).expect("goodbye should decode"),
-        ControlMessage::Goodbye
-    );
-    assert!(
-        read_message(&mut reader).is_err(),
-        "capture finish should not send an error after goodbye"
-    );
-}
-
-#[test]
-fn host_reports_capture_error_before_returning_frame_read_failure() {
-    let mut writer = Vec::new();
-    let mut session = FrameReadFailingCaptureRuntime;
-    let (_sender, receiver) = mpsc::channel();
-
-    let error = write_raw_bgra_stream_with_input_events(
-        &mut writer,
-        &captured_bgra_frame(),
-        &mut session,
-        &receiver,
-    )
-    .expect_err("capture read failure should be returned to host");
-
-    assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
-    assert!(error.message.contains("读取后续 raw BGRA 捕获帧失败"));
-    assert!(error.message.contains("D3D readback failed"));
-
-    let mut reader = writer.as_slice();
-    assert_eq!(
-        read_message(&mut reader).expect("video ready should decode"),
-        ControlMessage::VideoReady
-    );
-    let frame = read_raw_bgra_frame(&mut reader).expect("first frame should decode");
-    assert_eq!(frame.sequence_number, 0);
-    assert_eq!(
-        read_message(&mut reader).expect("capture error should decode"),
-        ControlMessage::Error {
-            code: ErrorCode::CaptureFailed,
-            message: "读取后续 raw BGRA 捕获帧失败: 读取 Windows 捕获帧失败: D3D readback failed"
-                .to_string(),
-        }
-    );
 }
 
 #[test]

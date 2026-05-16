@@ -2,64 +2,10 @@ use wincast_media::{OpenH264Decoder, VideoDecoder};
 use wincast_protocol::{
     config::VideoCodec,
     frame::read_message,
-    message::{ControlMessage, EncodedVideoFrame, RawBgraReadbackFrame},
-    raw_frame::{
-        RawBgraFrame, RawBgraStreamItem as ProtocolRawBgraStreamItem,
-        read_raw_bgra_stream_item as read_protocol_raw_bgra_stream_item,
-    },
+    message::{ControlMessage, EncodedVideoFrame},
 };
 
-use crate::{errors::format_host_error, render_loop::ClientRenderMode};
-
-const RAW_BGRA_VALIDATION_FRAME_COUNT: usize = 1;
-
-pub(crate) fn read_first_raw_binary_frame(
-    stream: &mut std::net::TcpStream,
-    render_mode: ClientRenderMode,
-    width: u32,
-    height: u32,
-) -> Result<(), String> {
-    match render_mode {
-        ClientRenderMode::SdlWindow => {
-            crate::render_loop::read_first_raw_binary_frame_with_sdl_window(stream, width, height)
-        }
-        ClientRenderMode::ProtocolOnly => {
-            read_raw_bgra_frames(stream, RAW_BGRA_VALIDATION_FRAME_COUNT).map(|_| ())
-        }
-    }
-}
-
-pub(crate) fn read_raw_bgra_frames(
-    reader: &mut impl std::io::Read,
-    frame_count: usize,
-) -> Result<RawBgraReceiveSummary, String> {
-    if frame_count == 0 {
-        return Err("raw BGRA 视频帧接收数量不能为 0".to_owned());
-    }
-
-    let mut last_sequence_number = None;
-    let mut frames = 0;
-    for _ in 0..frame_count {
-        match read_raw_bgra_stream_item(reader).map_err(format_raw_bgra_stream_error)? {
-            RawBgraStreamItem::Frame(frame) => {
-                validate_raw_frame_sequence(&frame, &mut last_sequence_number)?;
-                frames += 1;
-            }
-            RawBgraStreamItem::Goodbye => {
-                break;
-            }
-        }
-    }
-
-    let Some(last_sequence_number) = last_sequence_number else {
-        return Err("未收到 raw BGRA 视频帧".to_owned());
-    };
-
-    Ok(RawBgraReceiveSummary {
-        frames,
-        last_sequence_number,
-    })
-}
+use crate::errors::format_host_error;
 
 pub(crate) fn read_h264_encoded_frames_from_first(
     reader: &mut impl std::io::Read,
@@ -111,7 +57,7 @@ pub(crate) fn read_h264_encoded_frames_with_sdl_window_from_first(
     width: u32,
     height: u32,
 ) -> Result<(), String> {
-    let mut renderer = wincast_render::SdlRawBgraRenderer::new(wincast_render::RenderConfig {
+    let mut renderer = wincast_render::SdlBgraPixelRenderer::new(wincast_render::RenderConfig {
         title: "WinCast Client".to_owned(),
         width,
         height,
@@ -136,7 +82,7 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
     control_stream: &mut (impl std::io::Read + std::io::Write),
     first_frame: EncodedVideoFrame,
     frame_limit: Option<usize>,
-    renderer: &mut impl wincast_render::RawBgraRenderer,
+    renderer: &mut impl wincast_render::BgraPixelRenderer,
 ) -> Result<EncodedVideoReceiveSummary, String> {
     let mut decoder = OpenH264Decoder::new()
         .map_err(|error| format!("初始化客户端 OpenH264 解码器失败: {error}"))?;
@@ -161,6 +107,8 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
             )
             .map_err(|error| format!("发送客户端输入事件失败: {error}"))?;
         }
+        wincast_protocol::frame::write_message(control_stream, &ControlMessage::Heartbeat)
+            .map_err(|error| format!("发送客户端心跳失败: {error}"))?;
         if render_loop.action == wincast_render::RenderLoopAction::Quit {
             let _ = wincast_protocol::frame::write_message(
                 control_stream,
@@ -196,66 +144,6 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
     })
 }
 
-pub(crate) fn validate_readback_frame(frame: &RawBgraReadbackFrame) -> Result<(), String> {
-    frame
-        .validate()
-        .map_err(|error| format!("宿主端首帧 BGRA readback 无效: {error:?}"))
-}
-
-fn validate_raw_binary_frame(frame: &RawBgraFrame) -> Result<(), String> {
-    frame
-        .validate()
-        .map_err(|error| format!("宿主端 raw BGRA 视频帧无效: {error}"))
-}
-
-#[cfg(any(test, target_os = "linux"))]
-pub(crate) fn render_raw_bgra_frame(
-    renderer: &mut impl wincast_render::RawBgraRenderer,
-    frame: &RawBgraFrame,
-    last_sequence_number: &mut Option<u64>,
-) -> Result<(), String> {
-    validate_raw_frame_sequence(frame, last_sequence_number)?;
-    renderer
-        .render_frame(frame)
-        .map_err(|error| format!("渲染宿主端 raw BGRA 视频帧失败: {error}"))
-}
-
-fn validate_raw_frame_sequence(
-    frame: &RawBgraFrame,
-    last_sequence_number: &mut Option<u64>,
-) -> Result<(), String> {
-    validate_raw_binary_frame(frame)?;
-    if let Some(previous) = *last_sequence_number
-        && frame.sequence_number < previous
-    {
-        return Err(format!(
-            "宿主端 raw BGRA 视频帧序号回退: 上一帧 {previous}，当前帧 {}",
-            frame.sequence_number
-        ));
-    }
-    *last_sequence_number = Some(frame.sequence_number);
-    Ok(())
-}
-
-pub(crate) fn read_raw_bgra_stream_item(
-    reader: &mut impl std::io::Read,
-) -> Result<RawBgraStreamItem, RawBgraStreamReadError> {
-    match read_protocol_raw_bgra_stream_item(reader)
-        .map_err(|error| RawBgraStreamReadError::Interrupted(error.to_string()))?
-    {
-        ProtocolRawBgraStreamItem::Frame(frame) => Ok(RawBgraStreamItem::Frame(frame)),
-        ProtocolRawBgraStreamItem::Control(ControlMessage::Error { code, message }) => Err(
-            RawBgraStreamReadError::Host(format_host_error(code, message)),
-        ),
-        ProtocolRawBgraStreamItem::Control(ControlMessage::Goodbye) => {
-            Ok(RawBgraStreamItem::Goodbye)
-        }
-        ProtocolRawBgraStreamItem::Control(message) => Err(RawBgraStreamReadError::InvalidControl(
-            format!("宿主端 raw BGRA 流中收到无效控制消息: {message:?}"),
-        )),
-    }
-}
-
 fn read_next_h264_encoded_stream_item(
     reader: &mut impl std::io::Read,
 ) -> Result<NextEncodedVideoStreamItem, EncodedVideoStreamReadError> {
@@ -273,21 +161,8 @@ fn read_next_h264_encoded_stream_item(
     }
 }
 
-pub(crate) fn format_raw_bgra_read_error(error: impl std::fmt::Display) -> String {
-    format!("视频流中断: 读取宿主端 raw BGRA 视频帧失败: {error}")
-}
-
 pub(crate) fn format_h264_encoded_read_error(error: impl std::fmt::Display) -> String {
     format!("视频流中断: 读取宿主端 H.264 编码视频帧失败: {error}")
-}
-
-pub(crate) fn format_raw_bgra_stream_error(error: RawBgraStreamReadError) -> String {
-    match error {
-        RawBgraStreamReadError::Host(message) | RawBgraStreamReadError::InvalidControl(message) => {
-            message
-        }
-        RawBgraStreamReadError::Interrupted(message) => format_raw_bgra_read_error(message),
-    }
 }
 
 fn format_h264_encoded_stream_error(error: EncodedVideoStreamReadError) -> String {
@@ -300,17 +175,6 @@ fn format_h264_encoded_stream_error(error: EncodedVideoStreamReadError) -> Strin
     }
 }
 
-pub(crate) enum RawBgraStreamReadError {
-    Host(String),
-    InvalidControl(String),
-    Interrupted(String),
-}
-
-pub(crate) enum RawBgraStreamItem {
-    Frame(RawBgraFrame),
-    Goodbye,
-}
-
 enum EncodedVideoStreamReadError {
     Host(String),
     InvalidControl(String),
@@ -320,19 +184,6 @@ enum EncodedVideoStreamReadError {
 enum NextEncodedVideoStreamItem {
     Frame(EncodedVideoFrame),
     Goodbye,
-}
-
-#[cfg(any(test, target_os = "linux"))]
-pub(crate) enum RawBgraStreamEvent {
-    Frame(RawBgraFrame),
-    Goodbye,
-    Failed(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RawBgraReceiveSummary {
-    pub(crate) frames: usize,
-    pub(crate) last_sequence_number: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,7 +268,7 @@ fn decode_h264_frame_boundary(
 #[cfg(any(test, target_os = "linux"))]
 fn render_h264_encoded_frame(
     decoder: &mut OpenH264Decoder,
-    renderer: &mut impl wincast_render::RawBgraRenderer,
+    renderer: &mut impl wincast_render::BgraPixelRenderer,
     frame: EncodedVideoFrame,
     last_sequence_number: &mut Option<u64>,
 ) -> Result<(), String> {
@@ -425,7 +276,7 @@ fn render_h264_encoded_frame(
     let decoded = decoder
         .decode(&frame)
         .map_err(|error| format!("宿主端 H.264 编码帧解码失败: {error}"))?;
-    let raw = RawBgraFrame {
+    let raw = wincast_render::BgraPixelFrame {
         width: decoded.width,
         height: decoded.height,
         row_pitch: decoded.row_pitch(),
@@ -447,99 +298,10 @@ mod tests {
     use wincast_protocol::{
         config::VideoCodec,
         frame::write_message,
-        message::{ControlMessage, EncodedVideoFrame, ErrorCode},
-        raw_frame::write_raw_bgra_frame,
+        message::{ControlMessage, EncodedVideoFrame},
     };
 
-    use crate::test_support::raw_binary_frame_with_sequence;
-
     use super::*;
-
-    #[test]
-    fn client_reads_multiple_raw_bgra_frames_after_video_ready() {
-        let mut bytes = Vec::new();
-        for sequence_number in 0..3 {
-            write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(sequence_number))
-                .expect("raw binary frame should encode");
-        }
-
-        let summary = read_raw_bgra_frames(&mut bytes.as_slice(), 3)
-            .expect("raw frame loop should accept three frames");
-
-        assert_eq!(
-            summary,
-            RawBgraReceiveSummary {
-                frames: 3,
-                last_sequence_number: 2,
-            }
-        );
-    }
-
-    #[test]
-    fn client_rejects_sequence_number_regression_in_raw_bgra_loop() {
-        let mut bytes = Vec::new();
-        write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(2))
-            .expect("first frame should encode");
-        write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(1))
-            .expect("second frame should encode");
-
-        let error = read_raw_bgra_frames(&mut bytes.as_slice(), 2)
-            .expect_err("sequence regression should fail");
-
-        assert!(error.contains("raw BGRA 视频帧序号回退"));
-    }
-
-    #[test]
-    fn client_reports_raw_bgra_eof_as_video_stream_interruption() {
-        let bytes = Vec::new();
-
-        let error = read_raw_bgra_frames(&mut bytes.as_slice(), 1)
-            .expect_err("eof should fail the raw BGRA frame loop");
-
-        assert!(error.contains("视频流中断"));
-    }
-
-    #[test]
-    fn client_reports_host_error_inside_raw_bgra_stream() {
-        let mut bytes = Vec::new();
-        write_message(
-            &mut bytes,
-            &ControlMessage::Error {
-                code: ErrorCode::CaptureFailed,
-                message: "读取后续 raw BGRA 捕获帧失败".to_owned(),
-            },
-        )
-        .expect("host error should encode");
-
-        let error = read_raw_bgra_frames(&mut bytes.as_slice(), 1)
-            .expect_err("host error should fail the raw BGRA frame loop");
-
-        assert!(error.contains("宿主端画面捕获失败"));
-        assert!(error.contains("读取后续 raw BGRA 捕获帧失败"));
-        assert!(
-            !error.contains("视频流中断"),
-            "host error should not be reported as raw stream interruption: {error}"
-        );
-    }
-
-    #[test]
-    fn client_treats_goodbye_inside_raw_bgra_stream_as_session_end() {
-        let mut bytes = Vec::new();
-        write_raw_bgra_frame(&mut bytes, &raw_binary_frame_with_sequence(7))
-            .expect("raw frame should encode");
-        write_message(&mut bytes, &ControlMessage::Goodbye).expect("goodbye should encode");
-
-        let summary = read_raw_bgra_frames(&mut bytes.as_slice(), 2)
-            .expect("goodbye should end the raw BGRA frame loop");
-
-        assert_eq!(
-            summary,
-            RawBgraReceiveSummary {
-                frames: 1,
-                last_sequence_number: 7,
-            }
-        );
-    }
 
     #[test]
     fn client_reads_and_decodes_multiple_h264_encoded_frames_until_limit() {
@@ -637,16 +399,30 @@ mod tests {
     }
 
     #[test]
-    fn client_rejects_non_h264_codec_inside_h264_stream_in_chinese() {
-        let mut frame = h264_frame(1, vec![0x33]);
-        frame.codec = VideoCodec::RawBgra;
+    fn client_sends_heartbeat_from_h264_render_loop_without_input() {
+        let frames = valid_h264_frames(2);
+        let mut bytes = Vec::new();
+        write_message(
+            &mut bytes,
+            &ControlMessage::EncodedVideoFrame(frames[1].clone()),
+        )
+        .expect("second encoded frame should encode");
+        let mut stream = DuplexTestStream::new(bytes);
+        let mut renderer = RecordingRenderer::default();
 
-        let error = read_h264_encoded_frames_from_first(&mut std::io::empty(), frame, 1)
-            .expect_err("invalid codec should fail H.264 helper");
+        read_h264_encoded_frames_with_renderer_from_first(
+            &mut stream,
+            frames[0].clone(),
+            Some(2),
+            &mut renderer,
+        )
+        .expect("H.264 renderer helper should decode and render two frames");
 
-        assert!(error.contains("宿主端编码帧 codec 无效"));
-        assert!(error.contains("RawBgra"));
-        assert!(!error.contains("raw BGRA 流"));
+        let mut written = stream.written.as_slice();
+        assert_eq!(
+            read_message(&mut written).expect("heartbeat should be sent"),
+            ControlMessage::Heartbeat
+        );
     }
 
     #[test]
@@ -774,26 +550,27 @@ mod tests {
         bytes
     }
 
+    #[derive(Default)]
     struct RecordingRenderer {
         rendered_sequences: Vec<u64>,
         rendered_dimensions: Vec<(u32, u32)>,
         poll_count: usize,
+        emit_input: bool,
     }
 
     impl RecordingRenderer {
         fn with_input_event() -> Self {
             Self {
-                rendered_sequences: Vec::new(),
-                rendered_dimensions: Vec::new(),
-                poll_count: 0,
+                emit_input: true,
+                ..Self::default()
             }
         }
     }
 
-    impl wincast_render::RawBgraRenderer for RecordingRenderer {
+    impl wincast_render::BgraPixelRenderer for RecordingRenderer {
         fn render_frame(
             &mut self,
-            frame: &RawBgraFrame,
+            frame: &wincast_render::BgraPixelFrame,
         ) -> Result<(), wincast_render::RenderError> {
             frame
                 .validate()
@@ -807,7 +584,7 @@ mod tests {
             &mut self,
         ) -> Result<wincast_render::RenderLoopResult, wincast_render::RenderError> {
             self.poll_count += 1;
-            let input_events = if self.poll_count == 1 {
+            let input_events = if self.emit_input && self.poll_count == 1 {
                 vec![wincast_protocol::input::InputEvent::MouseMoveDelta {
                     delta_x: 1,
                     delta_y: -1,

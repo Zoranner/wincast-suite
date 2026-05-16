@@ -14,6 +14,7 @@
 ## 已接入后端
 
 - OpenH264：当前默认软件 H.264 编解码后端。宿主端把 BGRA 捕获帧转为 YUV 后编码为 H.264，客户端解码后转回 BGRA 交给现有渲染器。该后端依赖 `openh264-sys2` 在构建时编译 C/C++ 源码，因此目标构建环境必须具备可用 C/C++ 工具链。
+- OpenH264 编码器当前使用 bitrate rate-control，并保留后端默认的 skip-frame 行为。OpenH264 在关闭 skip frame 时不能可靠控制 bitrate，会输出运行时 warning；当前策略优先保持码率上限语义，接受后端在压力场景下丢帧。
 
 ## 非默认候选
 

@@ -37,9 +37,7 @@ fn default_host_config_path() -> PathBuf {
     #[cfg(windows)]
     {
         if let Some(appdata) = env::var_os("APPDATA") {
-            return PathBuf::from(appdata)
-                .join("WinCast")
-                .join("wincast-host.toml");
+            return PathBuf::from(appdata).join("WinCast").join("host.toml");
         }
     }
 
@@ -59,7 +57,7 @@ fn xdg_host_config_path(
                 .join(".config")
         })
         .join("wincast")
-        .join("wincast-host.toml")
+        .join("host.toml")
 }
 
 fn run_host_with_runtime(
@@ -217,8 +215,6 @@ startup_timeout_ms = 15000
     }
 
     fn expected_host_config_under_home(home: &std::path::Path) -> PathBuf {
-        home.join(".config")
-            .join("wincast")
-            .join("wincast-host.toml")
+        home.join(".config").join("wincast").join("host.toml")
     }
 }

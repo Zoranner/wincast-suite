@@ -59,22 +59,6 @@ fn fake_h264_decoder_reuses_internal_output_buffer_for_same_size_frames() {
 }
 
 #[test]
-fn fake_h264_decoder_rejects_non_h264_frame() {
-    let mut decoder = FakeH264Decoder::new();
-    let encoded = EncodedVideoFrame {
-        codec: VideoCodec::RawBgra,
-        ..h264_frame(640, 360, 1, 2, vec![1])
-    };
-
-    assert!(matches!(
-        decoder.decode(&encoded),
-        Err(MediaError::UnsupportedEncodedCodec {
-            codec: VideoCodec::RawBgra
-        })
-    ));
-}
-
-#[test]
 fn fake_h264_decoder_rejects_empty_payload() {
     let mut decoder = FakeH264Decoder::new();
     let encoded = h264_frame(640, 360, 1, 2, Vec::new());

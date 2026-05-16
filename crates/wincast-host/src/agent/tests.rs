@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     net::{SocketAddr, TcpStream},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
@@ -22,8 +22,7 @@ use wincast_protocol::{
     frame::{read_message, write_message},
     handshake::send_client_hello,
     input::InputEvent,
-    message::{ControlMessage, ErrorCode},
-    raw_frame::{RawBgraFrame, read_raw_bgra_frame},
+    message::{ControlMessage, EncodedVideoFrame, ErrorCode},
 };
 
 #[derive(Default)]
@@ -135,8 +134,30 @@ impl CaptureStarter for RecordingCaptureStarter {
 pub(super) struct FixedSessionGate(pub(super) RemoteSessionStatus);
 
 impl SessionGate for FixedSessionGate {
-    fn remote_session_status(&mut self) -> RemoteSessionStatus {
+    fn remote_session_status(&self) -> RemoteSessionStatus {
         self.0
+    }
+}
+
+pub(super) struct SequenceSessionGate {
+    statuses: Mutex<VecDeque<RemoteSessionStatus>>,
+}
+
+impl SequenceSessionGate {
+    pub(super) fn new(statuses: impl IntoIterator<Item = RemoteSessionStatus>) -> Self {
+        Self {
+            statuses: Mutex::new(statuses.into_iter().collect()),
+        }
+    }
+}
+
+impl SessionGate for SequenceSessionGate {
+    fn remote_session_status(&self) -> RemoteSessionStatus {
+        self.statuses
+            .lock()
+            .expect("sequence gate lock should not be poisoned")
+            .pop_front()
+            .unwrap_or(RemoteSessionStatus::Allowed)
     }
 }
 
@@ -201,20 +222,6 @@ impl Drop for BlockingFrameGate {
     }
 }
 
-pub(super) struct FrameReadFailingCaptureRuntime;
-
-impl CaptureRuntime for FrameReadFailingCaptureRuntime {
-    fn is_active(&self) -> bool {
-        true
-    }
-
-    fn try_next_bgra_frame(&mut self) -> Result<Option<CapturedBgraFrame>, CaptureError> {
-        Err(CaptureError::windows_frame_read_failed(
-            "D3D readback failed",
-        ))
-    }
-}
-
 pub(super) struct FailingCaptureStarter;
 
 impl CaptureStarter for FailingCaptureStarter {
@@ -254,7 +261,7 @@ impl InputEventSink for RecordingInputEventSink {
 }
 
 pub(super) fn host_config(listen: String) -> HostConfig {
-    host_config_with_codec(listen, VideoCodec::RawBgra)
+    host_config_with_codec(listen, VideoCodec::H264)
 }
 
 pub(super) fn host_config_with_codec(listen: String, codec: VideoCodec) -> HostConfig {
@@ -366,17 +373,27 @@ pub(super) fn connect_and_start_session(endpoint: SocketAddr) -> TcpStream {
     client
 }
 
-pub(super) fn run_short_client_session(endpoint: SocketAddr) -> RawBgraFrame {
+pub(super) fn run_short_client_session(endpoint: SocketAddr) -> EncodedVideoFrame {
     let mut client = connect_and_start_session_when_ready(endpoint);
     read_message(&mut client).expect("session ready should read");
-    read_message(&mut client).expect("video ready should read");
-    let frame = read_raw_bgra_frame(&mut client).expect("raw frame should read");
+    let frame = expect_h264_frame(read_message(&mut client).expect("encoded frame should read"));
     write_message(&mut client, &ControlMessage::StopSession).expect("stop session should write");
     assert_eq!(
         read_message(&mut client).expect("goodbye should read after stop"),
         ControlMessage::Goodbye
     );
     frame
+}
+
+pub(super) fn expect_h264_frame(message: ControlMessage) -> EncodedVideoFrame {
+    let ControlMessage::EncodedVideoFrame(encoded) = message else {
+        panic!("expected encoded video frame, got {message:?}");
+    };
+    encoded
+        .validate()
+        .expect("encoded frame should satisfy protocol boundary");
+    assert_eq!(encoded.codec, VideoCodec::H264);
+    encoded
 }
 
 pub(super) fn connect_and_start_session_when_ready(endpoint: SocketAddr) -> TcpStream {

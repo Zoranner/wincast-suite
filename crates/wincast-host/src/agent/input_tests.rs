@@ -1,9 +1,9 @@
 use std::{
     collections::VecDeque,
+    io,
     net::{TcpListener, TcpStream},
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc,
     },
 };
@@ -11,16 +11,19 @@ use std::{
 use crate::agent::{
     stream::{
         HostSessionEndReason, InputReaderEvent, read_input_events_until_stop,
-        spawn_input_event_reader, write_raw_bgra_stream_with_input_events,
+        read_input_events_until_stop_with_timeout_limit, spawn_input_event_reader,
+        write_h264_encoded_stream_with_input_events,
     },
     tests::*,
 };
+use crate::session_state::RemoteSessionStatus;
 use wincast_input::CaptureInputBounds;
+use wincast_media::{VideoLatencyMode, VideoPipelineConfig};
 use wincast_protocol::{
+    config::VideoCodec,
     frame::{read_message, write_message},
     input::{ButtonState, InputEvent, Modifiers},
     message::ControlMessage,
-    raw_frame::read_raw_bgra_frame,
 };
 
 #[test]
@@ -63,18 +66,29 @@ fn input_reader_handles_client_input_events_until_stop_session() {
 }
 
 #[test]
-fn input_reader_rejects_non_input_messages() {
+fn input_reader_accepts_heartbeat_without_ending_session() {
     let mut bytes = Vec::new();
     write_message(&mut bytes, &ControlMessage::Heartbeat).expect("heartbeat should encode");
+    write_message(&mut bytes, &ControlMessage::StopSession).expect("stop should encode");
     let mut sink = RecordingInputEventSink::default();
 
     let stop_requested = AtomicBool::new(false);
     let event = read_input_events_until_stop(&mut bytes.as_slice(), &mut sink, &stop_requested);
 
-    assert_eq!(
-        event,
-        InputReaderEvent::Failed("客户端输入事件消息无效: Heartbeat".to_owned())
-    );
+    assert_eq!(event, InputReaderEvent::StopSession);
+    assert!(sink.events.is_empty());
+}
+
+#[test]
+fn input_reader_reports_disconnected_after_repeated_heartbeat_timeouts() {
+    let mut reader = TimeoutReader;
+    let mut sink = RecordingInputEventSink::default();
+    let stop_requested = AtomicBool::new(false);
+
+    let event =
+        read_input_events_until_stop_with_timeout_limit(&mut reader, &mut sink, &stop_requested, 3);
+
+    assert_eq!(event, InputReaderEvent::Disconnected);
     assert!(sink.events.is_empty());
 }
 
@@ -103,6 +117,17 @@ fn input_reader_reports_stop_session_after_input_events() {
             delta_y: 1,
         }]
     );
+}
+
+struct TimeoutReader;
+
+impl io::Read for TimeoutReader {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "simulated heartbeat timeout",
+        ))
+    }
 }
 
 #[test]
@@ -137,11 +162,11 @@ fn spawned_input_reader_owner_joins_after_stop_session() {
 }
 
 #[test]
-fn raw_bgra_stream_stops_cleanly_when_input_reader_stops() {
+fn h264_stream_stops_cleanly_when_input_reader_stops() {
     let mut writer = Vec::new();
     let mut session = RecordingCaptureRuntime {
         frames: VecDeque::from([Some(captured_bgra_frame_with_sequence(1))]),
-        attempts: Arc::new(AtomicUsize::new(0)),
+        attempts: Default::default(),
         block_after_empty: None,
     };
     let (sender, receiver) = mpsc::channel();
@@ -149,22 +174,28 @@ fn raw_bgra_stream_stops_cleanly_when_input_reader_stops() {
         .send(InputReaderEvent::StopSession)
         .expect("input stop should send");
 
-    let reason = write_raw_bgra_stream_with_input_events(
+    let reason = write_h264_encoded_stream_with_input_events(
         &mut writer,
         &captured_bgra_frame(),
         &mut session,
         &receiver,
+        VideoPipelineConfig {
+            codec: VideoCodec::H264,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+            max_bitrate_kbps: 6000,
+            latency_mode: VideoLatencyMode::LowLatency,
+        },
+        &FixedSessionGate(RemoteSessionStatus::Allowed),
     )
-    .expect("stop session should end raw stream without error");
+    .expect("stop session should end H.264 stream without error");
 
     assert_eq!(reason, HostSessionEndReason::StopSession);
 
     let mut reader = writer.as_slice();
-    assert_eq!(
-        read_message(&mut reader).expect("video ready should decode"),
-        ControlMessage::VideoReady
-    );
-    let frame = read_raw_bgra_frame(&mut reader).expect("first frame should decode");
+    let frame = expect_h264_frame(read_message(&mut reader).expect("first frame should decode"));
     assert_eq!(frame.sequence_number, 0);
     assert_eq!(session.attempts.load(Ordering::SeqCst), 0);
 }

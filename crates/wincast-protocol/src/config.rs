@@ -95,8 +95,6 @@ impl VideoConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoCodec {
-    #[serde(rename = "raw_bgra", skip_deserializing)]
-    RawBgra,
     #[serde(rename = "h264")]
     H264,
 }

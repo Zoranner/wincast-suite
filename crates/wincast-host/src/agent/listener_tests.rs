@@ -8,7 +8,8 @@ use std::{
 use crate::{
     agent::{
         listener::{
-            run_control_listener_n_with_runtime, run_control_listener_once_with_runtime,
+            log_session_result, run_control_listener_n_with_runtime,
+            run_control_listener_once_with_runtime,
             run_control_listener_once_with_runtime_and_session_gate,
         },
         tests::*,
@@ -20,11 +21,10 @@ use wincast_protocol::{
     frame::{read_message, write_message},
     handshake::send_client_hello,
     message::{ControlMessage, ErrorCode},
-    raw_frame::read_raw_bgra_frame,
 };
 
 #[test]
-fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_raw_bgra() {
+fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_h264() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = listener
         .local_addr()
@@ -59,15 +59,9 @@ fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_
             height: 720,
         }
     );
-    assert_eq!(
-        read_message(&mut client).expect("video ready should read"),
-        ControlMessage::VideoReady
-    );
-    let frame = read_raw_bgra_frame(&mut client).expect("raw binary frame should read");
+    let frame = expect_h264_frame(read_message(&mut client).expect("encoded frame should read"));
     assert_eq!(frame.width, 1280);
     assert_eq!(frame.height, 720);
-    assert_eq!(frame.row_pitch, 5120);
-    assert_eq!(frame.bytes.len(), 5120 * 720);
 
     let (host_result, launched, lookups, capture_targets) =
         host.join().expect("host thread should finish");
@@ -160,8 +154,7 @@ fn host_rejects_second_client_while_session_active() {
 
     let mut first_client = connect_and_start_session(endpoint);
     read_message(&mut first_client).expect("first session ready should read");
-    read_message(&mut first_client).expect("first video ready should read");
-    read_raw_bgra_frame(&mut first_client).expect("first raw frame should read");
+    expect_h264_frame(read_message(&mut first_client).expect("first encoded frame should read"));
     block.wait_until_blocked();
 
     let mut second_client = TcpStream::connect(endpoint).expect("second client should connect");
@@ -286,6 +279,20 @@ fn host_keeps_listening_after_session_thread_panics() {
     assert_eq!(host_result.expect("host should finish cleanly"), endpoint);
     assert_eq!(launch_attempts, 2);
     assert_eq!(cleaned, vec![42]);
+}
+
+#[test]
+fn session_join_panic_is_reported_without_panicking_listener_boundary() {
+    let result = log_session_result::<
+        RecordingProgramRunner,
+        RecordingWindowLocator,
+        RecordingCaptureStarter,
+    >(Err(Box::new("simulated join panic")));
+
+    let Err(error) = result else {
+        panic!("join panic should be reported as listener error");
+    };
+    assert!(error.contains("客户端会话线程异常结束"));
 }
 
 #[derive(Default)]
