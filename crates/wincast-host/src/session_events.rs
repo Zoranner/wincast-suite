@@ -1,6 +1,7 @@
 use crate::session_state::{
     HostDesktopEvent, SessionEvent, SessionStateMachine, SharedSessionState,
 };
+use std::{error::Error, fmt};
 
 #[cfg(windows)]
 use windows_sys::Win32::{
@@ -18,8 +19,61 @@ pub struct DetectedDesktopSession {
     pub locked: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopSessionError {
+    UnsupportedPlatform,
+    QuerySessionInfoFailed { session_id: u32 },
+    InvalidSessionInfoBuffer,
+    InvalidSessionInfoLevel { level: u32 },
+}
+
+impl fmt::Display for DesktopSessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedPlatform => {
+                formatter.write_str("运行时桌面状态探测只支持 Windows 平台")
+            }
+            Self::QuerySessionInfoFailed { session_id } => {
+                write!(
+                    formatter,
+                    "查询 Windows 会话扩展状态失败，session_id={session_id}"
+                )
+            }
+            Self::InvalidSessionInfoBuffer => {
+                formatter.write_str("Windows 会话扩展状态返回数据无效")
+            }
+            Self::InvalidSessionInfoLevel { level } => {
+                write!(formatter, "Windows 会话扩展状态层级无效: {level}")
+            }
+        }
+    }
+}
+
+impl Error for DesktopSessionError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEventError {
+    NotificationUnsupportedPlatform,
+    RegisterNotificationFailed,
+    UnregisterNotificationFailed,
+}
+
+impl fmt::Display for SessionEventError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotificationUnsupportedPlatform => {
+                formatter.write_str("Windows 会话通知只支持 Windows 平台")
+            }
+            Self::RegisterNotificationFailed => formatter.write_str("注册 Windows 会话通知失败"),
+            Self::UnregisterNotificationFailed => formatter.write_str("注销 Windows 会话通知失败"),
+        }
+    }
+}
+
+impl Error for SessionEventError {}
+
 pub trait DesktopSessionDetector {
-    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, String>;
+    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, DesktopSessionError>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -27,17 +81,17 @@ pub struct PlatformDesktopSessionDetector;
 
 impl DesktopSessionDetector for PlatformDesktopSessionDetector {
     #[cfg(windows)]
-    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, String> {
+    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, DesktopSessionError> {
         detect_windows_desktop_session()
     }
 
     #[cfg(not(windows))]
-    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, String> {
-        Err("运行时桌面状态探测只支持 Windows 平台".to_owned())
+    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, DesktopSessionError> {
+        Err(DesktopSessionError::UnsupportedPlatform)
     }
 }
 
-pub fn detect_desktop_session() -> Result<DetectedDesktopSession, String> {
+pub fn detect_desktop_session() -> Result<DetectedDesktopSession, DesktopSessionError> {
     PlatformDesktopSessionDetector.detect_desktop_session()
 }
 
@@ -107,7 +161,9 @@ pub struct SessionNotificationRegistration {
 }
 
 impl SessionNotificationRegistration {
-    pub fn register_session_notifications(hwnd: SessionNotificationWindow) -> Result<Self, String> {
+    pub fn register_session_notifications(
+        hwnd: SessionNotificationWindow,
+    ) -> Result<Self, SessionEventError> {
         Ok(Self {
             inner: SessionNotificationRegistrationInner::register_with_api(
                 hwnd,
@@ -116,19 +172,19 @@ impl SessionNotificationRegistration {
         })
     }
 
-    pub fn unregister(&mut self) -> Result<bool, String> {
+    pub fn unregister(&mut self) -> Result<bool, SessionEventError> {
         self.inner.unregister()
     }
 }
 
 pub fn register_session_notifications(
     hwnd: SessionNotificationWindow,
-) -> Result<SessionNotificationRegistration, String> {
+) -> Result<SessionNotificationRegistration, SessionEventError> {
     SessionNotificationRegistration::register_session_notifications(hwnd)
 }
 
 #[cfg(windows)]
-fn detect_windows_desktop_session() -> Result<DetectedDesktopSession, String> {
+fn detect_windows_desktop_session() -> Result<DetectedDesktopSession, DesktopSessionError> {
     // SAFETY: WTSGetActiveConsoleSessionId takes no pointers and has no Rust-side lifetime
     // requirements. The sentinel u32::MAX is handled as "no active console session".
     let session_id = unsafe { WTSGetActiveConsoleSessionId() };
@@ -143,7 +199,7 @@ fn detect_windows_desktop_session() -> Result<DetectedDesktopSession, String> {
 }
 
 #[cfg(windows)]
-fn query_session_info_ex(session_id: u32) -> Result<DetectedDesktopSession, String> {
+fn query_session_info_ex(session_id: u32) -> Result<DetectedDesktopSession, DesktopSessionError> {
     let mut buffer = std::ptr::null_mut();
     let mut bytes_returned = 0_u32;
     // SAFETY: buffer and bytes_returned are valid out-parameters. WTS returns an allocated buffer
@@ -159,9 +215,7 @@ fn query_session_info_ex(session_id: u32) -> Result<DetectedDesktopSession, Stri
     };
 
     if result == 0 {
-        return Err(format!(
-            "查询 Windows 会话扩展状态失败，session_id={session_id}"
-        ));
+        return Err(DesktopSessionError::QuerySessionInfoFailed { session_id });
     }
 
     let detected = read_session_info_ex_buffer(buffer, bytes_returned);
@@ -177,16 +231,16 @@ fn query_session_info_ex(session_id: u32) -> Result<DetectedDesktopSession, Stri
 fn read_session_info_ex_buffer(
     buffer: windows_sys::core::PWSTR,
     bytes_returned: u32,
-) -> Result<DetectedDesktopSession, String> {
+) -> Result<DetectedDesktopSession, DesktopSessionError> {
     if buffer.is_null() || bytes_returned < std::mem::size_of::<WTSINFOEXW>() as u32 {
-        return Err("Windows 会话扩展状态返回数据无效".to_owned());
+        return Err(DesktopSessionError::InvalidSessionInfoBuffer);
     }
 
     // SAFETY: buffer is non-null and bytes_returned proves it contains at least one WTSINFOEXW.
     // The value is copied before the WTS buffer is freed by the caller.
     let info = unsafe { *(buffer.cast::<WTSINFOEXW>()) };
     if info.Level != 1 {
-        return Err(format!("Windows 会话扩展状态层级无效: {}", info.Level));
+        return Err(DesktopSessionError::InvalidSessionInfoLevel { level: info.Level });
     }
 
     // SAFETY: info.Level == 1 selects the WTSInfoExLevel1 union field according to the WTS API.
@@ -233,7 +287,10 @@ impl<A> SessionNotificationRegistrationInner<A>
 where
     A: SessionNotificationApi,
 {
-    fn register_with_api(hwnd: SessionNotificationWindow, api: A) -> Result<Self, String> {
+    fn register_with_api(
+        hwnd: SessionNotificationWindow,
+        api: A,
+    ) -> Result<Self, SessionEventError> {
         api.register(hwnd)?;
         Ok(Self {
             hwnd,
@@ -242,7 +299,7 @@ where
         })
     }
 
-    pub fn unregister(&mut self) -> Result<bool, String> {
+    pub fn unregister(&mut self) -> Result<bool, SessionEventError> {
         if !self.registered {
             return Ok(false);
         }
@@ -271,9 +328,9 @@ pub type SessionNotificationWindow = HWND;
 pub type SessionNotificationWindow = isize;
 
 trait SessionNotificationApi {
-    fn register(&self, hwnd: SessionNotificationWindow) -> Result<(), String>;
+    fn register(&self, hwnd: SessionNotificationWindow) -> Result<(), SessionEventError>;
 
-    fn unregister(&self, hwnd: SessionNotificationWindow) -> Result<(), String>;
+    fn unregister(&self, hwnd: SessionNotificationWindow) -> Result<(), SessionEventError>;
 }
 
 #[derive(Clone, Copy)]
@@ -281,23 +338,23 @@ struct PlatformSessionNotificationApi;
 
 #[cfg(windows)]
 impl SessionNotificationApi for PlatformSessionNotificationApi {
-    fn register(&self, hwnd: SessionNotificationWindow) -> Result<(), String> {
+    fn register(&self, hwnd: SessionNotificationWindow) -> Result<(), SessionEventError> {
         // SAFETY: hwnd is supplied by the host window/message-loop owner. The API only registers
         // notification delivery for that window; a zero return is reported as failure.
         let result = unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) };
         if result == 0 {
-            Err("注册 Windows 会话通知失败".to_owned())
+            Err(SessionEventError::RegisterNotificationFailed)
         } else {
             Ok(())
         }
     }
 
-    fn unregister(&self, hwnd: SessionNotificationWindow) -> Result<(), String> {
+    fn unregister(&self, hwnd: SessionNotificationWindow) -> Result<(), SessionEventError> {
         // SAFETY: hwnd is the same handle previously registered by this owner. If Windows rejects
         // it or it is already invalid, the zero return is reported to the caller.
         let result = unsafe { WTSUnRegisterSessionNotification(hwnd) };
         if result == 0 {
-            Err("注销 Windows 会话通知失败".to_owned())
+            Err(SessionEventError::UnregisterNotificationFailed)
         } else {
             Ok(())
         }
@@ -306,12 +363,12 @@ impl SessionNotificationApi for PlatformSessionNotificationApi {
 
 #[cfg(not(windows))]
 impl SessionNotificationApi for PlatformSessionNotificationApi {
-    fn register(&self, _hwnd: SessionNotificationWindow) -> Result<(), String> {
-        Err("Windows 会话通知只支持 Windows 平台".to_owned())
+    fn register(&self, _hwnd: SessionNotificationWindow) -> Result<(), SessionEventError> {
+        Err(SessionEventError::NotificationUnsupportedPlatform)
     }
 
-    fn unregister(&self, _hwnd: SessionNotificationWindow) -> Result<(), String> {
-        Err("Windows 会话通知只支持 Windows 平台".to_owned())
+    fn unregister(&self, _hwnd: SessionNotificationWindow) -> Result<(), SessionEventError> {
+        Err(SessionEventError::NotificationUnsupportedPlatform)
     }
 }
 
@@ -384,6 +441,25 @@ mod tests {
     #[test]
     fn ignores_unrelated_session_change() {
         assert_eq!(WindowsSessionChange::Other(0).to_host_desktop_event(), None);
+    }
+
+    #[test]
+    fn desktop_session_detection_error_is_classified_and_keeps_chinese_message() {
+        let error = DesktopSessionError::UnsupportedPlatform;
+
+        assert!(matches!(error, DesktopSessionError::UnsupportedPlatform));
+        assert_eq!(error.to_string(), "运行时桌面状态探测只支持 Windows 平台");
+    }
+
+    #[test]
+    fn session_notification_error_is_classified_and_keeps_chinese_message() {
+        let error = SessionEventError::NotificationUnsupportedPlatform;
+
+        assert!(matches!(
+            error,
+            SessionEventError::NotificationUnsupportedPlatform
+        ));
+        assert_eq!(error.to_string(), "Windows 会话通知只支持 Windows 平台");
     }
 
     #[test]
@@ -573,12 +649,12 @@ mod tests {
     }
 
     impl SessionNotificationApi for RecordingSessionNotificationApi {
-        fn register(&self, hwnd: SessionNotificationWindow) -> Result<(), String> {
+        fn register(&self, hwnd: SessionNotificationWindow) -> Result<(), SessionEventError> {
             self.calls.borrow_mut().registered.push(hwnd);
             Ok(())
         }
 
-        fn unregister(&self, hwnd: SessionNotificationWindow) -> Result<(), String> {
+        fn unregister(&self, hwnd: SessionNotificationWindow) -> Result<(), SessionEventError> {
             self.calls.borrow_mut().unregistered.push(hwnd);
             Ok(())
         }

@@ -16,7 +16,7 @@ use crate::agent::{
     stream::{HostSessionEndReason, write_session_goodbye},
     tests::*,
 };
-use crate::session_events::{DesktopSessionDetector, DetectedDesktopSession};
+use crate::session_events::{DesktopSessionDetector, DesktopSessionError, DetectedDesktopSession};
 use crate::session_state::{
     ClientSessionErrorCode, RemoteSessionStatus, SessionEvent, SharedSessionState,
 };
@@ -65,7 +65,7 @@ fn shared_session_gate_reports_no_user_locked_and_agent_unavailable() {
 #[test]
 fn foreground_detection_failure_is_conservative_rejection_by_default() {
     let state = crate::agent::session::foreground_run_session_state_from_detection(Err(
-        "probe failed".into(),
+        DesktopSessionError::UnsupportedPlatform,
     ));
 
     assert_eq!(
@@ -81,7 +81,7 @@ fn foreground_detection_failure_is_conservative_rejection_by_default() {
 fn explicit_development_fallback_keeps_detection_failure_allowed() {
     let state =
         crate::agent::session::foreground_run_session_state_from_detection_with_failure_policy(
-            Err("probe failed".into()),
+            Err(DesktopSessionError::UnsupportedPlatform),
             true,
         );
 
@@ -682,11 +682,13 @@ impl io::Write for FailingWriter {
 }
 
 struct SequenceDesktopSessionDetector {
-    detections: Mutex<VecDeque<Result<DetectedDesktopSession, String>>>,
+    detections: Mutex<VecDeque<Result<DetectedDesktopSession, DesktopSessionError>>>,
 }
 
 impl SequenceDesktopSessionDetector {
-    fn new(detections: impl IntoIterator<Item = Result<DetectedDesktopSession, String>>) -> Self {
+    fn new(
+        detections: impl IntoIterator<Item = Result<DetectedDesktopSession, DesktopSessionError>>,
+    ) -> Self {
         Self {
             detections: Mutex::new(detections.into_iter().collect()),
         }
@@ -694,7 +696,7 @@ impl SequenceDesktopSessionDetector {
 }
 
 impl DesktopSessionDetector for SequenceDesktopSessionDetector {
-    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, String> {
+    fn detect_desktop_session(&self) -> Result<DetectedDesktopSession, DesktopSessionError> {
         self.detections
             .lock()
             .expect("desktop detector lock should not be poisoned")

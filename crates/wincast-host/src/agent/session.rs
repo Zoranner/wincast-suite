@@ -3,8 +3,8 @@ use std::net::TcpStream;
 use crate::{
     program::{ProgramRunner, StartedProgram},
     session_events::{
-        DesktopSessionDetector, DetectedDesktopSession, PlatformDesktopSessionDetector,
-        detect_desktop_session,
+        DesktopSessionDetector, DesktopSessionError, DetectedDesktopSession,
+        PlatformDesktopSessionDetector, detect_desktop_session,
     },
     session_state::{RemoteSessionStatus, SessionEvent, SharedSessionState},
 };
@@ -167,13 +167,13 @@ fn foreground_run_session_state() -> SharedSessionState {
 
 #[cfg(test)]
 pub(super) fn foreground_run_session_state_from_detection(
-    detected: Result<DetectedDesktopSession, String>,
+    detected: Result<DetectedDesktopSession, DesktopSessionError>,
 ) -> SharedSessionState {
     foreground_run_session_state_from_detection_with_failure_policy(detected, false)
 }
 
 pub(super) fn foreground_run_session_state_from_detection_with_failure_policy(
-    detected: Result<DetectedDesktopSession, String>,
+    detected: Result<DetectedDesktopSession, DesktopSessionError>,
     fallback_to_development: bool,
 ) -> SharedSessionState {
     let state = detected
