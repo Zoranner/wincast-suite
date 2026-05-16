@@ -62,22 +62,15 @@ OpenH264 后端会在构建时编译 C/C++ 源码，因此 Linux 目标机除 SD
 
 稳定版真机烟测流程见 [稳定版真机烟测清单](smoke-test.md)。
 
-Host 与 Client 默认从用户配置目录读取配置。Windows host 默认读取 `%APPDATA%\WinCast\wincast-host.toml`；Linux client 默认读取 `${XDG_CONFIG_HOME:-$HOME/.config}/wincast/wincast-client.toml`。`XDG_CONFIG_HOME` 必须是非空绝对路径；未设置、为空或为相对路径时回退到 `$HOME/.config`。
+Host 与 Client 默认从用户配置目录读取配置。Windows host 默认读取 `%APPDATA%\WinCast\wincast-host.toml`；Linux client 默认读取 `${XDG_CONFIG_HOME:-$HOME/.config}/wincast/wincast-client.toml`。`XDG_CONFIG_HOME` 必须是非空绝对路径；未设置、为空或为相对路径时回退到 `$HOME/.config`。两端没有面向用户的运行子命令，执行可执行程序即启动。
 
 仓库内 `examples/` 目录提供稳定版烟测示例配置。调整示例后至少执行以下校验，确保示例仍可被配置模型解析：
 
 ```powershell
 cargo test -p wincast-protocol --test config parses_stable
-cargo run -p wincast-client -- --config examples/wincast-client.toml validate
 ```
 
-客户端 `run` 支持启动连接阶段的有限重试，便于宿主端前台进程刚启动或端口短暂不可用时验证连接恢复：
-
-```powershell
-cargo run -p wincast-client -- run --retries 3 --retry-delay-ms 1000
-```
-
-该重试只覆盖初始连接，不等同于会话中断后的自动恢复，也不代表锁屏恢复编排已经完成。
+客户端内置启动连接阶段的有限重试，便于宿主端刚启动或端口短暂不可用时验证连接恢复。该重试只覆盖初始连接，不等同于会话中断后的自动恢复，也不代表锁屏恢复编排已经完成。
 
 宿主端和客户端仍使用长度前缀 JSON frame 承载控制消息，可用协议包测试验证：
 
@@ -85,4 +78,4 @@ cargo run -p wincast-client -- run --retries 3 --retry-delay-ms 1000
 cargo test -p wincast-protocol ipc
 ```
 
-Host 当前没有独立命令行子命令和 Windows Service 管理入口；运行 `wincast-host` 就读取默认配置并进入监听。重连、心跳超时和锁屏恢复仍未完成。
+Host 和 Client 当前都没有独立命令行子命令；运行 `wincast-host` 就读取默认配置并进入监听，运行 `wincast-client` 就读取默认配置并连接宿主端。重连、心跳超时和锁屏恢复仍未完成。

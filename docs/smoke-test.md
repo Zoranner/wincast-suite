@@ -34,9 +34,8 @@ Linux client 指向 Windows host，重点核对以下字段：
 ## 执行步骤
 
 - 在 Windows host 上执行 `wincast-host`，确认控制通道进入持续监听。
-- 在 Linux client 上执行 `wincast-client validate`，确认目标地址正确。
-- 在 Linux client 上执行 `wincast-client run --retries 3 --retry-delay-ms 1000`，确认能建立连接并打开 SDL2 窗口。
-- `--retries` 只覆盖初始连接阶段，不覆盖会话建立后的链路中断自动恢复；中断后需要重新启动客户端或按现场流程重新连接。
+- 在 Linux client 上执行 `wincast-client`，确认能建立连接并打开 SDL2 窗口。
+- 客户端内置启动连接重试，只覆盖初始连接阶段，不覆盖会话建立后的链路中断自动恢复；中断后需要重新启动客户端或按现场流程重新连接。
 - 观察客户端窗口，确认能看到 Windows 目标应用窗口画面，且窗口移动或目标应用内容变化后客户端画面随之更新。
 - 在客户端窗口内移动鼠标、点击、滚轮滚动，并在目标应用可输入区域敲入普通字符，确认 Windows 目标应用收到鼠标和键盘输入。
 - 关闭 Linux 客户端 SDL2 窗口，确认客户端退出时发送 `StopSession`，Windows host 结束当前会话并清理捕获/输入链路。

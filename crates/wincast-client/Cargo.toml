@@ -6,7 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-clap.workspace = true
 wincast-protocol.workspace = true
 wincast-media.workspace = true
 wincast-render.workspace = true
