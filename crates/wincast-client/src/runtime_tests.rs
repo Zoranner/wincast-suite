@@ -1,5 +1,10 @@
 use std::{net::TcpListener, sync::mpsc, thread, time::Duration};
 
+use wincast_media::{
+    OpenH264Encoder, RawPixelFormat, RawVideoFrame, VideoEncoder, VideoLatencyMode,
+    VideoPipelineConfig,
+};
+use wincast_protocol::config::VideoCodec;
 use wincast_protocol::{
     config::ClientConfig,
     frame::{read_message, write_message},
@@ -213,7 +218,7 @@ fn client_rejects_invalid_message_after_video_ready() {
 }
 
 #[test]
-fn client_accepts_encoded_video_frame_after_fake_h264_decode_without_reading_raw_bgra_stream() {
+fn client_accepts_encoded_video_frame_after_openh264_decode_without_reading_raw_bgra_stream() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = listener
         .local_addr()
@@ -232,45 +237,10 @@ fn client_accepts_encoded_video_frame_after_fake_h264_decode_without_reading_raw
             },
         )
         .expect("session ready should encode");
-        write_message(
-            &mut stream,
-            &ControlMessage::EncodedVideoFrame(EncodedVideoFrame {
-                codec: wincast_protocol::config::VideoCodec::H264,
-                width: 2,
-                height: 2,
-                sequence_number: 1,
-                timestamp_ns: 1_000,
-                keyframe: true,
-                bytes: vec![0x00, 0x00, 0x00, 0x01, 0x67],
-            }),
-        )
-        .expect("encoded frame should encode");
-        write_message(
-            &mut stream,
-            &ControlMessage::EncodedVideoFrame(EncodedVideoFrame {
-                codec: wincast_protocol::config::VideoCodec::H264,
-                width: 2,
-                height: 2,
-                sequence_number: 2,
-                timestamp_ns: 2_000,
-                keyframe: false,
-                bytes: vec![0x00, 0x00, 0x00, 0x01, 0x68],
-            }),
-        )
-        .expect("encoded frame should encode");
-        write_message(
-            &mut stream,
-            &ControlMessage::EncodedVideoFrame(EncodedVideoFrame {
-                codec: wincast_protocol::config::VideoCodec::H264,
-                width: 2,
-                height: 2,
-                sequence_number: 3,
-                timestamp_ns: 3_000,
-                keyframe: false,
-                bytes: vec![0x00, 0x00, 0x00, 0x01, 0x65],
-            }),
-        )
-        .expect("encoded frame should encode");
+        for frame in test_h264_frames(3) {
+            write_message(&mut stream, &ControlMessage::EncodedVideoFrame(frame))
+                .expect("encoded frame should encode");
+        }
     });
 
     let config = ClientConfig {
@@ -288,20 +258,12 @@ fn client_accepts_encoded_video_frame_after_fake_h264_decode_without_reading_raw
 
 #[test]
 fn client_decodes_valid_encoded_video_frame_to_complete_bgra_boundary() {
-    let decoded = validate_encoded_video_frame(&EncodedVideoFrame {
-        codec: wincast_protocol::config::VideoCodec::H264,
-        width: 2,
-        height: 3,
-        sequence_number: 9,
-        timestamp_ns: 1_000,
-        keyframe: true,
-        bytes: vec![0x12, 0x34],
-    })
-    .expect("valid H.264 frame should decode through fake decoder boundary");
+    let decoded = validate_encoded_video_frame(&test_h264_frame(9))
+        .expect("valid H.264 frame should decode through OpenH264 boundary");
 
-    assert_eq!(decoded.width, 2);
-    assert_eq!(decoded.height, 3);
-    assert_eq!(decoded.row_pitch, 8);
+    assert_eq!(decoded.width, 16);
+    assert_eq!(decoded.height, 16);
+    assert_eq!(decoded.row_pitch, 64);
     assert_eq!(
         decoded.bytes_len,
         decoded.row_pitch as usize * decoded.height as usize
@@ -631,4 +593,69 @@ fn run_message_does_not_claim_runtime_chain_is_ready() {
     assert!(!message.contains("raw BGRA 已接入"));
     assert!(!message.contains("H.264/WebRTC 编码传输尚未实现"));
     assert!(!message.contains("视频解码渲染和输入事件链路尚未实现"));
+}
+
+fn test_h264_frames(count: u64) -> Vec<EncodedVideoFrame> {
+    let mut encoder = OpenH264Encoder::new(VideoPipelineConfig {
+        codec: VideoCodec::H264,
+        width: 16,
+        height: 16,
+        fps: 30,
+        bitrate_kbps: 300,
+        max_bitrate_kbps: 1_000,
+        latency_mode: VideoLatencyMode::LowLatency,
+    })
+    .expect("OpenH264 encoder should initialize");
+    (1..=count)
+        .map(|sequence_number| {
+            encoder
+                .encode(RawVideoFrame {
+                    width: 16,
+                    height: 16,
+                    row_pitch: 64,
+                    format: RawPixelFormat::Bgra8Unorm,
+                    sequence_number,
+                    timestamp_ns: sequence_number * 1_000_000,
+                    bytes: &test_bgra_frame(16, 16),
+                })
+                .expect("test H.264 frame should encode")
+        })
+        .collect()
+}
+
+fn test_bgra_frame(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            bytes.push((x * 11) as u8);
+            bytes.push((y * 13) as u8);
+            bytes.push(((x + y) * 7) as u8);
+            bytes.push(0xff);
+        }
+    }
+    bytes
+}
+
+fn test_h264_frame(sequence_number: u64) -> EncodedVideoFrame {
+    let mut encoder = OpenH264Encoder::new(VideoPipelineConfig {
+        codec: VideoCodec::H264,
+        width: 16,
+        height: 16,
+        fps: 30,
+        bitrate_kbps: 300,
+        max_bitrate_kbps: 1_000,
+        latency_mode: VideoLatencyMode::LowLatency,
+    })
+    .expect("OpenH264 encoder should initialize");
+    encoder
+        .encode(RawVideoFrame {
+            width: 16,
+            height: 16,
+            row_pitch: 64,
+            format: RawPixelFormat::Bgra8Unorm,
+            sequence_number,
+            timestamp_ns: sequence_number * 1_000_000,
+            bytes: &test_bgra_frame(16, 16),
+        })
+        .expect("test H.264 frame should encode")
 }

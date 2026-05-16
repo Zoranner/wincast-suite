@@ -4,6 +4,8 @@ use wincast_protocol::config::VideoCodec;
 mod decoder;
 mod encoder;
 
+pub use decoder::OpenH264Decoder;
+pub use encoder::OpenH264Encoder;
 pub use wincast_protocol::message::EncodedVideoFrame;
 
 /// Boundary-test media backends.
@@ -95,6 +97,8 @@ pub enum MediaConfigError {
         max_width: u32,
         max_height: u32,
     },
+    #[error("H.264 I420 编码要求偶数尺寸，当前为 {width}x{height}")]
+    OddDimensions { width: u32, height: u32 },
     #[error("视频帧率 {fps} 无效，最大支持 {max_fps}")]
     InvalidFps { fps: u32, max_fps: u32 },
     #[error("视频码率上限必须大于 0")]
@@ -146,6 +150,8 @@ pub enum RawVideoFrameError {
         config_width: u32,
         config_height: u32,
     },
+    #[error("H.264 I420 编码要求偶数 raw frame 尺寸，当前为 {width}x{height}")]
+    OddDimensions { width: u32, height: u32 },
     #[error("fake H.264 encoder only accepts BGRA8 raw frames, current format is {format:?}")]
     UnsupportedPixelFormat { format: RawPixelFormat },
     #[error("raw frame payload is empty")]

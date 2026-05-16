@@ -12,8 +12,8 @@ use std::{
 use wincast_capture::CapturedBgraFrame;
 use wincast_input::{CaptureInputBounds, WindowsInputEventSink};
 use wincast_media::{
-    MediaConfigError, MediaError, RawPixelFormat, RawVideoFrame, RawVideoFrameError, VideoEncoder,
-    VideoPipelineConfig, test_support::FakeH264Encoder,
+    MediaConfigError, MediaError, OpenH264Encoder, RawPixelFormat, RawVideoFrame,
+    RawVideoFrameError, VideoEncoder, VideoPipelineConfig,
 };
 use wincast_protocol::{
     frame::{FrameError, read_message, write_message},
@@ -248,7 +248,7 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
     input_events: &mpsc::Receiver<InputReaderEvent>,
     pipeline_config: VideoPipelineConfig,
 ) -> Result<HostSessionEndReason, HostSessionError> {
-    let mut encoder = FakeH264Encoder::new(pipeline_config).map_err(|error| {
+    let mut encoder = OpenH264Encoder::new(pipeline_config).map_err(|error| {
         write_h264_encoding_error(
             writer,
             format!("H.264 编码器初始化失败: {}", media_error_message(&error)),
@@ -417,6 +417,9 @@ fn media_config_error_message(error: &MediaConfigError) -> String {
             max_width,
             max_height,
         } => format!("视频尺寸 {width}x{height} 超过上限 {max_width}x{max_height}"),
+        MediaConfigError::OddDimensions { width, height } => {
+            format!("H.264 I420 编码要求偶数尺寸，当前为 {width}x{height}")
+        }
         MediaConfigError::InvalidFps { fps, max_fps } => {
             format!("视频帧率 {fps} 无效，最大支持 {max_fps}")
         }
@@ -447,8 +450,11 @@ fn raw_video_frame_error_message(error: &RawVideoFrameError) -> String {
         } => format!(
             "raw 视频尺寸 {frame_width}x{frame_height} 与配置尺寸 {config_width}x{config_height} 不一致"
         ),
+        RawVideoFrameError::OddDimensions { width, height } => {
+            format!("H.264 I420 编码要求偶数 raw frame 尺寸，当前为 {width}x{height}")
+        }
         RawVideoFrameError::UnsupportedPixelFormat { format } => {
-            format!("fake H.264 编码器只支持 BGRA8 raw 帧，当前为 {format:?}")
+            format!("H.264 编码器只支持 BGRA8 raw 帧，当前为 {format:?}")
         }
         RawVideoFrameError::EmptyPayload => "raw 视频帧载荷为空".to_owned(),
         RawVideoFrameError::RowPitchOverflow => "raw 视频帧行跨度溢出".to_owned(),

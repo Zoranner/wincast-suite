@@ -1,4 +1,4 @@
-use wincast_media::{VideoDecoder, test_support::FakeH264Decoder};
+use wincast_media::{OpenH264Decoder, VideoDecoder};
 use wincast_protocol::{
     config::VideoCodec,
     frame::read_message,
@@ -70,7 +70,8 @@ pub(crate) fn read_h264_encoded_frames_from_first(
         return Err("H.264 编码视频帧接收数量不能为 0".to_owned());
     }
 
-    let mut decoder = FakeH264Decoder::new();
+    let mut decoder = OpenH264Decoder::new()
+        .map_err(|error| format!("初始化客户端 OpenH264 解码器失败: {error}"))?;
     let mut last_sequence_number = None;
     let mut frames = 0;
 
@@ -97,6 +98,98 @@ pub(crate) fn read_h264_encoded_frames_from_first(
         return Err("未收到 H.264 编码视频帧".to_owned());
     };
 
+    Ok(EncodedVideoReceiveSummary {
+        frames,
+        last_sequence_number,
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn read_h264_encoded_frames_with_sdl_window_from_first(
+    stream: &mut std::net::TcpStream,
+    first_frame: EncodedVideoFrame,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let mut renderer = wincast_render::SdlRawBgraRenderer::new(wincast_render::RenderConfig {
+        title: "WinCast Client".to_owned(),
+        width,
+        height,
+    })
+    .map_err(|error| format!("创建客户端 SDL2 窗口失败: {error}"))?;
+    read_h264_encoded_frames_with_renderer_from_first(stream, first_frame, None, &mut renderer)
+        .map(|_| ())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn read_h264_encoded_frames_with_sdl_window_from_first(
+    _stream: &mut std::net::TcpStream,
+    _first_frame: EncodedVideoFrame,
+    _width: u32,
+    _height: u32,
+) -> Result<(), String> {
+    Err("当前平台不支持 SDL2 客户端窗口".to_owned())
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
+    control_stream: &mut (impl std::io::Read + std::io::Write),
+    first_frame: EncodedVideoFrame,
+    frame_limit: Option<usize>,
+    renderer: &mut impl wincast_render::RawBgraRenderer,
+) -> Result<EncodedVideoReceiveSummary, String> {
+    let mut decoder = OpenH264Decoder::new()
+        .map_err(|error| format!("初始化客户端 OpenH264 解码器失败: {error}"))?;
+    let mut last_sequence_number = None;
+    let mut frames = 0;
+    render_h264_encoded_frame(
+        &mut decoder,
+        renderer,
+        first_frame,
+        &mut last_sequence_number,
+    )?;
+    frames += 1;
+
+    loop {
+        let render_loop = renderer
+            .poll_input()
+            .map_err(|error| format!("读取客户端输入事件失败: {error}"))?;
+        for input_event in render_loop.input_events {
+            wincast_protocol::frame::write_message(
+                control_stream,
+                &ControlMessage::InputEvent(input_event),
+            )
+            .map_err(|error| format!("发送客户端输入事件失败: {error}"))?;
+        }
+        if render_loop.action == wincast_render::RenderLoopAction::Quit {
+            let _ = wincast_protocol::frame::write_message(
+                control_stream,
+                &ControlMessage::StopSession,
+            );
+            break;
+        }
+        if frame_limit.is_some_and(|limit| frames >= limit) {
+            break;
+        }
+        match read_next_h264_encoded_stream_item(control_stream)
+            .map_err(format_h264_encoded_stream_error)?
+        {
+            NextEncodedVideoStreamItem::Frame(frame) => {
+                render_h264_encoded_frame(
+                    &mut decoder,
+                    renderer,
+                    frame,
+                    &mut last_sequence_number,
+                )?;
+                frames += 1;
+            }
+            NextEncodedVideoStreamItem::Goodbye => break,
+        }
+    }
+
+    let Some(last_sequence_number) = last_sequence_number else {
+        return Err("未收到 H.264 编码视频帧".to_owned());
+    };
     Ok(EncodedVideoReceiveSummary {
         frames,
         last_sequence_number,
@@ -260,7 +353,8 @@ pub(crate) struct DecodedVideoFrameBoundary {
 pub(crate) fn validate_encoded_video_frame(
     frame: &EncodedVideoFrame,
 ) -> Result<DecodedVideoFrameBoundary, String> {
-    let mut decoder = FakeH264Decoder::new();
+    let mut decoder = OpenH264Decoder::new()
+        .map_err(|error| format!("初始化客户端 OpenH264 解码器失败: {error}"))?;
     decode_h264_frame_boundary(&mut decoder, frame)
 }
 
@@ -287,7 +381,7 @@ fn validate_h264_frame_sequence(
 }
 
 fn decode_h264_frame_boundary(
-    decoder: &mut FakeH264Decoder,
+    decoder: &mut OpenH264Decoder,
     frame: &EncodedVideoFrame,
 ) -> Result<DecodedVideoFrameBoundary, String> {
     if frame.codec != VideoCodec::H264 {
@@ -320,8 +414,36 @@ fn decode_h264_frame_boundary(
     })
 }
 
+#[cfg(any(test, target_os = "linux"))]
+fn render_h264_encoded_frame(
+    decoder: &mut OpenH264Decoder,
+    renderer: &mut impl wincast_render::RawBgraRenderer,
+    frame: EncodedVideoFrame,
+    last_sequence_number: &mut Option<u64>,
+) -> Result<(), String> {
+    validate_h264_frame_sequence(&frame, last_sequence_number)?;
+    let decoded = decoder
+        .decode(&frame)
+        .map_err(|error| format!("宿主端 H.264 编码帧解码失败: {error}"))?;
+    let raw = RawBgraFrame {
+        width: decoded.width,
+        height: decoded.height,
+        row_pitch: decoded.row_pitch(),
+        sequence_number: frame.sequence_number,
+        timestamp_ns: frame.timestamp_ns,
+        bytes: decoded.bytes.to_vec(),
+    };
+    renderer
+        .render_frame(&raw)
+        .map_err(|error| format!("渲染宿主端 H.264 视频帧失败: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
+    use wincast_media::{
+        OpenH264Encoder, RawPixelFormat, RawVideoFrame, VideoEncoder, VideoLatencyMode,
+        VideoPipelineConfig,
+    };
     use wincast_protocol::{
         config::VideoCodec,
         frame::write_message,
@@ -422,12 +544,9 @@ mod tests {
     #[test]
     fn client_reads_and_decodes_multiple_h264_encoded_frames_until_limit() {
         let mut bytes = Vec::new();
-        for sequence_number in 0..3 {
-            write_message(
-                &mut bytes,
-                &ControlMessage::EncodedVideoFrame(h264_frame(sequence_number, vec![0x11])),
-            )
-            .expect("encoded frame should encode");
+        for frame in valid_h264_frames(3) {
+            write_message(&mut bytes, &ControlMessage::EncodedVideoFrame(frame))
+                .expect("encoded frame should encode");
         }
 
         let mut cursor = bytes.as_slice();
@@ -443,7 +562,7 @@ mod tests {
             summary,
             EncodedVideoReceiveSummary {
                 frames: 3,
-                last_sequence_number: 2,
+                last_sequence_number: 3,
             }
         );
     }
@@ -453,7 +572,7 @@ mod tests {
         let mut bytes = Vec::new();
         write_message(
             &mut bytes,
-            &ControlMessage::EncodedVideoFrame(h264_frame(7, vec![0x22])),
+            &ControlMessage::EncodedVideoFrame(valid_h264_frame(7)),
         )
         .expect("encoded frame should encode");
         write_message(&mut bytes, &ControlMessage::Goodbye).expect("goodbye should encode");
@@ -474,6 +593,47 @@ mod tests {
                 last_sequence_number: 7,
             }
         );
+    }
+
+    #[test]
+    fn client_decodes_and_renders_h264_frames_with_input_feedback() {
+        let frames = valid_h264_frames(2);
+        let mut bytes = Vec::new();
+        write_message(
+            &mut bytes,
+            &ControlMessage::EncodedVideoFrame(frames[1].clone()),
+        )
+        .expect("second encoded frame should encode");
+        let mut stream = DuplexTestStream::new(bytes);
+        let mut renderer = RecordingRenderer::with_input_event();
+
+        let summary = read_h264_encoded_frames_with_renderer_from_first(
+            &mut stream,
+            frames[0].clone(),
+            Some(2),
+            &mut renderer,
+        )
+        .expect("H.264 renderer helper should decode and render two frames");
+
+        assert_eq!(
+            summary,
+            EncodedVideoReceiveSummary {
+                frames: 2,
+                last_sequence_number: 2,
+            }
+        );
+        assert_eq!(renderer.rendered_sequences, vec![1, 2]);
+        assert_eq!(renderer.rendered_dimensions, vec![(16, 16), (16, 16)]);
+
+        let mut written = stream.written.as_slice();
+        let message = read_message(&mut written).expect("input event should be sent");
+        assert!(matches!(
+            message,
+            ControlMessage::InputEvent(wincast_protocol::input::InputEvent::MouseMoveDelta {
+                delta_x: 1,
+                delta_y: -1
+            })
+        ));
     }
 
     #[test]
@@ -546,6 +706,150 @@ mod tests {
             timestamp_ns: sequence_number * 1_000,
             keyframe: sequence_number == 0,
             bytes,
+        }
+    }
+
+    fn valid_h264_frames(count: u64) -> Vec<EncodedVideoFrame> {
+        let mut encoder = OpenH264Encoder::new(VideoPipelineConfig {
+            codec: VideoCodec::H264,
+            width: 16,
+            height: 16,
+            fps: 30,
+            bitrate_kbps: 300,
+            max_bitrate_kbps: 1_000,
+            latency_mode: VideoLatencyMode::LowLatency,
+        })
+        .expect("OpenH264 encoder should initialize");
+        (1..=count)
+            .map(|sequence_number| {
+                encoder
+                    .encode(RawVideoFrame {
+                        width: 16,
+                        height: 16,
+                        row_pitch: 64,
+                        format: RawPixelFormat::Bgra8Unorm,
+                        sequence_number,
+                        timestamp_ns: sequence_number * 1_000_000,
+                        bytes: &test_bgra_frame(16, 16),
+                    })
+                    .expect("test H.264 frame should encode")
+            })
+            .collect()
+    }
+
+    fn valid_h264_frame(sequence_number: u64) -> EncodedVideoFrame {
+        let mut encoder = OpenH264Encoder::new(VideoPipelineConfig {
+            codec: VideoCodec::H264,
+            width: 16,
+            height: 16,
+            fps: 30,
+            bitrate_kbps: 300,
+            max_bitrate_kbps: 1_000,
+            latency_mode: VideoLatencyMode::LowLatency,
+        })
+        .expect("OpenH264 encoder should initialize");
+        encoder
+            .encode(RawVideoFrame {
+                width: 16,
+                height: 16,
+                row_pitch: 64,
+                format: RawPixelFormat::Bgra8Unorm,
+                sequence_number,
+                timestamp_ns: sequence_number * 1_000_000,
+                bytes: &test_bgra_frame(16, 16),
+            })
+            .expect("test H.264 frame should encode")
+    }
+
+    fn test_bgra_frame(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                bytes.push((x * 11) as u8);
+                bytes.push((y * 13) as u8);
+                bytes.push(((x + y) * 7) as u8);
+                bytes.push(0xff);
+            }
+        }
+        bytes
+    }
+
+    struct RecordingRenderer {
+        rendered_sequences: Vec<u64>,
+        rendered_dimensions: Vec<(u32, u32)>,
+        poll_count: usize,
+    }
+
+    impl RecordingRenderer {
+        fn with_input_event() -> Self {
+            Self {
+                rendered_sequences: Vec::new(),
+                rendered_dimensions: Vec::new(),
+                poll_count: 0,
+            }
+        }
+    }
+
+    impl wincast_render::RawBgraRenderer for RecordingRenderer {
+        fn render_frame(
+            &mut self,
+            frame: &RawBgraFrame,
+        ) -> Result<(), wincast_render::RenderError> {
+            frame
+                .validate()
+                .map_err(|error| wincast_render::RenderError::InvalidFrame(error.to_string()))?;
+            self.rendered_sequences.push(frame.sequence_number);
+            self.rendered_dimensions.push((frame.width, frame.height));
+            Ok(())
+        }
+
+        fn poll_input(
+            &mut self,
+        ) -> Result<wincast_render::RenderLoopResult, wincast_render::RenderError> {
+            self.poll_count += 1;
+            let input_events = if self.poll_count == 1 {
+                vec![wincast_protocol::input::InputEvent::MouseMoveDelta {
+                    delta_x: 1,
+                    delta_y: -1,
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(wincast_render::RenderLoopResult {
+                action: wincast_render::RenderLoopAction::Continue,
+                input_events,
+            })
+        }
+    }
+
+    struct DuplexTestStream {
+        reader: std::io::Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl DuplexTestStream {
+        fn new(read_bytes: Vec<u8>) -> Self {
+            Self {
+                reader: std::io::Cursor::new(read_bytes),
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl std::io::Read for DuplexTestStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut self.reader, buffer)
+        }
+    }
+
+    impl std::io::Write for DuplexTestStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 }

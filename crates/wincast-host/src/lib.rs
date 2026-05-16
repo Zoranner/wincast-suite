@@ -170,24 +170,24 @@ fn run_host_with_runtime(
     runtime: &mut impl HostAgentRuntime,
 ) -> Result<String, String> {
     let config = load_config(path)?;
-    let startup_message = runtime_not_implemented_message(&config);
+    let startup_message = runtime_status_message(&config);
     let local_addr = runtime.run(&config)?;
     Ok(format!(
         "{startup_message} 控制通道已进入持续监听，实际监听 {local_addr}。"
     ))
 }
 
-fn runtime_not_implemented_message(config: &HostConfig) -> String {
+fn runtime_status_message(config: &HostConfig) -> String {
     format!(
         "宿主端配置有效，监听 {}，程序 {}。{}",
         config.listen,
         config.program,
-        runtime_not_implemented_detail()
+        runtime_status_detail()
     )
 }
 
-fn runtime_not_implemented_detail() -> &'static str {
-    "H.264 编码传输已作为当前正式链路口径，运行期编码器和解码器仍待接入。"
+fn runtime_status_detail() -> &'static str {
+    "H.264 编码传输已作为当前正式链路口径，前台运行链路已接入 OpenH264 编码和客户端解码。"
 }
 
 fn load_config(path: &Path) -> Result<HostConfig, String> {
@@ -333,14 +333,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_message_reports_h264_transport_pending() {
+    fn runtime_message_reports_h264_transport_ready() {
         let config = host_config("0.0.0.0:7856".to_owned());
 
-        let message = runtime_not_implemented_message(&config);
+        let message = runtime_status_message(&config);
 
         assert!(!message.contains("运行时链路未实现"));
         assert!(message.contains("H.264 编码传输已作为当前正式链路口径"));
-        assert!(message.contains("运行期编码器和解码器仍待接入"));
+        assert!(message.contains("前台运行链路已接入 OpenH264 编码和客户端解码"));
+        assert!(!message.contains("仍待接入"));
     }
 
     #[test]
@@ -464,7 +465,7 @@ startup_timeout_ms = 15000
         assert_eq!(runtime.calls[0].capture.mode, CaptureMode::Window);
         assert_eq!(
             message,
-            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。H.264 编码传输已作为当前正式链路口径，运行期编码器和解码器仍待接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
+            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。H.264 编码传输已作为当前正式链路口径，前台运行链路已接入 OpenH264 编码和客户端解码。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
         );
 
         fs::remove_file(config_path).expect("temp host config should be removed");
@@ -505,7 +506,7 @@ startup_timeout_ms = 15000
         assert_eq!(runtime.calls[0].capture.mode, CaptureMode::Display);
         assert_eq!(
             message,
-            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。H.264 编码传输已作为当前正式链路口径，运行期编码器和解码器仍待接入。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
+            "宿主端配置有效，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。H.264 编码传输已作为当前正式链路口径，前台运行链路已接入 OpenH264 编码和客户端解码。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
         );
 
         fs::remove_file(config_path).expect("temp host config should be removed");

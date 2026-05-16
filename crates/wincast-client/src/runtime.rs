@@ -11,7 +11,8 @@ use crate::{
     errors::format_host_error,
     render_loop::ClientRenderMode,
     stream::{
-        read_first_raw_binary_frame, read_h264_encoded_frames_from_first, validate_readback_frame,
+        read_first_raw_binary_frame, read_h264_encoded_frames_from_first,
+        read_h264_encoded_frames_with_sdl_window_from_first, validate_readback_frame,
     },
 };
 
@@ -198,11 +199,17 @@ fn read_first_readback_frame(
         ControlMessage::RawBgraReadbackFrame(frame) => {
             validate_readback_frame(&frame).map_err(ClientRunError::Fatal)
         }
-        ControlMessage::EncodedVideoFrame(frame) => {
-            read_h264_encoded_frames_from_first(stream, frame, H264_VALIDATION_FRAME_COUNT)
-                .map(|_| ())
-                .map_err(ClientRunError::Fatal)
-        }
+        ControlMessage::EncodedVideoFrame(frame) => match render_mode {
+            ClientRenderMode::SdlWindow => {
+                read_h264_encoded_frames_with_sdl_window_from_first(stream, frame, width, height)
+                    .map_err(ClientRunError::Fatal)
+            }
+            ClientRenderMode::ProtocolOnly => {
+                read_h264_encoded_frames_from_first(stream, frame, H264_VALIDATION_FRAME_COUNT)
+                    .map(|_| ())
+                    .map_err(ClientRunError::Fatal)
+            }
+        },
         ControlMessage::VideoReady => {
             read_first_raw_binary_frame(stream, render_mode, width, height)
                 .map_err(ClientRunError::Fatal)
