@@ -6,7 +6,7 @@
 
 - Windows host 与 Linux client 位于同一可达网络，Windows 防火墙已放通 Host 监听端口。
 - Windows host 使用可交互桌面登录，待捕获应用能以前台程序启动，并且目标窗口标题包含稳定可匹配文本。
-- Linux client 已安装 SDL2 运行/开发依赖；ARM64 目标机需要在真实 aarch64/ARM64 Linux 设备上执行同一流程。
+- Linux client 已安装 C/C++ 编译工具链、`pkg-config` 和 SDL2 运行/开发依赖；OpenH264 后端会在构建时编译 C/C++ 源码。ARM64 目标机需要在真实 aarch64/ARM64 Linux 设备上执行同一流程。
 - 两端使用同一版本产物，Host 使用 `wincast-host`，Client 使用 `wincast-client`。
 
 ## 配置

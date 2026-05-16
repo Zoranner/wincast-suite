@@ -49,12 +49,14 @@ Windows 开发机上的 workspace 验证只能证明非 Linux 占位路径和协
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y pkg-config libsdl2-dev
+sudo apt-get install -y build-essential pkg-config libsdl2-dev
 cargo test -p wincast-protocol -p wincast-client
 cargo clippy -p wincast-protocol -p wincast-client --all-targets --all-features -- -D warnings
 ```
 
-在银河麒麟 V10 等不使用 `apt` 的系统上，应改用系统对应包管理器安装 `pkg-config` 和 SDL2 开发包，再执行同一组 Cargo 命令。x86_64 目标机和 aarch64/ARM64 目标机都需要完成这组验证，并按稳定版真机烟测清单执行客户端窗口运行与输入回传验证；aarch64 交叉编译检查只能确认 Rust 编译边界，不能替代 ARM64 目标机上的 SDL2 链接和窗口运行验证。
+OpenH264 后端会在构建时编译 C/C++ 源码，因此 Linux 目标机除 SDL2 外还需要可用的 C/C++ 编译工具链。若构建报找不到 `g++`、`cc`、`c++` 或 OpenH264 build script 失败，先补齐系统编译工具链，再判断 Rust 代码问题。
+
+在银河麒麟 V10 等不使用 `apt` 的系统上，应改用系统对应包管理器安装 C/C++ 编译工具链、`pkg-config` 和 SDL2 开发包，再执行同一组 Cargo 命令。x86_64 目标机和 aarch64/ARM64 目标机都需要完成这组验证，并按稳定版真机烟测清单执行客户端窗口运行与输入回传验证；aarch64 交叉编译检查只能确认 Rust 编译边界，不能替代 ARM64 目标机上的 SDL2 链接和窗口运行验证。
 
 ## 运行与占位边界
 
