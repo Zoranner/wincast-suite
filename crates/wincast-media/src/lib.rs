@@ -1,7 +1,20 @@
 use thiserror::Error;
 use wincast_protocol::config::VideoCodec;
 
+mod decoder;
+mod encoder;
+
 pub use wincast_protocol::message::EncodedVideoFrame;
+
+/// Boundary-test media backends.
+///
+/// These helpers produce deterministic fake H.264 payloads and BGRA frames for
+/// media API tests. They are not real encoders/decoders and their payloads are
+/// not playable H.264 bitstreams.
+pub mod test_support {
+    pub use crate::decoder::{FAKE_H264_DECODED_PAYLOAD_LIMIT, FakeH264Decoder};
+    pub use crate::encoder::FakeH264Encoder;
+}
 
 pub const MAX_H264_WIDTH: u32 = 1920;
 pub const MAX_H264_HEIGHT: u32 = 1080;
@@ -97,10 +110,54 @@ pub enum MediaConfigError {
 pub enum MediaError {
     #[error("{0}")]
     Config(#[from] MediaConfigError),
+    #[error("编码视频帧只支持 H.264，当前为 {codec:?}")]
+    UnsupportedEncodedCodec { codec: VideoCodec },
+    #[error("编码视频帧无效: {0:?}")]
+    InvalidEncodedFrame(wincast_protocol::message::EncodedVideoFrameError),
+    #[error("原始视频帧无效: {0}")]
+    InvalidRawFrame(RawVideoFrameError),
+    #[error("fake 解码输出载荷 {actual} 超过上限 {max}")]
+    DecodedPayloadTooLarge { actual: usize, max: usize },
     #[error("媒体后端不可用: {0}")]
     BackendUnavailable(&'static str),
     #[error("媒体后端处理失败: {0}")]
     Backend(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RawVideoFrameError {
+    #[error("raw frame dimensions are invalid: {width}x{height}")]
+    InvalidDimensions { width: u32, height: u32 },
+    #[error(
+        "raw frame dimensions {width}x{height} exceed fake H.264 boundary {max_width}x{max_height}"
+    )]
+    ResolutionTooLarge {
+        width: u32,
+        height: u32,
+        max_width: u32,
+        max_height: u32,
+    },
+    #[error(
+        "raw frame dimensions {frame_width}x{frame_height} do not match configured size {config_width}x{config_height}"
+    )]
+    ConfigDimensionMismatch {
+        frame_width: u32,
+        frame_height: u32,
+        config_width: u32,
+        config_height: u32,
+    },
+    #[error("fake H.264 encoder only accepts BGRA8 raw frames, current format is {format:?}")]
+    UnsupportedPixelFormat { format: RawPixelFormat },
+    #[error("raw frame payload is empty")]
+    EmptyPayload,
+    #[error("raw frame row pitch overflow")]
+    RowPitchOverflow,
+    #[error("raw frame row pitch {row_pitch} is below minimum {min_row_pitch}")]
+    InvalidRowPitch { row_pitch: u32, min_row_pitch: u32 },
+    #[error("raw frame payload length overflow")]
+    PayloadLengthOverflow,
+    #[error("raw frame payload length {actual} does not match expected {expected}")]
+    InvalidPayloadLength { actual: usize, expected: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +189,12 @@ pub struct DecodedVideoFrame<'a> {
     pub bytes: &'a [u8],
 }
 
+impl DecodedVideoFrame<'_> {
+    pub fn row_pitch(&self) -> u32 {
+        self.width * 4
+    }
+}
+
 pub trait VideoEncoder {
     fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<EncodedVideoFrame>;
 
@@ -139,5 +202,5 @@ pub trait VideoEncoder {
 }
 
 pub trait VideoDecoder {
-    fn decode<'a>(&mut self, frame: &'a EncodedVideoFrame) -> MediaResult<DecodedVideoFrame<'a>>;
+    fn decode<'a>(&'a mut self, frame: &EncodedVideoFrame) -> MediaResult<DecodedVideoFrame<'a>>;
 }

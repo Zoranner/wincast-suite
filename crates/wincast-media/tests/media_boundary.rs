@@ -147,17 +147,23 @@ fn encoder_and_decoder_traits_use_protocol_frame_boundary() {
         }
     }
 
-    struct MockDecoder;
+    struct MockDecoder {
+        bytes: Vec<u8>,
+    }
+
     impl VideoDecoder for MockDecoder {
         fn decode<'a>(
-            &mut self,
-            frame: &'a EncodedVideoFrame,
+            &'a mut self,
+            frame: &EncodedVideoFrame,
         ) -> wincast_media::MediaResult<wincast_media::DecodedVideoFrame<'a>> {
+            self.bytes.clear();
+            self.bytes.extend_from_slice(frame.bytes.as_slice());
+
             Ok(wincast_media::DecodedVideoFrame {
                 width: frame.width,
                 height: frame.height,
                 format: wincast_media::DecodedPixelFormat::Bgra8Unorm,
-                bytes: frame.bytes.as_slice(),
+                bytes: self.bytes.as_slice(),
             })
         }
     }

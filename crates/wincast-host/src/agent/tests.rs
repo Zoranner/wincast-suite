@@ -254,6 +254,10 @@ impl InputEventSink for RecordingInputEventSink {
 }
 
 pub(super) fn host_config(listen: String) -> HostConfig {
+    host_config_with_codec(listen, VideoCodec::RawBgra)
+}
+
+pub(super) fn host_config_with_codec(listen: String, codec: VideoCodec) -> HostConfig {
     HostConfig {
         listen,
         program: "C:\\Program Files\\SomeApp\\app.exe".to_owned(),
@@ -263,7 +267,7 @@ pub(super) fn host_config(listen: String) -> HostConfig {
             width: 1280,
             height: 720,
             fps: 30,
-            codec: VideoCodec::H264,
+            codec,
             bitrate_kbps: 4000,
             max_bitrate_kbps: 6000,
         },

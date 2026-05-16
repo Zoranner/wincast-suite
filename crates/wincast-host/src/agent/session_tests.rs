@@ -4,6 +4,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{Arc, atomic::AtomicUsize, mpsc},
     thread,
+    time::Duration,
 };
 
 use crate::agent::{
@@ -22,11 +23,12 @@ use crate::session_state::{
     ClientSessionErrorCode, RemoteSessionStatus, SessionEvent, SharedSessionState,
 };
 use wincast_protocol::{
+    config::VideoCodec,
     frame::{read_message, write_message},
     handshake::send_client_hello,
     ipc::SessionEndReason,
     message::{ControlMessage, ErrorCode},
-    raw_frame::read_raw_bgra_frame,
+    raw_frame::{RawBgraStreamItem, read_raw_bgra_frame, read_raw_bgra_stream_item},
 };
 
 use crate::program::StartedProgram;
@@ -210,6 +212,64 @@ fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
     assert!(error.message.contains("初始化画面捕获失败"));
     assert!(error.message.contains("写入控制错误消息失败"));
     drop(client);
+}
+
+#[test]
+fn host_reports_encoding_failed_for_h264_after_first_capture_frame_without_sending_raw_bgra() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    let mut locator = RecordingWindowLocator::default();
+    let mut capture = RecordingCaptureStarter::default();
+    let started = StartedProgram::from_process_id(42);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut locator,
+            &mut capture,
+            &started,
+        )
+    });
+
+    assert_eq!(
+        read_message(&mut client).expect("session ready should decode"),
+        ControlMessage::SessionReady {
+            width: 1280,
+            height: 720,
+        }
+    );
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("client read timeout should be set");
+    let next_item = read_raw_bgra_stream_item(&mut client);
+    let raw_after_error = read_raw_bgra_frame(&mut client);
+    let error = host
+        .join()
+        .expect("host thread should finish")
+        .expect_err("h264 should fail until encoder is wired");
+
+    assert_eq!(
+        next_item.expect("encoding failure should decode"),
+        RawBgraStreamItem::Control(ControlMessage::Error {
+            code: ErrorCode::EncodingFailed,
+            message: "尚未接入 H.264 编码器".to_owned(),
+        })
+    );
+    assert!(
+        raw_after_error.is_err(),
+        "h264 path must not fall back to raw BGRA binary frames"
+    );
+    assert!(error.message.contains("尚未接入 H.264 编码器"));
 }
 
 struct FailingWriter;

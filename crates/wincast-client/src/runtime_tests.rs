@@ -4,7 +4,7 @@ use wincast_protocol::{
     config::ClientConfig,
     frame::{read_message, write_message},
     handshake::{HandshakeError, send_client_hello},
-    message::{ControlMessage, ErrorCode},
+    message::{ControlMessage, EncodedVideoFrame, ErrorCode},
     raw_frame::write_raw_bgra_frame,
 };
 
@@ -13,6 +13,7 @@ use crate::{
     runtime::{
         ClientRunError, RetryOptions, RetryReport, control_channel_ready_message,
         format_retry_report, run_client_with_config, run_with_retry, run_with_retry_and_reporter,
+        validate_encoded_video_frame,
     },
     test_support::{raw_bgra_frame, raw_binary_frame},
 };
@@ -106,13 +107,12 @@ fn client_run_reports_runtime_unimplemented_response_from_host() {
 
 #[test]
 fn client_reports_encoding_failure_in_chinese() {
-    let error = format_host_error(
-        ErrorCode::EncodingFailed,
-        "Windows 视频编码器未实现：尚未接入 H.264 编码器。".to_owned(),
-    );
+    let error = format_host_error(ErrorCode::EncodingFailed, "硬件编码器初始化失败".to_owned());
 
     assert!(error.contains("宿主端视频编码失败"));
-    assert!(error.contains("尚未接入 H.264 编码器"));
+    assert!(error.contains("硬件编码器初始化失败"));
+    assert!(!error.contains("未实现"));
+    assert!(!error.contains("尚未接入 H.264"));
 }
 
 #[test]
@@ -210,6 +210,118 @@ fn client_rejects_invalid_message_after_video_ready() {
     host_thread.join().expect("host thread should finish");
     assert!(error.contains("宿主端 raw BGRA 流中收到无效控制消息"));
     assert!(!error.contains("视频流中断"));
+}
+
+#[test]
+fn client_accepts_encoded_video_frame_without_reading_raw_bgra_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        read_message(&mut stream).expect("client hello should decode");
+        send_client_hello(&mut stream).expect("host hello should encode");
+        read_message(&mut stream).expect("start session should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::SessionReady {
+                width: 2,
+                height: 2,
+            },
+        )
+        .expect("session ready should encode");
+        write_message(
+            &mut stream,
+            &ControlMessage::EncodedVideoFrame(EncodedVideoFrame {
+                codec: wincast_protocol::config::VideoCodec::H264,
+                width: 2,
+                height: 2,
+                sequence_number: 1,
+                timestamp_ns: 1_000,
+                keyframe: true,
+                bytes: vec![0x00, 0x00, 0x00, 0x01, 0x67],
+            }),
+        )
+        .expect("encoded frame should encode");
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let message = run_client_with_config(&config)
+        .expect("encoded video frame should validate without raw BGRA read");
+
+    host_thread.join().expect("host thread should finish");
+    assert!(message.contains("客户端已完成宿主端首个视频响应的协议边界校验"));
+    assert!(!message.contains("H.264 编码帧"));
+    assert!(!message.contains("raw BGRA"));
+}
+
+#[test]
+fn client_rejects_invalid_encoded_video_frame_from_host() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        read_message(&mut stream).expect("client hello should decode");
+        send_client_hello(&mut stream).expect("host hello should encode");
+        read_message(&mut stream).expect("start session should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::SessionReady {
+                width: 2,
+                height: 2,
+            },
+        )
+        .expect("session ready should encode");
+        write_message(
+            &mut stream,
+            &ControlMessage::EncodedVideoFrame(EncodedVideoFrame {
+                codec: wincast_protocol::config::VideoCodec::H264,
+                width: 2,
+                height: 2,
+                sequence_number: 1,
+                timestamp_ns: 1_000,
+                keyframe: true,
+                bytes: Vec::new(),
+            }),
+        )
+        .expect("encoded frame should encode");
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let error = run_client_with_config(&config).expect_err("invalid encoded frame should fail");
+
+    host_thread.join().expect("host thread should finish");
+    assert!(error.contains("H.264 编码帧无效"));
+    assert!(!error.contains("raw BGRA"));
+}
+
+#[test]
+fn client_rejects_non_h264_encoded_video_frame_from_host() {
+    let error = validate_encoded_video_frame(&EncodedVideoFrame {
+        codec: wincast_protocol::config::VideoCodec::RawBgra,
+        width: 2,
+        height: 2,
+        sequence_number: 1,
+        timestamp_ns: 1_000,
+        keyframe: true,
+        bytes: vec![0x00, 0x00, 0x00, 0x01, 0x67],
+    })
+    .expect_err("non-H.264 frame should fail");
+
+    assert!(error.contains("宿主端编码帧 codec 无效"));
+    assert!(error.contains("RawBgra"));
+    assert!(!error.contains("raw BGRA"));
 }
 
 #[test]
@@ -465,8 +577,10 @@ fn run_message_does_not_claim_runtime_chain_is_ready() {
     let message = control_channel_ready_message(&config);
 
     assert!(message.contains("已建立宿主端控制通道"));
-    assert!(message.contains("Linux 客户端已接入 raw BGRA 窗口渲染和输入事件回传"));
+    assert!(message.contains("客户端已完成宿主端首个视频响应的协议边界校验"));
     assert!(message.contains("宿主端已接入基础 Windows 输入注入"));
-    assert!(message.contains("H.264/WebRTC 编码传输尚未实现"));
+    assert!(!message.contains("H.264 编码帧"));
+    assert!(!message.contains("raw BGRA 已接入"));
+    assert!(!message.contains("H.264/WebRTC 编码传输尚未实现"));
     assert!(!message.contains("视频解码渲染和输入事件链路尚未实现"));
 }

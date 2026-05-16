@@ -6,7 +6,7 @@ use crate::{
     session_state::{RemoteSessionStatus, SessionEvent, SharedSessionState},
 };
 use wincast_protocol::{
-    config::HostConfig,
+    config::{HostConfig, VideoCodec},
     frame::read_message,
     handshake::accept_client_hello,
     ipc::SessionEndReason,
@@ -215,13 +215,25 @@ pub(super) fn run_started_session(
         })?;
     write_session_ready(writer, &first_frame)
         .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
-    write_raw_bgra_stream(
-        writer,
-        stream,
-        &first_frame,
-        session.as_mut(),
-        capture_input_bounds(active_capture_mode, &window, &first_frame),
-    )
+    match config.video.codec {
+        VideoCodec::RawBgra => write_raw_bgra_stream(
+            writer,
+            stream,
+            &first_frame,
+            session.as_mut(),
+            capture_input_bounds(active_capture_mode, &window, &first_frame),
+        ),
+        VideoCodec::H264 => {
+            let message = "尚未接入 H.264 编码器".to_owned();
+            let write_result =
+                write_control_error(writer, ErrorCode::EncodingFailed, message.clone());
+            let message = append_error_response_write_failure(message, write_result);
+            Err(HostSessionError::new(
+                HostSessionEndReason::CaptureFailed,
+                message,
+            ))
+        }
+    }
 }
 
 fn append_error_response_write_failure(

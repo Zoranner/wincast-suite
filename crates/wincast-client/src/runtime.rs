@@ -1,10 +1,10 @@
 use std::{fs, net::TcpStream, path::PathBuf, time::Duration};
 
 use wincast_protocol::{
-    config::ClientConfig,
+    config::{ClientConfig, VideoCodec},
     frame::read_message,
     handshake::{HandshakeError, read_host_hello, send_client_hello, send_start_session},
-    message::{ControlMessage, ErrorCode},
+    message::{ControlMessage, EncodedVideoFrame, ErrorCode},
 };
 
 use crate::{
@@ -194,6 +194,9 @@ fn read_first_readback_frame(
         ControlMessage::RawBgraReadbackFrame(frame) => {
             validate_readback_frame(&frame).map_err(ClientRunError::Fatal)
         }
+        ControlMessage::EncodedVideoFrame(frame) => {
+            validate_encoded_video_frame(&frame).map_err(ClientRunError::Fatal)
+        }
         ControlMessage::VideoReady => {
             read_first_raw_binary_frame(stream, render_mode, width, height)
                 .map_err(ClientRunError::Fatal)
@@ -209,9 +212,18 @@ fn read_first_readback_frame(
 
 pub(crate) fn control_channel_ready_message(config: &ClientConfig) -> String {
     format!(
-        "客户端配置有效，已建立宿主端控制通道 {}，已发送会话启动请求。Linux 客户端已接入 raw BGRA 窗口渲染和输入事件回传；宿主端已接入基础 Windows 输入注入，H.264/WebRTC 编码传输尚未实现。",
+        "客户端配置有效，已建立宿主端控制通道 {}，已发送会话启动请求。客户端已完成宿主端首个视频响应的协议边界校验；宿主端已接入基础 Windows 输入注入。",
         config.endpoint()
     )
+}
+
+pub(crate) fn validate_encoded_video_frame(frame: &EncodedVideoFrame) -> Result<(), String> {
+    if frame.codec != VideoCodec::H264 {
+        return Err(format!("宿主端编码帧 codec 无效: {:?}", frame.codec));
+    }
+    frame
+        .validate()
+        .map_err(|error| format!("宿主端 H.264 编码帧无效: {error:?}"))
 }
 
 fn format_handshake_error(error: HandshakeError) -> String {
