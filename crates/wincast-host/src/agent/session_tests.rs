@@ -27,7 +27,6 @@ use wincast_protocol::{
     config::VideoCodec,
     frame::{read_message, write_message},
     handshake::send_client_hello,
-    ipc::SessionEndReason,
     message::{ControlMessage, ErrorCode},
     raw_frame::read_raw_bgra_frame,
 };
@@ -663,10 +662,6 @@ fn host_sends_goodbye_when_capture_session_finishes() {
     .expect("capture end should be reported as a clean session end");
 
     assert_eq!(reason, HostSessionEndReason::CaptureInactive);
-    assert_eq!(
-        SessionEndReason::from(reason),
-        SessionEndReason::DesktopUnavailable
-    );
 
     let mut reader = writer.as_slice();
     assert_eq!(
@@ -700,10 +695,6 @@ fn host_reports_capture_error_before_returning_frame_read_failure() {
     .expect_err("capture read failure should be returned to host");
 
     assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
-    assert_eq!(
-        SessionEndReason::from(error.reason),
-        SessionEndReason::SessionFailed
-    );
     assert!(error.message.contains("读取后续 raw BGRA 捕获帧失败"));
     assert!(error.message.contains("D3D readback failed"));
 

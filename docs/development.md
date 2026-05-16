@@ -9,7 +9,7 @@
 Windows 侧当前保留 `windows` 与 `windows-sys` 双线绑定，不承诺已经收敛到单一绑定：
 
 - `wincast-capture` 使用 `windows`，因为 Windows Graphics Capture、WinRT 对象和 D3D11 资源交互需要更完整的类型封装和接口调用支持。
-- `wincast-host` 与 `wincast-input` 使用 `windows-sys`，因为当前主要调用 SCM、WTS、窗口枚举和 `SendInput` 等 Win32 API，边界更接近 C ABI，轻量绑定更便于显式管理句柄、结构体和错误码。
+- `wincast-host` 与 `wincast-input` 使用 `windows-sys`，因为当前主要调用 WTS、窗口枚举和 `SendInput` 等 Win32 API，边界更接近 C ABI，轻量绑定更便于显式管理句柄、结构体和错误码。
 
 升级 Windows 绑定依赖时，应分别检查两条线的版本兼容性、feature 范围和生成类型变化。跨 crate 传递 Windows 类型时优先使用项目自有的中性类型、句柄值或明确封装，避免把 `windows` 的 COM/WinRT 类型和 `windows-sys` 的裸 FFI 类型扩散到不属于它们的 crate。确需转换时，应在转换点说明来源、生命周期、所有权和失败语义，并把 unsafe 或句柄释放责任限制在最小模块内。
 
@@ -62,13 +62,12 @@ OpenH264 后端会在构建时编译 C/C++ 源码，因此 Linux 目标机除 SD
 
 稳定版真机烟测流程见 [稳定版真机烟测清单](smoke-test.md)。
 
-Host 与 Client 默认从用户配置目录读取配置，日常运行不需要每次传 `--config`。Windows host 默认读取 `%APPDATA%\WinCast\wincast-host.toml`；Linux client 默认读取 `${XDG_CONFIG_HOME:-$HOME/.config}/wincast/wincast-client.toml`。`XDG_CONFIG_HOME` 必须是非空绝对路径；未设置、为空或为相对路径时回退到 `$HOME/.config`。`--config` 仅用于临时调试或一次性验证时覆盖默认路径。
+Host 与 Client 默认从用户配置目录读取配置。Windows host 默认读取 `%APPDATA%\WinCast\wincast-host.toml`；Linux client 默认读取 `${XDG_CONFIG_HOME:-$HOME/.config}/wincast/wincast-client.toml`。`XDG_CONFIG_HOME` 必须是非空绝对路径；未设置、为空或为相对路径时回退到 `$HOME/.config`。
 
 仓库内 `examples/` 目录提供稳定版烟测示例配置。调整示例后至少执行以下校验，确保示例仍可被配置模型解析：
 
 ```powershell
 cargo test -p wincast-protocol --test config parses_stable
-cargo run -p wincast-host -- --config examples/wincast-host.toml validate
 cargo run -p wincast-client -- --config examples/wincast-client.toml validate
 ```
 
@@ -78,26 +77,12 @@ cargo run -p wincast-client -- --config examples/wincast-client.toml validate
 cargo run -p wincast-client -- run --retries 3 --retry-delay-ms 1000
 ```
 
-该重试只覆盖初始连接，不等同于会话中断后的自动恢复，也不代表 Service/Agent 编排已经完成。
+该重试只覆盖初始连接，不等同于会话中断后的自动恢复，也不代表锁屏恢复编排已经完成。
 
-Service 与 Host Agent IPC 当前已具备长度前缀 JSON frame 编解码底座，可用协议包测试验证：
+宿主端和客户端仍使用长度前缀 JSON frame 承载控制消息，可用协议包测试验证：
 
 ```powershell
 cargo test -p wincast-protocol ipc
 ```
 
-Host 侧还提供最小 TCP loopback transport，可把现有 `ServiceIpcEndpoint` 接到真实 `TcpStream` 并验证 Service/Agent 双向 round-trip：
-
-```powershell
-cargo test -p wincast-host service_ipc::tests::loopback_transport_round_trips_service_and_agent_messages
-```
-
-Service 侧还提供最小 Agent request/ack coordinator，可验证 `QueryStatus` / `StatusChanged` 以及 `StartSession` / `StopSession` 的编排语义：
-
-```powershell
-cargo test -p wincast-host service_agent
-```
-
-这仍不代表已经接入命名管道权限模型、Service 拉起 Agent、重连、心跳超时、真实 Agent 进程会话编排或消息投递重试策略。
-
-`wincast-host service` 子命令已接入 Windows SCM 的安装、卸载、启动、停止和状态查询最小闭环，并提供隐藏的 `service run` 入口供 SCM 启动服务进程。该能力只覆盖系统服务管理本身，不代表 Service 已经拉起交互桌面 Host Agent，也不代表命名管道权限模型、锁屏恢复、心跳或自动重连已经完成。真实 `service install/start/stop/uninstall` 会修改系统服务状态，需要在 Windows 管理员终端中按烟测清单手动验证。
+Host 当前没有独立命令行子命令和 Windows Service 管理入口；运行 `wincast-host` 就读取默认配置并进入监听。重连、心跳超时和锁屏恢复仍未完成。

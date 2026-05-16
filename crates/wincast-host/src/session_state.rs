@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use wincast_protocol::{ipc::AgentStatus, message::ErrorCode};
+use wincast_protocol::message::ErrorCode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -81,18 +81,6 @@ impl RemoteSessionStatus {
         match self {
             Self::Allowed => None,
             Self::Rejected { code, message } => Some((code.to_protocol_error_code(), message)),
-        }
-    }
-
-    /// 映射为 Service ↔ Agent IPC 中的 Agent 状态，与 `service_agent::ServiceAgentCoordinator::query_status` 约定一致。
-    pub fn to_ipc_agent_status(self) -> AgentStatus {
-        match self {
-            Self::Allowed => AgentStatus::Ready,
-            Self::Rejected { code, .. } => match code {
-                ClientSessionErrorCode::SessionLocked => AgentStatus::Locked,
-                ClientSessionErrorCode::NoUserLoggedIn => AgentStatus::Failed,
-                ClientSessionErrorCode::AgentUnavailable => AgentStatus::Starting,
-            },
         }
     }
 }
@@ -216,7 +204,7 @@ impl SharedSessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wincast_protocol::{ipc::AgentStatus, message::ErrorCode};
+    use wincast_protocol::message::ErrorCode;
 
     #[test]
     fn denies_remote_session_when_no_user_is_logged_in() {
@@ -417,47 +405,5 @@ mod tests {
             RemoteSessionStatus::Allowed
         );
         assert_eq!(machine.remote_session_status().to_protocol_error(), None);
-    }
-
-    #[test]
-    fn ipc_agent_status_maps_allowed_to_ready() {
-        let mut machine = SessionStateMachine::new();
-        machine.apply(SessionEvent::UserLoggedIn);
-        machine.apply(SessionEvent::AgentStarted);
-        assert_eq!(
-            machine.remote_session_status().to_ipc_agent_status(),
-            AgentStatus::Ready
-        );
-    }
-
-    #[test]
-    fn ipc_agent_status_maps_locked_to_locked() {
-        let mut machine = SessionStateMachine::new();
-        machine.apply(SessionEvent::UserLoggedIn);
-        machine.apply(SessionEvent::AgentStarted);
-        machine.apply(SessionEvent::SessionLocked);
-        assert_eq!(
-            machine.remote_session_status().to_ipc_agent_status(),
-            AgentStatus::Locked
-        );
-    }
-
-    #[test]
-    fn ipc_agent_status_maps_no_user_to_failed() {
-        let machine = SessionStateMachine::new();
-        assert_eq!(
-            machine.remote_session_status().to_ipc_agent_status(),
-            AgentStatus::Failed
-        );
-    }
-
-    #[test]
-    fn ipc_agent_status_maps_agent_unavailable_to_starting() {
-        let mut machine = SessionStateMachine::new();
-        machine.apply(SessionEvent::UserLoggedIn);
-        assert_eq!(
-            machine.remote_session_status().to_ipc_agent_status(),
-            AgentStatus::Starting
-        );
     }
 }

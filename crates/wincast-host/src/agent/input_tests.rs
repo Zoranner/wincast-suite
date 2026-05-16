@@ -19,7 +19,6 @@ use wincast_input::CaptureInputBounds;
 use wincast_protocol::{
     frame::{read_message, write_message},
     input::{ButtonState, InputEvent, Modifiers},
-    ipc::SessionEndReason,
     message::ControlMessage,
     raw_frame::read_raw_bgra_frame,
 };
@@ -159,10 +158,6 @@ fn raw_bgra_stream_stops_cleanly_when_input_reader_stops() {
     .expect("stop session should end raw stream without error");
 
     assert_eq!(reason, HostSessionEndReason::StopSession);
-    assert_eq!(
-        SessionEndReason::from(reason),
-        SessionEndReason::ServiceRequested
-    );
 
     let mut reader = writer.as_slice();
     assert_eq!(

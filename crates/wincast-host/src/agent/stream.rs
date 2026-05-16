@@ -17,7 +17,6 @@ use wincast_media::{
 };
 use wincast_protocol::{
     frame::{FrameError, read_message, write_message},
-    ipc::SessionEndReason,
     message::{ControlMessage, ErrorCode},
     raw_frame::{RawBgraFrame, write_raw_bgra_frame},
 };
@@ -32,26 +31,6 @@ pub(super) enum HostSessionEndReason {
     CaptureFailed,
     InputFailed,
     TransportFailed,
-}
-
-impl HostSessionEndReason {
-    fn service_reason(self) -> SessionEndReason {
-        match self {
-            Self::StopSession => SessionEndReason::ServiceRequested,
-            Self::CaptureInactive | Self::ClientDisconnected => {
-                SessionEndReason::DesktopUnavailable
-            }
-            Self::CaptureFailed | Self::InputFailed | Self::TransportFailed => {
-                SessionEndReason::SessionFailed
-            }
-        }
-    }
-}
-
-impl From<HostSessionEndReason> for SessionEndReason {
-    fn from(reason: HostSessionEndReason) -> Self {
-        reason.service_reason()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
