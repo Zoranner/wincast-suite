@@ -60,7 +60,7 @@ OpenH264 后端会在构建时编译 C/C++ 源码，因此 Linux 目标机除 SD
 
 ## 运行与占位边界
 
-稳定版真机烟测流程见 [稳定版真机烟测清单](smoke-test.md)。
+稳定版真机烟测前，先按 [部署准备说明](deployment-prep.md) 确认两端产物、配置、依赖和防火墙。准备完成后，再执行 [稳定版真机烟测清单](smoke-test.md)。
 
 Host 与 Client 默认从用户配置目录读取配置。Windows host 默认读取 `%APPDATA%\WinCast\host.toml`；Linux client 默认读取 `${XDG_CONFIG_HOME:-$HOME/.config}/wincast/client.toml`。`XDG_CONFIG_HOME` 必须是非空绝对路径；未设置、为空或为相对路径时回退到 `$HOME/.config`。两端执行可执行程序即启动。
 

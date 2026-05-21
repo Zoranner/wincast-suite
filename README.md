@@ -69,11 +69,13 @@ wincast-client
 
 客户端启动后会连接 Windows 端，打开窗口并显示目标程序画面。鼠标和键盘操作会回传到 Windows 端。
 
+## 部署与烟测
+
+部署前先按 [docs/deployment-prep.md](docs/deployment-prep.md) 准备两端产物、配置、依赖和防火墙。完成部署准备后，再按 [docs/smoke-test.md](docs/smoke-test.md) 执行 Windows host、Linux x86_64 client 和 Linux aarch64/ARM64 client 真机烟测。
+
 ## 使用限制
 
 - Windows 端需要处于已登录桌面。
 - 当前只支持一台客户端连接。
 - 当前只支持单显示器。
 - 锁屏、注销或网络中断时，本次连接会断开，客户端会尝试重新连接。
-
-更多部署步骤见 [docs/smoke-test.md](docs/smoke-test.md)。
