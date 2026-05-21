@@ -61,6 +61,7 @@ jobs:
               wincast-host-x86_64-pc-windows-msvc.zip.sha256
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            linux_image: debian/eol:buster
             package: wincast-client
             binary: wincast-client
             archive: wincast-client-x86_64-unknown-linux-gnu.tar.gz
@@ -70,6 +71,7 @@ jobs:
               wincast-client-x86_64-unknown-linux-gnu.tar.gz.sha256
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+            linux_image: debian/eol:buster
             package: wincast-client
             binary: wincast-client
             archive: wincast-client-aarch64-unknown-linux-gnu.tar.gz
@@ -83,11 +85,13 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup Rust toolchain
+        if: runner.os == 'Windows'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo dependencies
+        if: runner.os == 'Windows'
         uses: actions/cache@v5
         with:
           path: |
@@ -100,14 +104,67 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-release-cargo-
 
-      - name: Install Linux build dependencies
+      - name: Build release binary
+        if: runner.os == 'Windows'
+        run: cargo build --release --target ${{ matrix.target }} --package ${{ matrix.package }}
+
+      - name: Build and package Linux client archive
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libsdl2-dev
+          docker run --rm \
+            -e CARGO_TERM_COLOR=always \
+            -e GITHUB_REF_NAME="${GITHUB_REF_NAME}" \
+            -e GITHUB_SHA="${GITHUB_SHA}" \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            "${{ matrix.linux_image }}" \
+            bash -lc '
+              set -euxo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates \
+                curl \
+                build-essential \
+                binutils \
+                nasm \
+                pkg-config \
+                libsdl2-dev
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain stable --target "${{ matrix.target }}"
+              . "$HOME/.cargo/env"
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --package ${{ matrix.package }}
+              cargo build --release --target "${{ matrix.target }}" --package "${{ matrix.package }}"
+              binary_path="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+              readelf --version-info "$binary_path" \
+                | grep -o "GLIBC_[0-9.]*" \
+                | sort -Vu \
+                | tail -n 8 || true
+              if readelf --version-info "$binary_path" \
+                | grep -E "GLIBC_2\\.([3-9][0-9]|29)" >/dev/null; then
+                echo "release binary requires glibc newer than 2.28"
+                exit 1
+              fi
+
+              root="wincast-client-${{ matrix.target }}"
+              rm -rf "$root"
+              mkdir -p "$root/docs" "$root/examples"
+              install -m 0755 "$binary_path" "$root/${{ matrix.binary }}"
+              install -m 0644 README.md "$root/README.md"
+              install -m 0644 examples/client.toml "$root/examples/client.toml"
+              install -m 0644 docs/deployment-prep.md docs/smoke-test.md docs/current-status.md docs/development.md "$root/docs/"
+              {
+                echo "version=${GITHUB_REF_NAME}"
+                echo "commit=${GITHUB_SHA}"
+                echo "target=${{ matrix.target }}"
+                echo "package=${{ matrix.package }}"
+                echo "binary=${{ matrix.binary }}"
+                echo "linux_image=${{ matrix.linux_image }}"
+                echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              } > "$root/VERSION.txt"
+              tar -czf "${{ matrix.archive }}" "$root"
+              sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+            '
 
       - name: Prepare Windows host archive
         if: runner.os == 'Windows'
@@ -138,28 +195,6 @@ jobs:
           Compress-Archive -Path "$root" -DestinationPath "${{ matrix.archive }}" -Force
           $hash = (Get-FileHash "${{ matrix.archive }}" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  ${{ matrix.archive }}" | Set-Content "${{ matrix.archive }}.sha256" -Encoding ASCII
-
-      - name: Prepare Linux client archive
-        if: runner.os == 'Linux'
-        run: |
-          set -euxo pipefail
-          root="wincast-client-${{ matrix.target }}"
-          release_dir="target/${{ matrix.target }}/release"
-          mkdir -p "$root/docs" "$root/examples"
-          install -m 0755 "$release_dir/${{ matrix.binary }}" "$root/${{ matrix.binary }}"
-          install -m 0644 README.md "$root/README.md"
-          install -m 0644 examples/client.toml "$root/examples/client.toml"
-          install -m 0644 docs/deployment-prep.md docs/smoke-test.md docs/current-status.md docs/development.md "$root/docs/"
-          {
-            echo "version=${GITHUB_REF_NAME}"
-            echo "commit=${GITHUB_SHA}"
-            echo "target=${{ matrix.target }}"
-            echo "package=${{ matrix.package }}"
-            echo "binary=${{ matrix.binary }}"
-            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          } > "$root/VERSION.txt"
-          tar -czf "${{ matrix.archive }}" "$root"
-          sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

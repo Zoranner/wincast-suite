@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "wincast-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
  "windows",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "wincast-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "wincast-media",
  "wincast-protocol",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "wincast-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "wincast-capture",
  "wincast-input",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "wincast-input"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "wincast-protocol",
  "windows-sys",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "wincast-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "openh264",
  "thiserror",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "wincast-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "wincast-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sdl2",
  "wincast-protocol",
