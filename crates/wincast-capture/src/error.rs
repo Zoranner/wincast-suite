@@ -6,6 +6,10 @@ pub enum CaptureError {
     WindowsCaptureNotImplemented,
     #[error("当前 Windows 系统不支持 Windows Graphics Capture")]
     WindowsGraphicsCaptureUnsupported,
+    #[error(
+        "当前 Windows 版本不支持窗口捕获：窗口捕获需要 Windows 10 1903 / Build 18362 或更高版本；当前 Build {build}"
+    )]
+    WindowsWindowCaptureUnsupported { build: u32 },
     #[error("检测 Windows Graphics Capture 支持状态失败: {0}")]
     WindowsGraphicsCaptureSupportCheckFailed(String),
     #[error("创建窗口捕获目标失败: {0}")]
@@ -29,6 +33,10 @@ impl CaptureError {
 
     pub fn windows_graphics_capture_unsupported() -> Self {
         Self::WindowsGraphicsCaptureUnsupported
+    }
+
+    pub fn windows_window_capture_unsupported(build: u32) -> Self {
+        Self::WindowsWindowCaptureUnsupported { build }
     }
 
     pub fn windows_graphics_capture_support_check_failed(error: impl Into<String>) -> Self {

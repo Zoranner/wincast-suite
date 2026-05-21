@@ -123,10 +123,11 @@ pub(super) fn start_capture_session(
     let (mut session, active_mode) = match config.capture.mode {
         CaptureMode::Auto => match capture.start_capture(window_capture_target(window)) {
             Ok(session) => (session, ActiveCaptureMode::Window),
-            Err(_) => (
+            Err(error) if should_fallback_to_display(&error) => (
                 capture.start_capture(display_capture_target(window))?,
                 ActiveCaptureMode::Display,
             ),
+            Err(error) => return Err(error),
         },
         CaptureMode::Window => (
             capture.start_capture(window_capture_target(window))?,
@@ -142,6 +143,17 @@ pub(super) fn start_capture_session(
         || session.try_next_bgra_frame(),
     )?;
     Ok((session, first_frame, active_mode))
+}
+
+fn should_fallback_to_display(error: &CaptureError) -> bool {
+    matches!(
+        error,
+        CaptureError::WindowsCaptureNotImplemented
+            | CaptureError::WindowsGraphicsCaptureUnsupported
+            | CaptureError::WindowsWindowCaptureUnsupported { .. }
+            | CaptureError::WindowsGraphicsCaptureSupportCheckFailed(_)
+            | CaptureError::WindowsCaptureItemCreateFailed(_)
+    )
 }
 
 fn window_capture_target(window: &WindowCandidate) -> CaptureTarget {

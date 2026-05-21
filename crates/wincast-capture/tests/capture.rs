@@ -119,6 +119,10 @@ fn capture_errors_have_clear_chinese_messages() {
         "当前 Windows 系统不支持 Windows Graphics Capture"
     );
     assert_eq!(
+        CaptureError::windows_window_capture_unsupported(17763).to_string(),
+        "当前 Windows 版本不支持窗口捕获：窗口捕获需要 Windows 10 1903 / Build 18362 或更高版本；当前 Build 17763"
+    );
+    assert_eq!(
         CaptureError::windows_graphics_capture_support_check_failed("HRESULT 0x80004005")
             .to_string(),
         "检测 Windows Graphics Capture 支持状态失败: HRESULT 0x80004005"

@@ -6,6 +6,7 @@
 
 - Windows host 与 Linux client 位于同一可达网络，Windows 防火墙已放通 Host 监听端口。
 - Windows host 使用可交互桌面登录，待捕获应用能以前台程序启动，并且目标窗口标题包含稳定可匹配文本。
+- Windows host 如果是 Build 17763，烟测只使用 `capture.mode = "auto"` 或 `display`；`window` 单窗口捕获只在 Build 18362 或更高版本验证。
 - Linux client 已安装 C/C++ 编译工具链、`pkg-config` 和 SDL2 运行/开发依赖；OpenH264 后端会在构建时编译 C/C++ 源码。ARM64 目标机需要在真实 aarch64/ARM64 Linux 设备上执行同一流程。
 - 两端使用同一版本产物，Host 使用 `wincast-host`，Client 使用 `wincast-client`。
 
@@ -22,7 +23,7 @@ Windows host 使用 H.264 编码链路和自动捕获策略，重点核对以下
 - `program`、`args`、`work_dir`：待捕获应用的启动命令和工作目录。
 - `video.codec`：稳定版烟测使用 `h264`。
 - `video.width`、`video.height`：目标上限最高 1920x1080，按宿主实际画面走，不主动降采样。
-- `capture.mode`：稳定版默认烟测使用 `auto`；`window` 表示只验证普通窗口捕获，`display` 表示捕获唯一宿主显示器。
+- `capture.mode`：稳定版默认烟测使用 `auto`；Build 17763 下 `auto` 会从窗口捕获不可用自动切到唯一显示器捕获，`display` 表示直接捕获唯一宿主显示器，`window` 只用于 Build 18362 或更高版本的普通窗口捕获验证。
 - `capture.window_title_contains`：用于普通窗口定位；全屏程序或窗口捕获失败时，由 `auto` 模式切到唯一显示器捕获兜底。
 - `capture.startup_timeout_ms`：目标应用启动和窗口出现的等待时间。
 

@@ -45,6 +45,8 @@ cargo check -p wincast-client --target aarch64-unknown-linux-gnu
 
 当前正式视频链路固定为低延迟 H.264 编码帧，不再把未编码像素帧作为稳定版网络传输主线，也不规划 WebRTC 或 UDP 媒体通道。Linux 客户端仍使用 SDL2 承载窗口和输入事件，稳定版收口需要验证 H.264 解码、渲染和输入回传的端到端链路。
 
+Windows 宿主端必须运行在已登录的交互桌面中。Windows 10 1809 / Build 17763 不支持 Windows Graphics Capture 的 window/monitor interop，因此 `auto`/`display` 会走 DXGI Desktop Duplication 的唯一显示器捕获路径；`window` 单窗口捕获只在 Windows 10 1903 / Build 18362 或更高版本可用。
+
 Windows 开发机上的 workspace 验证只能证明非 Linux 占位路径和协议逻辑可编译，不能替代目标系统真机构建。客户端稳定版收口时，必须在目标 Linux 机器上安装 SDL2 bundled static 构建依赖后分别验证：
 
 ```bash
