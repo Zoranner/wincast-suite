@@ -8,6 +8,13 @@
 
 Windows 宿主端需要 `wincast-host` 可执行程序。Linux 客户端需要对应目标架构的 `wincast-client` 可执行程序。两端应来自同一代码版本，避免协议结构、配置字段或 H.264 帧边界不一致。
 
+仓库发布流程由 `.github/workflows/release.yml` 管理。推送 `v*` 版本标签后，CI 会先执行工程门禁，再构建并上传以下 Release 资产：
+
+- `wincast-host-x86_64-pc-windows-msvc.zip`：Windows 宿主端包，包含 `wincast-host.exe`、宿主端示例配置和部署文档。
+- `wincast-client-x86_64-unknown-linux-gnu.tar.gz`：Linux x86_64 客户端包，包含 `wincast-client`、客户端示例配置和部署文档。
+- `wincast-client-aarch64-unknown-linux-gnu.tar.gz`：Linux aarch64/ARM64 客户端包，包含 `wincast-client`、客户端示例配置和部署文档。
+- 每个压缩包对应一个 `.sha256` 校验文件。
+
 本地开发阶段可以使用 Cargo 产物；交付阶段应固定产物目录和版本标识。复制产物时同时记录：
 
 - Git 提交号。
