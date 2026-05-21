@@ -45,18 +45,22 @@ cargo check -p wincast-client --target aarch64-unknown-linux-gnu
 
 当前正式视频链路固定为低延迟 H.264 编码帧，不再把未编码像素帧作为稳定版网络传输主线，也不规划 WebRTC 或 UDP 媒体通道。Linux 客户端仍使用 SDL2 承载窗口和输入事件，稳定版收口需要验证 H.264 解码、渲染和输入回传的端到端链路。
 
-Windows 开发机上的 workspace 验证只能证明非 Linux 占位路径和协议逻辑可编译，不能替代目标系统真机构建。客户端稳定版收口时，必须在目标 Linux 机器上安装 SDL2 开发包后分别验证：
+Windows 开发机上的 workspace 验证只能证明非 Linux 占位路径和协议逻辑可编译，不能替代目标系统真机构建。客户端稳定版收口时，必须在目标 Linux 机器上安装 SDL2 bundled static 构建依赖后分别验证：
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libsdl2-dev
+sudo apt-get install -y build-essential cmake pkg-config \
+  libasound2-dev libdbus-1-dev libgl1-mesa-dev libibus-1.0-dev \
+  libpulse-dev libudev-dev libwayland-dev libx11-dev libxcursor-dev \
+  libxext-dev libxi-dev libxinerama-dev libxkbcommon-dev libxrandr-dev \
+  libxrender-dev libxss-dev libxtst-dev
 cargo test -p wincast-protocol -p wincast-client
 cargo clippy -p wincast-protocol -p wincast-client --all-targets --all-features -- -D warnings
 ```
 
-OpenH264 后端会在构建时编译 C/C++ 源码，因此 Linux 目标机除 SDL2 外还需要可用的 C/C++ 编译工具链。若构建报找不到 `g++`、`cc`、`c++` 或 OpenH264 build script 失败，先补齐系统编译工具链，再判断 Rust 代码问题。
+OpenH264 后端和 bundled SDL2 会在构建时编译 C/C++ 源码，因此 Linux 目标机需要可用的 C/C++ 编译工具链和 CMake。若构建报找不到 `g++`、`cc`、`c++`、`cmake`，或 OpenH264/SDL2 build script 失败，先补齐系统编译工具链，再判断 Rust 代码问题。
 
-在银河麒麟 V10 等不使用 `apt` 的系统上，应改用系统对应包管理器安装 C/C++ 编译工具链、`pkg-config` 和 SDL2 开发包，再执行同一组 Cargo 命令。x86_64 目标机和 aarch64/ARM64 目标机都需要完成这组验证，并按稳定版真机烟测清单执行客户端窗口运行与输入回传验证；aarch64 交叉编译检查只能确认 Rust 编译边界，不能替代 ARM64 目标机上的 SDL2 链接和窗口运行验证。
+在银河麒麟 V10 等不使用 `apt` 的系统上，应改用系统对应包管理器安装 C/C++ 编译工具链、`cmake`、`pkg-config` 和对应图形/音频开发库，再执行同一组 Cargo 命令。x86_64 目标机和 aarch64/ARM64 目标机都需要完成这组验证，并按稳定版真机烟测清单执行客户端窗口运行与输入回传验证；aarch64 交叉编译检查只能确认 Rust 编译边界，不能替代 ARM64 目标机上的 SDL2 链接和窗口运行验证。
 
 ## 运行与占位边界
 

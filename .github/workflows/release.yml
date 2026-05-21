@@ -127,9 +127,26 @@ jobs:
                 curl \
                 build-essential \
                 binutils \
+                cmake \
                 nasm \
                 pkg-config \
-                libsdl2-dev
+                libasound2-dev \
+                libdbus-1-dev \
+                libgl1-mesa-dev \
+                libibus-1.0-dev \
+                libpulse-dev \
+                libudev-dev \
+                libwayland-dev \
+                libx11-dev \
+                libxcursor-dev \
+                libxext-dev \
+                libxi-dev \
+                libxinerama-dev \
+                libxkbcommon-dev \
+                libxrandr-dev \
+                libxrender-dev \
+                libxss-dev \
+                libxtst-dev
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --profile minimal --default-toolchain stable --target "${{ matrix.target }}"
               . "$HOME/.cargo/env"

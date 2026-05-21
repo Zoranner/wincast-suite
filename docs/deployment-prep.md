@@ -45,13 +45,17 @@ Host 配置重点检查：
 
 ## Linux 客户端准备
 
-Linux client 需要安装 C/C++ 编译工具链、`pkg-config` 和 SDL2 开发/运行依赖。OpenH264 后端会在构建时编译 C/C++ 源码，不能只检查 Rust 工具链。
+Linux client 源码构建需要安装 C/C++ 编译工具链、`pkg-config`、`cmake` 和 SDL2 bundled static 构建所需的系统图形/音频开发库。OpenH264 和 bundled SDL2 都会在构建时编译 C/C++ 源码，不能只检查 Rust 工具链。
 
 Debian/Ubuntu 类系统可按开发说明安装：
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libsdl2-dev
+sudo apt-get install -y build-essential cmake pkg-config \
+  libasound2-dev libdbus-1-dev libgl1-mesa-dev libibus-1.0-dev \
+  libpulse-dev libudev-dev libwayland-dev libx11-dev libxcursor-dev \
+  libxext-dev libxi-dev libxinerama-dev libxkbcommon-dev libxrandr-dev \
+  libxrender-dev libxss-dev libxtst-dev
 ```
 
 银河麒麟 V10 等非 `apt` 系统应使用对应包管理器安装同类依赖，再执行相同 Cargo 验证和客户端运行验证。
