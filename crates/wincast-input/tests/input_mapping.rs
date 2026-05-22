@@ -5,12 +5,7 @@ use wincast_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 
 #[test]
 fn maps_mouse_move_to_absolute_windows_action() {
-    let bounds = CaptureInputBounds {
-        origin_x: 100,
-        origin_y: 200,
-        width: 1280,
-        height: 720,
-    };
+    let bounds = CaptureInputBounds::from_capture_size(100, 200, 1280, 720);
 
     let actions =
         map_input_event_to_windows_actions(InputEvent::MouseMove { x: 640.0, y: 360.0 }, bounds)
@@ -24,12 +19,7 @@ fn maps_mouse_move_to_absolute_windows_action() {
 
 #[test]
 fn maps_mouse_move_absolute_to_absolute_windows_action() {
-    let bounds = CaptureInputBounds {
-        origin_x: 100,
-        origin_y: 200,
-        width: 1280,
-        height: 720,
-    };
+    let bounds = CaptureInputBounds::from_capture_size(100, 200, 1280, 720);
 
     let actions = map_input_event_to_windows_actions(
         InputEvent::MouseMoveAbsolute { x: 640.0, y: 360.0 },
@@ -50,12 +40,7 @@ fn maps_mouse_move_delta_to_relative_windows_action() {
             delta_x: -12,
             delta_y: 34,
         },
-        CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 0,
-            height: 0,
-        },
+        CaptureInputBounds::from_capture_size(0, 0, 0, 0),
     )
     .expect("relative mouse move should not depend on capture bounds");
 
@@ -70,12 +55,7 @@ fn maps_mouse_move_delta_to_relative_windows_action() {
 
 #[test]
 fn clamps_mouse_move_inside_capture_bounds() {
-    let bounds = CaptureInputBounds {
-        origin_x: 10,
-        origin_y: 20,
-        width: 100,
-        height: 50,
-    };
+    let bounds = CaptureInputBounds::from_capture_size(10, 20, 100, 50);
 
     let actions =
         map_input_event_to_windows_actions(InputEvent::MouseMove { x: 120.0, y: -10.0 }, bounds)
@@ -91,12 +71,7 @@ fn clamps_mouse_move_inside_capture_bounds() {
 fn reports_invalid_bounds_and_mouse_coordinates() {
     let invalid_bounds = map_input_event_to_windows_actions(
         InputEvent::MouseMove { x: 1.0, y: 1.0 },
-        CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 0,
-            height: 720,
-        },
+        CaptureInputBounds::from_capture_size(0, 0, 0, 720),
     )
     .expect_err("zero-sized bounds should fail");
 
@@ -110,12 +85,7 @@ fn reports_invalid_bounds_and_mouse_coordinates() {
             x: f32::NAN,
             y: 1.0,
         },
-        CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 1280,
-            height: 720,
-        },
+        CaptureInputBounds::from_capture_size(0, 0, 1280, 720),
     )
     .expect_err("invalid coordinate should fail");
 
@@ -127,12 +97,7 @@ fn reports_invalid_bounds_and_mouse_coordinates() {
 
 #[test]
 fn maps_mouse_button_wheel_and_keyboard_events() {
-    let bounds = CaptureInputBounds {
-        origin_x: 0,
-        origin_y: 0,
-        width: 1280,
-        height: 720,
-    };
+    let bounds = CaptureInputBounds::from_capture_size(0, 0, 1280, 720);
     let modifiers = Modifiers {
         shift: true,
         ctrl: false,
@@ -189,12 +154,9 @@ fn maps_mouse_button_wheel_and_keyboard_events() {
 #[cfg(not(windows))]
 #[test]
 fn non_windows_sendinput_unsupported_message_is_chinese() {
-    let error = wincast_input::input::WindowsInputEventSink::new(CaptureInputBounds {
-        origin_x: 0,
-        origin_y: 0,
-        width: 1280,
-        height: 720,
-    })
+    let error = wincast_input::input::WindowsInputEventSink::new(
+        CaptureInputBounds::from_capture_size(0, 0, 1280, 720),
+    )
     .inject(InputEvent::MouseButton {
         button: MouseButton::Right,
         state: ButtonState::Released,

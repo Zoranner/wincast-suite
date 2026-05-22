@@ -28,12 +28,8 @@ mod tests {
         use super::*;
         use wincast_protocol::input::{ButtonState, MouseButton};
 
-        let mut sink = WindowsInputEventSink::new(CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 1280,
-            height: 720,
-        });
+        let mut sink =
+            WindowsInputEventSink::new(CaptureInputBounds::from_capture_size(0, 0, 1280, 720));
 
         let error = sink
             .inject(InputEvent::MouseButton {
