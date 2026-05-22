@@ -12,7 +12,7 @@ use wincast_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 use crate::{
     BgraPixelFrame, BgraPixelRenderer, LoadingStatus, PixelDimensions, RenderConfig, RenderError,
     RenderLoopAction, RenderLoopResult, coalesce_input_events, map_window_point_to_frame_pixels,
-    mouse_button_input_events,
+    mouse_button_input_events, should_disable_local_text_input,
 };
 
 pub struct SdlBgraPixelRenderer {
@@ -37,6 +37,9 @@ impl SdlBgraPixelRenderer {
             window
                 .set_fullscreen(FullscreenType::Desktop)
                 .map_err(RenderError::Backend)?;
+        }
+        if should_disable_local_text_input() {
+            video.text_input().stop();
         }
         let mut canvas_builder = window.into_canvas().accelerated();
         if config.vsync {

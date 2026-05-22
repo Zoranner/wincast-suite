@@ -24,6 +24,11 @@ impl RenderConfig {
 }
 
 #[cfg(any(test, target_os = "linux"))]
+pub(crate) fn should_disable_local_text_input() -> bool {
+    true
+}
+
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PixelDimensions {
     pub width: u32,
@@ -302,6 +307,11 @@ mod tests {
 
         config.validate().expect("render config should be valid");
         assert!(!config.vsync);
+    }
+
+    #[test]
+    fn renderer_policy_disables_local_text_input() {
+        assert!(should_disable_local_text_input());
     }
 
     #[test]
