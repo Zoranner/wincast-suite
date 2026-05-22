@@ -70,19 +70,33 @@ pub(crate) fn run_fullscreen_client(
     .map_err(|error| format!("创建客户端 SDL2 全屏窗口失败: {error}"))?;
     let mut tick = 0;
     render_loading_status(&mut renderer, "正在启动客户端", &mut tick)?;
-    run_with_retry_and_reporter(
+    let mut state = FullscreenRetryState {
+        renderer: &mut renderer,
+        tick: &mut tick,
+    };
+    run_with_retry_and_reporter_state(
         &retry_options,
-        || run_client_attempt_with_renderer(&config, &mut renderer, &mut tick),
+        &mut state,
+        |state| run_client_attempt_with_renderer(&config, &mut *state.renderer, &mut *state.tick),
         std::thread::sleep,
-        |report| {
+        |state, report| {
             let _ = render_loading_status(
-                &mut renderer,
+                &mut *state.renderer,
                 &format!("{} ms 后重试", report.retry_delay.as_millis()),
-                &mut tick,
+                &mut *state.tick,
             );
             eprintln!("{}", format_retry_report(report));
         },
     )
+}
+
+#[cfg(target_os = "linux")]
+struct FullscreenRetryState<'a, R>
+where
+    R: wincast_render::BgraPixelRenderer,
+{
+    renderer: &'a mut R,
+    tick: &'a mut u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -250,14 +264,30 @@ pub(crate) fn run_with_retry(
 pub(crate) fn run_with_retry_and_reporter(
     options: &RetryOptions,
     mut attempt: impl FnMut() -> Result<String, ClientRunError>,
-    mut sleep: impl FnMut(Duration),
+    sleep: impl FnMut(Duration),
     mut reporter: impl FnMut(&RetryReport),
+) -> Result<String, String> {
+    run_with_retry_and_reporter_state(
+        options,
+        &mut (),
+        |_| attempt(),
+        sleep,
+        |_, report| reporter(report),
+    )
+}
+
+fn run_with_retry_and_reporter_state<S>(
+    options: &RetryOptions,
+    state: &mut S,
+    mut attempt: impl FnMut(&mut S) -> Result<String, ClientRunError>,
+    mut sleep: impl FnMut(Duration),
+    mut reporter: impl FnMut(&mut S, &RetryReport),
 ) -> Result<String, String> {
     let max_attempts = options.retries.saturating_add(1);
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match attempt() {
+        match attempt(state) {
             Ok(message) => return Ok(message),
             Err(error) => {
                 if let ClientRunError::NormalSessionEnd(message) = error {
@@ -274,12 +304,15 @@ pub(crate) fn run_with_retry_and_reporter(
                         error.into_message()
                     ));
                 }
-                reporter(&RetryReport {
-                    attempt: attempts,
-                    max_attempts,
-                    retry_delay: options.retry_delay,
-                    reason: error.into_message(),
-                });
+                reporter(
+                    state,
+                    &RetryReport {
+                        attempt: attempts,
+                        max_attempts,
+                        retry_delay: options.retry_delay,
+                        reason: error.into_message(),
+                    },
+                );
                 sleep(options.retry_delay);
             }
         }
