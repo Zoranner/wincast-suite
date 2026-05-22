@@ -55,6 +55,8 @@ pub struct ProgramConfig {
     pub args: Vec<String>,
     pub work_dir: String,
     pub startup_delay_ms: u64,
+    #[serde(default)]
+    pub turn_off_monitor_after_launch: bool,
 }
 
 impl ProgramConfig {

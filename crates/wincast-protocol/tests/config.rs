@@ -70,9 +70,39 @@ first_frame_timeout_ms = 5000
     assert_eq!(config.program.args, ["--demo"]);
     assert_eq!(config.program.work_dir, "C:\\Program Files\\SomeApp");
     assert_eq!(config.program.startup_delay_ms, 0);
+    assert!(!config.program.turn_off_monitor_after_launch);
     assert_eq!(config.video.width, 1280);
     assert_eq!(config.video.codec, VideoCodec::H264);
     assert_eq!(config.capture.first_frame_timeout_ms, 5000);
+}
+
+#[test]
+fn parses_host_config_with_monitor_power_off_after_program_launch() {
+    let config = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+
+[program]
+path = 'C:\Program Files\SomeApp\app.exe'
+work_dir = 'C:\Program Files\SomeApp'
+startup_delay_ms = 3000
+turn_off_monitor_after_launch = true
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+first_frame_timeout_ms = 5000
+"#,
+    )
+    .expect("host config with monitor power option should parse");
+
+    assert!(config.program.turn_off_monitor_after_launch);
 }
 
 #[test]

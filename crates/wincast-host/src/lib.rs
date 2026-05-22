@@ -8,6 +8,7 @@ use wincast_protocol::config::HostConfig;
 
 mod agent;
 mod agent_runtime;
+mod monitor_power;
 mod program;
 pub mod session_events;
 pub mod session_state;

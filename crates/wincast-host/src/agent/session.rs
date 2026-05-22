@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::{
+    monitor_power::{MonitorPowerController, StdMonitorPowerController},
     program::{ProgramRunner, StartedProgram},
     session_events::{
         DesktopSessionDetector, DesktopSessionError, DetectedDesktopSession,
@@ -50,6 +51,25 @@ pub(super) fn handle_control_client_with_session_gate(
     capture: &mut impl CaptureStarter,
     session_gate: &mut impl SessionGate,
 ) -> Result<(), String> {
+    let mut monitor_power = StdMonitorPowerController;
+    handle_control_client_with_runtime(
+        stream,
+        config,
+        runner,
+        capture,
+        session_gate,
+        &mut monitor_power,
+    )
+}
+
+pub(super) fn handle_control_client_with_runtime(
+    stream: &mut TcpStream,
+    config: &HostConfig,
+    runner: &mut impl ProgramRunner,
+    capture: &mut impl CaptureStarter,
+    session_gate: &mut impl SessionGate,
+    monitor_power: &mut impl MonitorPowerController,
+) -> Result<(), String> {
     let mut writer = stream
         .try_clone()
         .map_err(|error| format!("克隆控制连接写入端失败: {error}"))?;
@@ -66,6 +86,19 @@ pub(super) fn handle_control_client_with_session_gate(
                         write_control_error(&mut writer, ErrorCode::ProgramLaunchFailed, detail);
                     message
                 })?;
+            if config.program.turn_off_monitor_after_launch
+                && let Err(error) = monitor_power.turn_off_monitor()
+            {
+                let cleanup_result = runner
+                    .cleanup(&mut started)
+                    .map_err(|error| format!("清理宿主端程序失败: {error}"));
+                return match cleanup_result {
+                    Ok(()) => Err(format!("关闭宿主端显示器失败: {error}")),
+                    Err(cleanup_error) => {
+                        Err(format!("关闭宿主端显示器失败: {error}；{cleanup_error}"))
+                    }
+                };
+            }
             let result = run_started_session(
                 &mut writer,
                 stream,

@@ -12,6 +12,7 @@ use std::{
 use crate::{
     agent::capture::{CaptureRuntime, CaptureStarter, InputEventSink},
     agent::session::SessionGate,
+    monitor_power::{MonitorPowerController, MonitorPowerError, monitor_power_error},
     program::{self, ProgramRunner},
     session_state::RemoteSessionStatus,
 };
@@ -55,6 +56,22 @@ impl ProgramRunner for RecordingProgramRunner {
     ) -> Result<(), program::LaunchError> {
         self.cleaned.push(started.process_id);
         Ok(())
+    }
+}
+
+#[derive(Default)]
+pub(super) struct RecordingMonitorPowerController {
+    pub(super) calls: usize,
+    pub(super) fail_message: Option<&'static str>,
+}
+
+impl MonitorPowerController for RecordingMonitorPowerController {
+    fn turn_off_monitor(&mut self) -> Result<(), MonitorPowerError> {
+        self.calls += 1;
+        match self.fail_message {
+            Some(message) => Err(monitor_power_error(message)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -216,6 +233,7 @@ pub(super) fn host_config_with_codec(listen: String, codec: VideoCodec) -> HostC
             args: Vec::new(),
             work_dir: "C:\\Program Files\\SomeApp".to_owned(),
             startup_delay_ms: 0,
+            turn_off_monitor_after_launch: false,
         },
         video: VideoConfig {
             width: 1280,

@@ -5,6 +5,7 @@ path = 'C:\Windows\System32\notepad.exe'
 args = []
 work_dir = 'C:\Windows\System32'
 startup_delay_ms = 3000
+turn_off_monitor_after_launch = false
 
 [video]
 width = 1280

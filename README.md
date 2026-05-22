@@ -22,6 +22,7 @@ path = 'C:\Program Files\SomeApp\app.exe'
 args = []
 work_dir = 'C:\Program Files\SomeApp'
 startup_delay_ms = 3000
+turn_off_monitor_after_launch = false
 
 [video]
 width = 1280
@@ -35,7 +36,7 @@ max_bitrate_kbps = 6000
 first_frame_timeout_ms = 5000
 ```
 
-`program.path` 改成要打开的 Windows 程序路径。`program.startup_delay_ms` 表示程序启动后延迟多久开始整屏捕获。`listen` 的端口要和客户端配置一致。
+`program.path` 改成要打开的 Windows 程序路径。`program.startup_delay_ms` 表示程序启动后延迟多久开始整屏捕获。`program.turn_off_monitor_after_launch` 设为 `true` 时，宿主端会在目标程序启动成功后请求 Windows 关闭物理显示器。`listen` 的端口要和客户端配置一致。
 
 ## 配置 Linux 端
 

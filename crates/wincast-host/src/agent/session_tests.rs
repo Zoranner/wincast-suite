@@ -12,7 +12,9 @@ use crate::agent::{
         run_control_listener_n_with_runtime,
         run_control_listener_once_with_runtime_and_session_gate,
     },
-    session::{PollingSessionGate, SessionGate, run_started_session},
+    session::{
+        PollingSessionGate, SessionGate, handle_control_client_with_runtime, run_started_session,
+    },
     stream::{HostSessionEndReason, write_session_goodbye},
     tests::*,
 };
@@ -158,6 +160,96 @@ fn foreground_detection_rejects_no_user_before_launching_program() {
     assert!(launched.is_empty());
     assert!(cleaned.is_empty());
     assert!(capture_targets.is_empty());
+}
+
+#[test]
+fn host_turns_off_monitor_after_program_launch_when_configured() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (mut server, _) = tcp_pair.accept().expect("server should accept");
+    let mut config = host_config("127.0.0.1:0".to_owned());
+    config.program.turn_off_monitor_after_launch = true;
+    let mut runner = RecordingProgramRunner::default();
+    let mut capture = RecordingCaptureStarter::default();
+    let mut session_gate = FixedSessionGate(RemoteSessionStatus::Allowed);
+    let mut monitor_power = RecordingMonitorPowerController::default();
+    let host = thread::spawn(move || {
+        let result = handle_control_client_with_runtime(
+            &mut server,
+            &config,
+            &mut runner,
+            &mut capture,
+            &mut session_gate,
+            &mut monitor_power,
+        );
+        (result, runner, capture, monitor_power)
+    });
+
+    send_client_hello(&mut client).expect("client hello should write");
+    assert_eq!(
+        read_message(&mut client).expect("host hello should read"),
+        ControlMessage::Hello { version: 1 }
+    );
+    write_message(&mut client, &ControlMessage::StartSession).expect("start session should write");
+    read_message(&mut client).expect("session ready should read");
+    read_message(&mut client).expect("first encoded frame should read");
+
+    let (result, runner, _capture, monitor_power) = host.join().expect("host thread should finish");
+    result.expect("configured monitor power-off session should finish");
+
+    assert_eq!(runner.launched.len(), 1);
+    assert_eq!(runner.cleaned, vec![42]);
+    assert_eq!(monitor_power.calls, 1);
+}
+
+#[test]
+fn host_cleans_started_program_when_monitor_power_off_fails() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (mut server, _) = tcp_pair.accept().expect("server should accept");
+    let mut config = host_config("127.0.0.1:0".to_owned());
+    config.program.turn_off_monitor_after_launch = true;
+    let mut runner = RecordingProgramRunner::default();
+    let mut capture = RecordingCaptureStarter::default();
+    let mut session_gate = FixedSessionGate(RemoteSessionStatus::Allowed);
+    let mut monitor_power = RecordingMonitorPowerController {
+        fail_message: Some("simulated monitor power failure"),
+        ..RecordingMonitorPowerController::default()
+    };
+    let host = thread::spawn(move || {
+        let result = handle_control_client_with_runtime(
+            &mut server,
+            &config,
+            &mut runner,
+            &mut capture,
+            &mut session_gate,
+            &mut monitor_power,
+        );
+        (result, runner, capture, monitor_power)
+    });
+
+    send_client_hello(&mut client).expect("client hello should write");
+    assert_eq!(
+        read_message(&mut client).expect("host hello should read"),
+        ControlMessage::Hello { version: 1 }
+    );
+    write_message(&mut client, &ControlMessage::StartSession).expect("start session should write");
+
+    let (result, runner, capture, monitor_power) = host.join().expect("host thread should finish");
+    let error = result.expect_err("monitor power failure should fail session startup");
+
+    assert!(error.contains("关闭宿主端显示器失败"));
+    assert!(error.contains("simulated monitor power failure"));
+    assert_eq!(runner.launched.len(), 1);
+    assert_eq!(runner.cleaned, vec![42]);
+    assert_eq!(monitor_power.calls, 1);
+    assert!(capture.targets.is_empty());
 }
 
 #[test]
