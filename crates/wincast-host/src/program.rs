@@ -1,6 +1,6 @@
 use std::{fmt, path::PathBuf};
 
-use wincast_protocol::config::HostConfig;
+use wincast_protocol::config::{HostConfig, ProgramConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LaunchRequest {
@@ -11,8 +11,12 @@ pub(crate) struct LaunchRequest {
 
 impl LaunchRequest {
     pub(crate) fn from_config(config: &HostConfig) -> Self {
+        Self::from_program_config(&config.program)
+    }
+
+    fn from_program_config(config: &ProgramConfig) -> Self {
         Self {
-            program: PathBuf::from(&config.program),
+            program: PathBuf::from(&config.path),
             args: config.args.clone(),
             work_dir: PathBuf::from(&config.work_dir),
         }
@@ -166,7 +170,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use wincast_protocol::config::{
-        CaptureConfig, CaptureMode, HostConfig, VideoCodec, VideoConfig,
+        CaptureConfig, HostConfig, ProgramConfig, VideoCodec, VideoConfig,
     };
 
     #[test]
@@ -236,9 +240,12 @@ mod tests {
     fn host_config() -> HostConfig {
         HostConfig {
             listen: "127.0.0.1:7856".to_owned(),
-            program: "C:\\Tools\\Demo App\\demo.exe".to_owned(),
-            args: vec!["--profile".to_owned(), "default".to_owned()],
-            work_dir: "C:\\Tools\\Demo App".to_owned(),
+            program: ProgramConfig {
+                path: "C:\\Tools\\Demo App\\demo.exe".to_owned(),
+                args: vec!["--profile".to_owned(), "default".to_owned()],
+                work_dir: "C:\\Tools\\Demo App".to_owned(),
+                startup_delay_ms: 3000,
+            },
             video: VideoConfig {
                 width: 1280,
                 height: 720,
@@ -248,9 +255,7 @@ mod tests {
                 max_bitrate_kbps: 6000,
             },
             capture: CaptureConfig {
-                mode: CaptureMode::Display,
-                window_title_contains: String::new(),
-                startup_timeout_ms: 15000,
+                first_frame_timeout_ms: 5000,
             },
         }
     }

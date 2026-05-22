@@ -73,7 +73,6 @@ fn h264_session_stops_blocked_input_reader_after_capture_inactive_goodbye() {
         .expect("listener addr should be available");
     let config = host_config(endpoint.to_string());
     let mut runner = RecordingProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter {
         frames: std::collections::VecDeque::from([Some(captured_bgra_frame()), None]),
         ..Default::default()
@@ -83,7 +82,6 @@ fn h264_session_stops_blocked_input_reader_after_capture_inactive_goodbye() {
             listener,
             &config,
             &mut runner,
-            &mut locator,
             &mut capture,
         );
         (result, runner.cleaned)

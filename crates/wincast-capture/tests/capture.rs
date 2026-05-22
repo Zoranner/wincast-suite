@@ -7,24 +7,8 @@ use wincast_capture::{
 };
 
 #[test]
-fn capture_target_describes_desktop_and_window_targets() {
-    assert_eq!(
-        CaptureTarget::Desktop {
-            source_window_handle: 100
-        }
-        .to_string(),
-        "窗口 100 所在显示器"
-    );
-    assert_eq!(
-        CaptureTarget::Window {
-            handle: 100,
-            width: 1280,
-            height: 720,
-            title: Some("Demo".to_owned()),
-        }
-        .to_string(),
-        "窗口 100，尺寸 1280x720，标题 Demo"
-    );
+fn capture_target_describes_screen_target() {
+    assert_eq!(CaptureTarget::Screen.to_string(), "当前交互桌面整屏");
 }
 
 #[test]
@@ -115,21 +99,8 @@ fn capture_errors_have_clear_chinese_messages() {
         "当前平台不支持桌面捕获"
     );
     assert_eq!(
-        CaptureError::windows_graphics_capture_unsupported().to_string(),
-        "当前 Windows 系统不支持 Windows Graphics Capture"
-    );
-    assert_eq!(
-        CaptureError::windows_window_capture_unsupported(17763).to_string(),
-        "当前 Windows 版本不支持窗口捕获：窗口捕获需要 Windows 10 1903 / Build 18362 或更高版本；当前 Build 17763"
-    );
-    assert_eq!(
-        CaptureError::windows_graphics_capture_support_check_failed("HRESULT 0x80004005")
-            .to_string(),
-        "检测 Windows Graphics Capture 支持状态失败: HRESULT 0x80004005"
-    );
-    assert_eq!(
-        CaptureError::windows_capture_item_create_failed("invalid hwnd").to_string(),
-        "创建窗口捕获目标失败: invalid hwnd"
+        CaptureError::windows_desktop_output_enumeration_failed("no output").to_string(),
+        "枚举 Windows 桌面复制输出失败: no output"
     );
     assert_eq!(
         CaptureError::windows_frame_read_failed("no frame").to_string(),
@@ -143,12 +114,8 @@ fn capture_errors_have_clear_chinese_messages() {
 
 #[cfg(windows)]
 #[test]
-fn windows_start_accepts_desktop_capture_target() {
-    let target = CaptureTarget::Desktop {
-        source_window_handle: 100,
-    };
-
-    let result = CaptureSession::start(target);
+fn windows_start_accepts_screen_capture_target() {
+    let result = CaptureSession::start(CaptureTarget::Screen);
 
     assert!(!matches!(
         result,
@@ -159,10 +126,8 @@ fn windows_start_accepts_desktop_capture_target() {
 #[cfg(not(windows))]
 #[test]
 fn non_windows_start_returns_unsupported_platform() {
-    let error = CaptureSession::start(CaptureTarget::Desktop {
-        source_window_handle: 100,
-    })
-    .expect_err("non-windows capture should be unsupported");
+    let error = CaptureSession::start(CaptureTarget::Screen)
+        .expect_err("non-windows capture should be unsupported");
 
     assert_eq!(
         error,

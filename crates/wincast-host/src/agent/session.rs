@@ -1,4 +1,4 @@
-use std::net::TcpStream;
+use std::{net::TcpStream, thread, time::Duration};
 
 use crate::{
     program::{ProgramRunner, StartedProgram},
@@ -17,10 +17,7 @@ use wincast_protocol::{
 };
 
 use super::{
-    capture::{
-        CaptureStarter, WindowLocator, capture_input_bounds, locate_started_window,
-        start_capture_session,
-    },
+    capture::{CaptureStarter, screen_input_bounds, start_screen_capture_session},
     stream::{
         HostSessionEndReason, HostSessionError, write_control_error, write_h264_encoded_stream,
         write_session_ready,
@@ -31,7 +28,6 @@ pub(super) fn handle_control_client(
     stream: &mut TcpStream,
     config: &HostConfig,
     runner: &mut impl ProgramRunner,
-    locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
 ) -> Result<(), String> {
     let mut session_gate = PollingSessionGate::new(
@@ -39,21 +35,13 @@ pub(super) fn handle_control_client(
         PlatformDesktopSessionDetector,
         foreground_detection_failure_should_fallback_to_development(),
     );
-    handle_control_client_with_session_gate(
-        stream,
-        config,
-        runner,
-        locator,
-        capture,
-        &mut session_gate,
-    )
+    handle_control_client_with_session_gate(stream, config, runner, capture, &mut session_gate)
 }
 
 pub(super) fn handle_control_client_with_session_gate(
     stream: &mut TcpStream,
     config: &HostConfig,
     runner: &mut impl ProgramRunner,
-    locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
     session_gate: &mut impl SessionGate,
 ) -> Result<(), String> {
@@ -75,15 +63,8 @@ pub(super) fn handle_control_client_with_session_gate(
                     );
                     message
                 })?;
-            let result = run_started_session(
-                &mut writer,
-                stream,
-                config,
-                locator,
-                capture,
-                &started,
-                session_gate,
-            );
+            let result =
+                run_started_session(&mut writer, stream, config, capture, &started, session_gate);
             let cleanup_result = runner
                 .cleanup(&mut started)
                 .map_err(|error| format!("清理宿主端程序失败: {error}"));
@@ -228,19 +209,14 @@ pub(super) fn run_started_session(
     writer: &mut impl std::io::Write,
     stream: &TcpStream,
     config: &HostConfig,
-    locator: &mut impl WindowLocator,
     capture: &mut impl CaptureStarter,
     started: &StartedProgram,
     session_gate: &impl SessionGate,
 ) -> Result<HostSessionEndReason, HostSessionError> {
-    let window = locate_started_window(config, started, locator).map_err(|error| {
-        let message = format!("定位宿主端程序窗口失败: {error}");
-        let write_result = write_control_error(writer, ErrorCode::WindowNotFound, message.clone());
-        let message = append_error_response_write_failure(message, write_result);
-        HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
-    })?;
-    let (mut session, first_frame, active_capture_mode) =
-        start_capture_session(config, &window, capture).map_err(|error| {
+    let _ = started;
+    thread::sleep(Duration::from_millis(config.program.startup_delay_ms));
+    let (mut session, first_frame) =
+        start_screen_capture_session(config, capture).map_err(|error| {
             let message = format!("初始化画面捕获失败: {error}");
             let write_result =
                 write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
@@ -254,7 +230,7 @@ pub(super) fn run_started_session(
         stream,
         &first_frame,
         session.as_mut(),
-        capture_input_bounds(active_capture_mode, &window, &first_frame),
+        screen_input_bounds(&first_frame),
         h264_pipeline_config(config),
         session_gate,
     )

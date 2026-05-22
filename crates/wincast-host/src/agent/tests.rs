@@ -10,15 +10,14 @@ use std::{
 };
 
 use crate::{
-    agent::capture::{CaptureRuntime, CaptureStarter, InputEventSink, WindowLocator},
+    agent::capture::{CaptureRuntime, CaptureStarter, InputEventSink},
     agent::session::SessionGate,
     program::{self, ProgramRunner},
     session_state::RemoteSessionStatus,
-    window::{self, WindowCandidate, WindowLookupError},
 };
 use wincast_capture::{CaptureError, CaptureTarget, CapturedBgraFrame};
 use wincast_protocol::{
-    config::{CaptureConfig, CaptureMode, HostConfig, VideoCodec, VideoConfig},
+    config::{CaptureConfig, HostConfig, ProgramConfig, VideoCodec, VideoConfig},
     frame::{read_message, write_message},
     handshake::send_client_hello,
     input::InputEvent,
@@ -56,46 +55,6 @@ impl ProgramRunner for RecordingProgramRunner {
     ) -> Result<(), program::LaunchError> {
         self.cleaned.push(started.process_id);
         Ok(())
-    }
-}
-
-#[derive(Default)]
-pub(super) struct RecordingWindowLocator {
-    pub(super) lookups: Vec<(u32, Option<String>)>,
-}
-
-impl WindowLocator for RecordingWindowLocator {
-    fn find_main_window(
-        &mut self,
-        process_id: u32,
-        title_contains: Option<&str>,
-    ) -> Result<WindowCandidate, WindowLookupError> {
-        self.lookups.push((
-            process_id,
-            title_contains
-                .map(str::trim)
-                .filter(|title| !title.is_empty())
-                .map(str::to_owned),
-        ));
-        Ok(WindowCandidate {
-            handle: 100,
-            process_id,
-            title: "SomeApp".to_owned(),
-            visible: true,
-            tool_window: false,
-            rect: window::WindowRect {
-                left: 0,
-                top: 0,
-                right: 1280,
-                bottom: 720,
-            },
-            monitor_rect: window::WindowRect {
-                left: 0,
-                top: 0,
-                right: 1280,
-                bottom: 720,
-            },
-        })
     }
 }
 
@@ -233,21 +192,6 @@ impl CaptureStarter for FailingCaptureStarter {
     }
 }
 
-pub(super) struct FailingWindowLocator;
-
-impl WindowLocator for FailingWindowLocator {
-    fn find_main_window(
-        &mut self,
-        process_id: u32,
-        _title_contains: Option<&str>,
-    ) -> Result<WindowCandidate, WindowLookupError> {
-        Err(WindowLookupError::NotFound {
-            process_id,
-            title_contains: None,
-        })
-    }
-}
-
 #[derive(Default)]
 pub(super) struct RecordingInputEventSink {
     pub(super) events: Vec<InputEvent>,
@@ -267,9 +211,12 @@ pub(super) fn host_config(listen: String) -> HostConfig {
 pub(super) fn host_config_with_codec(listen: String, codec: VideoCodec) -> HostConfig {
     HostConfig {
         listen,
-        program: "C:\\Program Files\\SomeApp\\app.exe".to_owned(),
-        args: Vec::new(),
-        work_dir: "C:\\Program Files\\SomeApp".to_owned(),
+        program: ProgramConfig {
+            path: "C:\\Program Files\\SomeApp\\app.exe".to_owned(),
+            args: Vec::new(),
+            work_dir: "C:\\Program Files\\SomeApp".to_owned(),
+            startup_delay_ms: 0,
+        },
         video: VideoConfig {
             width: 1280,
             height: 720,
@@ -279,48 +226,13 @@ pub(super) fn host_config_with_codec(listen: String, codec: VideoCodec) -> HostC
             max_bitrate_kbps: 6000,
         },
         capture: CaptureConfig {
-            mode: CaptureMode::Display,
-            window_title_contains: String::new(),
-            startup_timeout_ms: 15000,
+            first_frame_timeout_ms: 5000,
         },
     }
 }
 
-pub(super) fn window_candidate() -> WindowCandidate {
-    WindowCandidate {
-        handle: 100,
-        process_id: 42,
-        title: "SomeApp".to_owned(),
-        visible: true,
-        tool_window: false,
-        rect: window::WindowRect {
-            left: 0,
-            top: 0,
-            right: 1280,
-            bottom: 720,
-        },
-        monitor_rect: window::WindowRect {
-            left: 0,
-            top: 0,
-            right: 1280,
-            bottom: 720,
-        },
-    }
-}
-
-pub(super) fn desktop_capture_target() -> CaptureTarget {
-    CaptureTarget::Desktop {
-        source_window_handle: 100,
-    }
-}
-
-pub(super) fn window_capture_target() -> CaptureTarget {
-    CaptureTarget::Window {
-        handle: 100,
-        width: 1280,
-        height: 720,
-        title: Some("SomeApp".to_owned()),
-    }
+pub(super) fn screen_capture_target() -> CaptureTarget {
+    CaptureTarget::Screen
 }
 
 pub(super) fn captured_bgra_frame() -> CapturedBgraFrame {

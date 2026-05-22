@@ -8,7 +8,7 @@
 
 Windows 侧当前保留 `windows` 与 `windows-sys` 双线绑定，不承诺已经收敛到单一绑定：
 
-- `wincast-capture` 使用 `windows`，因为 Windows Graphics Capture、WinRT 对象和 D3D11 资源交互需要更完整的类型封装和接口调用支持。
+- `wincast-capture` 使用 `windows`，因为 DXGI Desktop Duplication 和 D3D11 资源交互需要更完整的类型封装和接口调用支持。
 - `wincast-host` 与 `wincast-input` 使用 `windows-sys`，因为当前主要调用 WTS、窗口枚举和 `SendInput` 等 Win32 API，边界更接近 C ABI，轻量绑定更便于显式管理句柄、结构体和错误码。
 
 升级 Windows 绑定依赖时，应分别检查两条线的版本兼容性、feature 范围和生成类型变化。跨 crate 传递 Windows 类型时优先使用项目自有的中性类型、句柄值或明确封装，避免把 `windows` 的 COM/WinRT 类型和 `windows-sys` 的裸 FFI 类型扩散到不属于它们的 crate。确需转换时，应在转换点说明来源、生命周期、所有权和失败语义，并把 unsafe 或句柄释放责任限制在最小模块内。
@@ -45,7 +45,7 @@ cargo check -p wincast-client --target aarch64-unknown-linux-gnu
 
 当前正式视频链路固定为低延迟 H.264 编码帧，不再把未编码像素帧作为稳定版网络传输主线，也不规划 WebRTC 或 UDP 媒体通道。Linux 客户端仍使用 SDL2 承载窗口和输入事件，稳定版收口需要验证 H.264 解码、渲染和输入回传的端到端链路。
 
-Windows 宿主端必须运行在已登录的交互桌面中。Windows 10 1809 / Build 17763 不支持 Windows Graphics Capture 的 window/monitor interop，因此 `auto`/`display` 会走 DXGI Desktop Duplication 的唯一显示器捕获路径；`window` 单窗口捕获只在 Windows 10 1903 / Build 18362 或更高版本可用。
+Windows 宿主端必须运行在已登录的交互桌面中。稳定版主链路只捕获单显示器整块屏幕，Windows 10 1809 / Build 17763 使用 DXGI Desktop Duplication，不再维护 Windows Graphics Capture 窗口捕获路径。
 
 Windows 开发机上的 workspace 验证只能证明非 Linux 占位路径和协议逻辑可编译，不能替代目标系统真机构建。客户端稳定版收口时，必须在目标 Linux 机器上安装 SDL2 bundled static 构建依赖后分别验证：
 

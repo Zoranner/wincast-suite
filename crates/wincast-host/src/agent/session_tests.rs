@@ -119,7 +119,6 @@ fn foreground_detection_rejects_no_user_before_launching_program() {
         .expect("listener addr should be available");
     let config = host_config(endpoint.to_string());
     let mut runner = RecordingProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter::default();
     let mut session_gate = FixedSessionGate(RemoteSessionStatus::Rejected {
         code: ClientSessionErrorCode::NoUserLoggedIn,
@@ -130,17 +129,10 @@ fn foreground_detection_rejects_no_user_before_launching_program() {
             listener,
             &config,
             &mut runner,
-            &mut locator,
             &mut capture,
             &mut session_gate,
         );
-        (
-            result,
-            runner.launched,
-            runner.cleaned,
-            locator.lookups,
-            capture.targets,
-        )
+        (result, runner.launched, runner.cleaned, capture.targets)
     });
 
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
@@ -159,46 +151,13 @@ fn foreground_detection_rejects_no_user_before_launching_program() {
         }
     );
 
-    let (host_result, launched, cleaned, lookups, capture_targets) =
+    let (host_result, launched, cleaned, capture_targets) =
         host.join().expect("host thread should finish");
     let error = host_result.expect_err("host should report session rejection");
     assert!(error.contains("当前没有 Windows 用户登录"));
     assert!(launched.is_empty());
     assert!(cleaned.is_empty());
-    assert!(lookups.is_empty());
     assert!(capture_targets.is_empty());
-}
-
-#[test]
-fn host_reports_error_response_write_failure_without_hiding_window_failure() {
-    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let endpoint = tcp_pair
-        .local_addr()
-        .expect("listener addr should be available");
-    let client = TcpStream::connect(endpoint).expect("client should connect");
-    let (server, _) = tcp_pair.accept().expect("server should accept");
-    let mut writer = FailingWriter;
-    let mut config = host_config("127.0.0.1:0".to_owned());
-    config.capture.startup_timeout_ms = 1;
-    let mut locator = FailingWindowLocator;
-    let mut capture = RecordingCaptureStarter::default();
-    let started = StartedProgram::from_process_id(42);
-
-    let error = run_started_session(
-        &mut writer,
-        &server,
-        &config,
-        &mut locator,
-        &mut capture,
-        &started,
-        &FixedSessionGate(RemoteSessionStatus::Allowed),
-    )
-    .expect_err("host should report session failure");
-
-    assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
-    assert!(error.message.contains("定位宿主端程序窗口失败"));
-    assert!(error.message.contains("写入控制错误消息失败"));
-    drop(client);
 }
 
 #[test]
@@ -211,7 +170,6 @@ fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let mut writer = FailingWriter;
     let config = host_config("127.0.0.1:0".to_owned());
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = FailingCaptureStarter;
     let started = StartedProgram::from_process_id(42);
 
@@ -219,7 +177,6 @@ fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
         &mut writer,
         &server,
         &config,
-        &mut locator,
         &mut capture,
         &started,
         &FixedSessionGate(RemoteSessionStatus::Allowed),
@@ -241,7 +198,6 @@ fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_b
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
-    let mut locator = RecordingWindowLocator::default();
     let first_frame = captured_bgra_frame_with_sequence(7);
     let mut capture = RecordingCaptureStarter {
         frames: VecDeque::from([Some(first_frame.clone())]),
@@ -257,7 +213,6 @@ fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_b
             &mut writer,
             &server,
             &config,
-            &mut locator,
             &mut capture,
             &started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
@@ -321,7 +276,6 @@ fn host_streams_multiple_h264_encoded_frames_until_capture_inactive() {
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter {
         frames: VecDeque::from([
             Some(captured_bgra_frame_with_sequence(0)),
@@ -341,7 +295,6 @@ fn host_streams_multiple_h264_encoded_frames_until_capture_inactive() {
             &mut writer,
             &server,
             &config,
-            &mut locator,
             &mut capture,
             &started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
@@ -388,7 +341,6 @@ fn host_keeps_h264_stream_alive_when_no_frame_is_temporarily_available() {
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter {
         frames: VecDeque::from([
             Some(captured_bgra_frame_with_sequence(0)),
@@ -408,7 +360,6 @@ fn host_keeps_h264_stream_alive_when_no_frame_is_temporarily_available() {
             &mut writer,
             &server,
             &config,
-            &mut locator,
             &mut capture,
             &started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
@@ -441,7 +392,6 @@ fn host_h264_stream_sends_goodbye_and_returns_stop_session() {
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
-    let mut locator = RecordingWindowLocator::default();
     let mut frames = VecDeque::from([Some(captured_bgra_frame_with_sequence(0))]);
     frames.extend((0..100).map(|_| None));
     let mut capture = RecordingCaptureStarter {
@@ -458,7 +408,6 @@ fn host_h264_stream_sends_goodbye_and_returns_stop_session() {
             &mut writer,
             &server,
             &config,
-            &mut locator,
             &mut capture,
             &started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
@@ -489,7 +438,6 @@ fn host_h264_stream_stops_session_when_desktop_becomes_locked() {
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
-    let mut locator = RecordingWindowLocator::default();
     let mut frames = VecDeque::from([Some(captured_bgra_frame_with_sequence(0))]);
     frames.extend((0..10).map(|_| None));
     let mut capture = RecordingCaptureStarter {
@@ -513,7 +461,6 @@ fn host_h264_stream_stops_session_when_desktop_becomes_locked() {
             &mut writer,
             &server,
             &config,
-            &mut locator,
             &mut capture,
             &started,
             &session_gate,
@@ -561,7 +508,6 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
-    let mut locator = RecordingWindowLocator::default();
     let too_wide_frame = captured_bgra_frame_with_dimensions(1921, 720);
     let mut capture = RecordingCaptureStarter {
         frames: VecDeque::from([Some(too_wide_frame)]),
@@ -577,7 +523,6 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
             &mut writer,
             &server,
             &config,
-            &mut locator,
             &mut capture,
             &started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
@@ -621,7 +566,6 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_later_capture_fra
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter {
         frames: VecDeque::from([
             Some(captured_bgra_frame_with_sequence(0)),
@@ -639,7 +583,6 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_later_capture_fra
             &mut writer,
             &server,
             &config,
-            &mut locator,
             &mut capture,
             &started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
@@ -716,17 +659,10 @@ fn host_cleans_program_after_stop_session_and_waits_for_next_client() {
         .expect("listener addr should be available");
     let config = host_config(endpoint.to_string());
     let mut runner = RecordingProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter::default();
     let host = thread::spawn(move || {
-        let result = run_control_listener_n_with_runtime(
-            listener,
-            &config,
-            &mut runner,
-            &mut locator,
-            &mut capture,
-            2,
-        );
+        let result =
+            run_control_listener_n_with_runtime(listener, &config, &mut runner, &mut capture, 2);
         (result, runner.cleaned)
     });
 

@@ -2,35 +2,13 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureTarget {
-    Desktop {
-        source_window_handle: isize,
-    },
-    Window {
-        handle: isize,
-        width: u32,
-        height: u32,
-        title: Option<String>,
-    },
+    Screen,
 }
 
 impl fmt::Display for CaptureTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Desktop {
-                source_window_handle,
-            } => write!(formatter, "窗口 {source_window_handle} 所在显示器"),
-            Self::Window {
-                handle,
-                width,
-                height,
-                title,
-            } => {
-                write!(formatter, "窗口 {handle}，尺寸 {width}x{height}")?;
-                if let Some(title) = title {
-                    write!(formatter, "，标题 {title}")?;
-                }
-                Ok(())
-            }
+            Self::Screen => write!(formatter, "当前交互桌面整屏"),
         }
     }
 }

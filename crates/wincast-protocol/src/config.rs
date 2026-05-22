@@ -19,10 +19,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostConfig {
     pub listen: String,
-    pub program: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    pub work_dir: String,
+    pub program: ProgramConfig,
     pub video: VideoConfig,
     pub capture: CaptureConfig,
 }
@@ -44,22 +41,33 @@ impl HostConfig {
                 reason: "必须是 host:port 格式的监听地址",
             })?;
 
-        self.validate_paths()?;
+        self.program.validate()?;
         self.video.validate()?;
         self.capture.validate()?;
         Ok(())
     }
+}
 
-    pub fn validate_paths(&self) -> Result<(), ConfigError> {
-        validate_required("program", &self.program)?;
-        validate_required("work_dir", &self.work_dir)?;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramConfig {
+    pub path: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub work_dir: String,
+    pub startup_delay_ms: u64,
+}
 
-        if Path::new(&self.program).as_os_str().is_empty() {
-            return Err(ConfigError::MissingField("program"));
+impl ProgramConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        validate_required("program.path", &self.path)?;
+        validate_required("program.work_dir", &self.work_dir)?;
+
+        if Path::new(&self.path).as_os_str().is_empty() {
+            return Err(ConfigError::MissingField("program.path"));
         }
 
         if Path::new(&self.work_dir).as_os_str().is_empty() {
-            return Err(ConfigError::MissingField("work_dir"));
+            return Err(ConfigError::MissingField("program.work_dir"));
         }
 
         Ok(())
@@ -101,33 +109,16 @@ pub enum VideoCodec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureConfig {
-    pub mode: CaptureMode,
-    #[serde(default)]
-    pub window_title_contains: String,
-    pub startup_timeout_ms: u64,
+    pub first_frame_timeout_ms: u64,
 }
 
 impl CaptureConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        validate_non_zero_u64("capture.startup_timeout_ms", self.startup_timeout_ms)?;
-
-        if self.mode == CaptureMode::Window && self.window_title_contains.trim().is_empty() {
-            return Err(ConfigError::InvalidValue {
-                field: "capture.window_title_contains",
-                reason: "窗口捕获模式必须配置窗口标题匹配文本",
-            });
-        }
-
-        Ok(())
+        validate_non_zero_u64(
+            "capture.first_frame_timeout_ms",
+            self.first_frame_timeout_ms,
+        )
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CaptureMode {
-    Auto,
-    Window,
-    Display,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

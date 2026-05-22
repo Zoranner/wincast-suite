@@ -1,7 +1,10 @@
 listen = "0.0.0.0:7856"
-program = "C:\\Windows\\System32\\notepad.exe"
+
+[program]
+path = 'C:\Windows\System32\notepad.exe'
 args = []
-work_dir = "C:\\Windows\\System32"
+work_dir = 'C:\Windows\System32'
+startup_delay_ms = 3000
 
 [video]
 width = 1280
@@ -12,6 +15,4 @@ bitrate_kbps = 4000
 max_bitrate_kbps = 6000
 
 [capture]
-mode = "auto"
-window_title_contains = "记事本"
-startup_timeout_ms = 15000
+first_frame_timeout_ms = 5000

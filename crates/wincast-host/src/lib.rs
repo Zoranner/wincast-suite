@@ -11,7 +11,6 @@ mod agent_runtime;
 mod program;
 pub mod session_events;
 pub mod session_state;
-mod window;
 
 use agent_runtime::{HostAgentRuntime, StdHostAgentRuntime};
 
@@ -76,7 +75,7 @@ fn runtime_status_message(config: &HostConfig) -> String {
     format!(
         "宿主端已启动，监听 {}，程序 {}。{}",
         config.listen,
-        config.program,
+        config.program.path,
         runtime_status_detail()
     )
 }
@@ -94,19 +93,19 @@ fn load_config(path: &Path) -> Result<HostConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wincast_protocol::config::CaptureMode;
 
     #[test]
     fn executable_startup_uses_default_config_path_without_subcommands() {
         let config_path = temp_host_config_path("default-startup");
-        write_host_config(&config_path, "127.0.0.1:0", CaptureMode::Display);
+        write_host_config(&config_path, "127.0.0.1:0");
         let mut runtime = RecordingHostAgentRuntime::default();
 
         let message = run_host_with_runtime(&config_path, &mut runtime).expect("host should start");
 
         assert_eq!(runtime.calls.len(), 1);
         assert_eq!(runtime.calls[0].listen, "127.0.0.1:0");
-        assert_eq!(runtime.calls[0].capture.mode, CaptureMode::Display);
+        assert_eq!(runtime.calls[0].program.startup_delay_ms, 3000);
+        assert_eq!(runtime.calls[0].capture.first_frame_timeout_ms, 5000);
         assert_eq!(
             message,
             "宿主端已启动，监听 127.0.0.1:0，程序 C:\\Program Files\\SomeApp\\app.exe。收到客户端会话请求后会直接启动配置程序，并通过 H.264 编码链路传输画面。 控制通道已进入持续监听，实际监听 127.0.0.1:49152。"
@@ -157,15 +156,18 @@ mod tests {
         }
     }
 
-    fn write_host_config(path: &Path, listen: &str, mode: CaptureMode) {
+    fn write_host_config(path: &Path, listen: &str) {
         fs::write(
             path,
             format!(
                 r#"
 listen = "{listen}"
-program = "C:\\Program Files\\SomeApp\\app.exe"
+
+[program]
+path = 'C:\Program Files\SomeApp\app.exe'
 args = ["--profile", "demo"]
-work_dir = "C:\\Program Files\\SomeApp"
+work_dir = 'C:\Program Files\SomeApp'
+startup_delay_ms = 3000
 
 [video]
 width = 1280
@@ -176,15 +178,8 @@ bitrate_kbps = 4000
 max_bitrate_kbps = 6000
 
 [capture]
-mode = "{}"
-window_title_contains = ""
-startup_timeout_ms = 15000
-"#,
-                match mode {
-                    CaptureMode::Auto => "auto",
-                    CaptureMode::Window => "window",
-                    CaptureMode::Display => "display",
-                }
+first_frame_timeout_ms = 5000
+"#
             ),
         )
         .expect("host config should be written");

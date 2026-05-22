@@ -2,7 +2,7 @@
 
 WinCast Suite 用来在内网里从 Linux 客户端操作一台 Windows 机器上的指定程序。
 
-Windows 端负责启动程序、捕获画面、接收键鼠输入。Linux 端负责连接 Windows、显示画面、回传键鼠操作。
+Windows 端负责启动配置程序、捕获当前交互桌面整块屏幕、接收键鼠输入。Linux 端负责连接 Windows、显示画面、回传键鼠操作。
 
 ## 配置 Windows 端
 
@@ -16,9 +16,12 @@ Windows 端负责启动程序、捕获画面、接收键鼠输入。Linux 端负
 
 ```toml
 listen = "0.0.0.0:7856"
-program = "C:\\Program Files\\SomeApp\\app.exe"
+
+[program]
+path = 'C:\Program Files\SomeApp\app.exe'
 args = []
-work_dir = "C:\\Program Files\\SomeApp"
+work_dir = 'C:\Program Files\SomeApp'
+startup_delay_ms = 3000
 
 [video]
 width = 1280
@@ -29,12 +32,10 @@ bitrate_kbps = 4000
 max_bitrate_kbps = 6000
 
 [capture]
-mode = "auto"
-window_title_contains = "SomeApp"
-startup_timeout_ms = 15000
+first_frame_timeout_ms = 5000
 ```
 
-`program` 改成要打开的 Windows 程序路径。`listen` 的端口要和客户端配置一致。
+`program.path` 改成要打开的 Windows 程序路径。`program.startup_delay_ms` 表示程序启动后延迟多久开始整屏捕获。`listen` 的端口要和客户端配置一致。
 
 ## 配置 Linux 端
 
@@ -67,7 +68,7 @@ Linux 端：
 wincast-client
 ```
 
-客户端启动后会连接 Windows 端，打开窗口并显示目标程序画面。鼠标和键盘操作会回传到 Windows 端。
+客户端启动后会连接 Windows 端，打开窗口并显示 Windows 宿主机当前整块屏幕。鼠标和键盘操作会回传到 Windows 端。
 
 ## 部署与烟测
 
@@ -78,4 +79,5 @@ wincast-client
 - Windows 端需要处于已登录桌面。
 - 当前只支持一台客户端连接。
 - 当前只支持单显示器。
+- 当前只捕获整块屏幕，不支持窗口捕获或多屏选择。
 - 锁屏、注销或网络中断时，本次连接会断开，客户端会尝试重新连接。

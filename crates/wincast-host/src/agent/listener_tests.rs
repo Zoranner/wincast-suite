@@ -31,17 +31,11 @@ fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_
         .expect("listener addr should be available");
     let config = host_config(endpoint.to_string());
     let mut runner = RecordingProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter::default();
     let host = thread::spawn(move || {
-        let result = run_control_listener_once_with_runtime(
-            listener,
-            &config,
-            &mut runner,
-            &mut locator,
-            &mut capture,
-        );
-        (result, runner.launched, locator.lookups, capture.targets)
+        let result =
+            run_control_listener_once_with_runtime(listener, &config, &mut runner, &mut capture);
+        (result, runner.launched, capture.targets)
     });
 
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
@@ -63,8 +57,7 @@ fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_
     assert_eq!(frame.width, 1280);
     assert_eq!(frame.height, 720);
 
-    let (host_result, launched, lookups, capture_targets) =
-        host.join().expect("host thread should finish");
+    let (host_result, launched, capture_targets) = host.join().expect("host thread should finish");
     assert_eq!(
         host_result.expect("host should handle one client"),
         endpoint
@@ -73,8 +66,7 @@ fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_
         launched,
         vec![("C:\\Program Files\\SomeApp\\app.exe".to_owned(), Vec::new())]
     );
-    assert_eq!(lookups, vec![(42, None)]);
-    assert_eq!(capture_targets, vec![desktop_capture_target()]);
+    assert_eq!(capture_targets, vec![screen_capture_target()]);
 }
 
 #[test]
@@ -85,24 +77,11 @@ fn host_accepts_two_clients_in_sequence_without_rebinding() {
         .expect("listener addr should be available");
     let config = host_config(endpoint.to_string());
     let mut runner = RecordingProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter::default();
     let host = thread::spawn(move || {
-        let result = run_control_listener_n_with_runtime(
-            listener,
-            &config,
-            &mut runner,
-            &mut locator,
-            &mut capture,
-            2,
-        );
-        (
-            result,
-            runner.launched,
-            runner.cleaned,
-            locator.lookups,
-            capture.targets,
-        )
+        let result =
+            run_control_listener_n_with_runtime(listener, &config, &mut runner, &mut capture, 2);
+        (result, runner.launched, runner.cleaned, capture.targets)
     });
 
     let first = run_short_client_session(endpoint);
@@ -110,7 +89,7 @@ fn host_accepts_two_clients_in_sequence_without_rebinding() {
 
     assert_eq!(first.sequence_number, 0);
     assert_eq!(second.sequence_number, 0);
-    let (host_result, launched, cleaned, lookups, capture_targets) =
+    let (host_result, launched, cleaned, capture_targets) =
         host.join().expect("host thread should finish");
     assert_eq!(
         host_result.expect("host should handle two clients"),
@@ -118,10 +97,9 @@ fn host_accepts_two_clients_in_sequence_without_rebinding() {
     );
     assert_eq!(launched.len(), 2);
     assert_eq!(cleaned, vec![42, 43]);
-    assert_eq!(lookups, vec![(42, None), (43, None)]);
     assert_eq!(
         capture_targets,
-        vec![desktop_capture_target(), desktop_capture_target()]
+        vec![screen_capture_target(), screen_capture_target()]
     );
 }
 
@@ -133,7 +111,6 @@ fn host_rejects_second_client_while_session_active() {
         .expect("listener addr should be available");
     let config = host_config(endpoint.to_string());
     let mut runner = RecordingProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
     let block = Arc::new(BlockingFrameGate::new());
     let mut capture = RecordingCaptureStarter {
         frames: VecDeque::from([Some(captured_bgra_frame()), None]),
@@ -141,14 +118,8 @@ fn host_rejects_second_client_while_session_active() {
         ..Default::default()
     };
     let host = thread::spawn(move || {
-        let result = run_control_listener_n_with_runtime(
-            listener,
-            &config,
-            &mut runner,
-            &mut locator,
-            &mut capture,
-            3,
-        );
+        let result =
+            run_control_listener_n_with_runtime(listener, &config, &mut runner, &mut capture, 3);
         (result, runner.launched, runner.cleaned)
     });
 
@@ -192,7 +163,6 @@ fn host_rejects_start_session_when_remote_session_is_locked_before_launching_pro
         .expect("listener addr should be available");
     let config = host_config(endpoint.to_string());
     let mut runner = RecordingProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter::default();
     let mut session_gate = FixedSessionGate(RemoteSessionStatus::Rejected {
         code: ClientSessionErrorCode::SessionLocked,
@@ -203,17 +173,10 @@ fn host_rejects_start_session_when_remote_session_is_locked_before_launching_pro
             listener,
             &config,
             &mut runner,
-            &mut locator,
             &mut capture,
             &mut session_gate,
         );
-        (
-            result,
-            runner.launched,
-            runner.cleaned,
-            locator.lookups,
-            capture.targets,
-        )
+        (result, runner.launched, runner.cleaned, capture.targets)
     });
 
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
@@ -232,13 +195,12 @@ fn host_rejects_start_session_when_remote_session_is_locked_before_launching_pro
         }
     );
 
-    let (host_result, launched, cleaned, lookups, capture_targets) =
+    let (host_result, launched, cleaned, capture_targets) =
         host.join().expect("host thread should finish");
     let error = host_result.expect_err("host should report session rejection");
     assert!(error.contains("Windows 会话已锁定"));
     assert!(launched.is_empty());
     assert!(cleaned.is_empty());
-    assert!(lookups.is_empty());
     assert!(capture_targets.is_empty());
 }
 
@@ -250,17 +212,10 @@ fn host_keeps_listening_after_session_thread_panics() {
         .expect("listener addr should be available");
     let config = host_config(endpoint.to_string());
     let mut runner = PanicsOnceProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
     let mut capture = RecordingCaptureStarter::default();
     let host = thread::spawn(move || {
-        let result = run_control_listener_n_with_runtime(
-            listener,
-            &config,
-            &mut runner,
-            &mut locator,
-            &mut capture,
-            2,
-        );
+        let result =
+            run_control_listener_n_with_runtime(listener, &config, &mut runner, &mut capture, 2);
         (result, runner.launch_attempts, runner.cleaned)
     });
 
@@ -283,11 +238,9 @@ fn host_keeps_listening_after_session_thread_panics() {
 
 #[test]
 fn session_join_panic_is_reported_without_panicking_listener_boundary() {
-    let result = log_session_result::<
-        RecordingProgramRunner,
-        RecordingWindowLocator,
-        RecordingCaptureStarter,
-    >(Err(Box::new("simulated join panic")));
+    let result = log_session_result::<RecordingProgramRunner, RecordingCaptureStarter>(Err(
+        Box::new("simulated join panic"),
+    ));
 
     let Err(error) = result else {
         panic!("join panic should be reported as listener error");

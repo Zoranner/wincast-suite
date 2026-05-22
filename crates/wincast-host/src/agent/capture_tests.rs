@@ -1,174 +1,43 @@
-use std::{
-    collections::VecDeque,
-    net::{TcpListener, TcpStream},
-    sync::atomic::Ordering,
-    thread,
-};
+use std::{collections::VecDeque, sync::atomic::Ordering};
 
-use crate::{
-    agent::{
-        capture::{ActiveCaptureMode, capture_input_bounds, start_capture_session},
-        listener::run_control_listener_once_with_runtime,
-        tests::*,
-    },
-    window,
+use crate::agent::{
+    capture::{screen_input_bounds, start_screen_capture_session},
+    tests::*,
 };
 use wincast_capture::CaptureError;
 use wincast_input::CaptureInputBounds;
-use wincast_protocol::{
-    config::CaptureMode,
-    frame::{read_message, write_message},
-    handshake::send_client_hello,
-    message::{ControlMessage, ErrorCode},
-};
 
 #[test]
-fn host_reports_window_not_found_after_program_launch() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let endpoint = listener
-        .local_addr()
-        .expect("listener addr should be available");
-    let mut config = host_config(endpoint.to_string());
-    config.capture.startup_timeout_ms = 1;
-    let mut runner = RecordingProgramRunner::default();
-    let mut locator = FailingWindowLocator;
-    let mut capture = RecordingCaptureStarter::default();
-    let host = thread::spawn(move || {
-        run_control_listener_once_with_runtime(
-            listener,
-            &config,
-            &mut runner,
-            &mut locator,
-            &mut capture,
-        )
-    });
-
-    let mut client = TcpStream::connect(endpoint).expect("client should connect");
-    send_client_hello(&mut client).expect("client hello should write");
-    read_message(&mut client).expect("host hello should read");
-    write_message(&mut client, &ControlMessage::StartSession).expect("start session should write");
-
-    assert_eq!(
-        read_message(&mut client).expect("window error should read"),
-        ControlMessage::Error {
-            code: ErrorCode::WindowNotFound,
-            message: "定位宿主端程序窗口失败: 未找到进程 42 的主窗口".to_owned(),
-        }
-    );
-
-    let error = host
-        .join()
-        .expect("host thread should finish")
-        .expect_err("host should report window lookup failure");
-    assert!(error.contains("定位宿主端程序窗口失败"));
-}
-
-#[test]
-fn host_reports_capture_failed_after_window_lookup() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let endpoint = listener
-        .local_addr()
-        .expect("listener addr should be available");
-    let config = host_config(endpoint.to_string());
-    let mut runner = RecordingProgramRunner::default();
-    let mut locator = RecordingWindowLocator::default();
-    let mut capture = FailingCaptureStarter;
-    let host = thread::spawn(move || {
-        run_control_listener_once_with_runtime(
-            listener,
-            &config,
-            &mut runner,
-            &mut locator,
-            &mut capture,
-        )
-    });
-
-    let mut client = TcpStream::connect(endpoint).expect("client should connect");
-    send_client_hello(&mut client).expect("client hello should write");
-    read_message(&mut client).expect("host hello should read");
-    write_message(&mut client, &ControlMessage::StartSession).expect("start session should write");
-
-    assert_eq!(
-        read_message(&mut client).expect("capture error should read"),
-        ControlMessage::Error {
-            code: ErrorCode::CaptureFailed,
-            message: "初始化画面捕获失败: 当前平台不支持桌面捕获".to_owned(),
-        }
-    );
-
-    let error = host
-        .join()
-        .expect("host thread should finish")
-        .expect_err("host should report capture failure");
-    assert!(error.contains("初始化画面捕获失败"));
-}
-
-#[test]
-fn host_treats_missing_initial_frame_as_waitable_state() {
+fn screen_capture_waits_until_first_frame_is_available() {
     let config = host_config("127.0.0.1:0".to_owned());
-    let window = window_candidate();
     let mut capture = RecordingCaptureStarter {
         frames: VecDeque::from([None, Some(captured_bgra_frame())]),
         ..Default::default()
     };
     let attempts = capture.attempts.clone();
 
-    let (_session, frame, active_mode) = start_capture_session(&config, &window, &mut capture)
-        .expect("host should wait until first frame metadata is available");
+    let (_session, frame) = start_screen_capture_session(&config, &mut capture)
+        .expect("host should wait until first screen frame is available");
 
-    assert_eq!(capture.targets, vec![desktop_capture_target()]);
-    assert_eq!(active_mode, ActiveCaptureMode::Display);
+    assert_eq!(capture.targets, vec![screen_capture_target()]);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(frame.row_pitch, 5120);
     assert_eq!(frame.bytes.len(), 5120 * 720);
 }
 
 #[test]
-fn capture_input_bounds_keep_window_origin_for_window_capture() {
-    let mut config = host_config("127.0.0.1:0".to_owned());
-    config.capture.mode = CaptureMode::Window;
-    let mut window = window_candidate();
-    window.rect = window::WindowRect {
-        left: 50,
-        top: 75,
-        right: 1330,
-        bottom: 795,
-    };
-    let frame = captured_bgra_frame();
+fn screen_input_bounds_use_capture_frame_dimensions() {
+    let frame = captured_bgra_frame_with_dimensions(1920, 1080);
 
-    let bounds = capture_input_bounds(ActiveCaptureMode::Window, &window, &frame);
+    let bounds = screen_input_bounds(&frame);
 
     assert_eq!(
         bounds,
         CaptureInputBounds {
-            origin_x: 50,
-            origin_y: 75,
-            width: 1280,
-            height: 720,
-        }
-    );
-}
-
-#[test]
-fn capture_input_bounds_use_monitor_origin_for_display_capture() {
-    let mut window = window_candidate();
-    window.monitor_rect = window::WindowRect {
-        left: -1920,
-        top: 120,
-        right: 0,
-        bottom: 1200,
-    };
-    let frame = captured_bgra_frame();
-
-    let bounds = capture_input_bounds(ActiveCaptureMode::Display, &window, &frame);
-
-    assert_eq!(
-        bounds,
-        CaptureInputBounds {
-            origin_x: -1920,
-            origin_y: 120,
-            width: 1280,
-            height: 720,
+            origin_x: 0,
+            origin_y: 0,
+            width: 1920,
+            height: 1080,
         }
     );
 }
@@ -176,15 +45,14 @@ fn capture_input_bounds_use_monitor_origin_for_display_capture() {
 #[test]
 fn host_reports_capture_failed_when_initial_frame_times_out() {
     let mut config = host_config("127.0.0.1:0".to_owned());
-    config.capture.startup_timeout_ms = 1;
-    let window = window_candidate();
+    config.capture.first_frame_timeout_ms = 1;
     let mut capture = RecordingCaptureStarter {
         frames: VecDeque::from([None, None]),
         ..Default::default()
     };
 
-    let error = match start_capture_session(&config, &window, &mut capture) {
-        Ok(_) => panic!("host should fail when no frame metadata arrives before timeout"),
+    let error = match start_screen_capture_session(&config, &mut capture) {
+        Ok(_) => panic!("host should fail when no screen frame arrives before timeout"),
         Err(error) => error,
     };
 
@@ -192,18 +60,4 @@ fn host_reports_capture_failed_when_initial_frame_times_out() {
         error,
         CaptureError::windows_frame_read_failed("等待 Windows 捕获首帧超时")
     );
-}
-
-#[test]
-fn auto_capture_uses_window_capture_before_display_fallback() {
-    let mut config = host_config("127.0.0.1:0".to_owned());
-    config.capture.mode = CaptureMode::Auto;
-    let window = window_candidate();
-    let mut capture = RecordingCaptureStarter::default();
-
-    let (_session, _frame, active_mode) = start_capture_session(&config, &window, &mut capture)
-        .expect("auto capture should prefer window capture");
-
-    assert_eq!(capture.targets, vec![window_capture_target()]);
-    assert_eq!(active_mode, ActiveCaptureMode::Window);
 }
