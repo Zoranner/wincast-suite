@@ -8,6 +8,7 @@ pub struct RenderConfig {
     pub width: u32,
     pub height: u32,
     pub fullscreen: bool,
+    pub vsync: bool,
 }
 
 impl RenderConfig {
@@ -264,6 +265,7 @@ mod tests {
             width: 800,
             height: 600,
             fullscreen: false,
+            vsync: false,
         };
 
         assert_eq!(
@@ -279,12 +281,27 @@ mod tests {
             width: 0,
             height: 600,
             fullscreen: false,
+            vsync: false,
         };
 
         assert_eq!(
             config.validate(),
             Err(RenderError::InvalidConfig("窗口尺寸必须大于 0".to_owned()))
         );
+    }
+
+    #[test]
+    fn render_config_keeps_explicit_vsync_choice() {
+        let config = RenderConfig {
+            title: "WinCast".to_owned(),
+            width: 800,
+            height: 600,
+            fullscreen: true,
+            vsync: false,
+        };
+
+        config.validate().expect("render config should be valid");
+        assert!(!config.vsync);
     }
 
     #[test]
@@ -327,6 +344,7 @@ mod tests {
             width: 800,
             height: 600,
             fullscreen: false,
+            vsync: false,
         })
         .expect_err("non-Linux platform should not construct SDL renderer");
 

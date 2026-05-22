@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use wincast_capture::CapturedBgraFrame;
+use wincast_capture::{CaptureError, CapturedBgraFrame};
 use wincast_input::{CaptureInputBounds, WindowsInputEventSink};
 use wincast_media::{
     MediaConfigError, MediaError, OpenH264Encoder, RawPixelFormat, RawVideoFrame,
@@ -242,7 +242,14 @@ fn write_h264_encoded_stream_with_encoder(
 
     loop {
         let frame = match session.try_next_bgra_frame() {
-            Ok(Some(frame)) => frame,
+            Ok(Some(frame)) => {
+                take_latest_available_bgra_frame(session, frame).map_err(|error| {
+                    let detail = error.to_string();
+                    let message = format!("读取后续 H.264 捕获帧失败: {detail}");
+                    let _ = write_control_error(writer, ErrorCode::CaptureFailed, detail);
+                    HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
+                })?
+            }
             Ok(None) => {
                 if let Some(reason) = check_input_reader_events(input_events)? {
                     write_session_goodbye(writer).map_err(|message| {
@@ -296,6 +303,17 @@ fn write_h264_encoded_stream_with_encoder(
             return Ok(reason);
         }
     }
+}
+
+fn take_latest_available_bgra_frame(
+    session: &mut dyn CaptureRuntime,
+    initial_frame: CapturedBgraFrame,
+) -> Result<CapturedBgraFrame, CaptureError> {
+    let mut latest_frame = initial_frame;
+    while let Some(frame) = session.try_next_bgra_frame()? {
+        latest_frame = frame;
+    }
+    Ok(latest_frame)
 }
 
 #[cfg(test)]

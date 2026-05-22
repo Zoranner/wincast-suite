@@ -441,7 +441,6 @@ fn host_streams_multiple_h264_encoded_frames_until_capture_inactive() {
     );
     let first = read_message(&mut client).expect("first encoded frame should decode");
     let second = read_message(&mut client).expect("second encoded frame should decode");
-    let third = read_message(&mut client).expect("third encoded frame should decode");
     assert_eq!(
         read_message(&mut client).expect("goodbye should decode after capture ends"),
         ControlMessage::Goodbye
@@ -454,13 +453,10 @@ fn host_streams_multiple_h264_encoded_frames_until_capture_inactive() {
     assert_eq!(reason, HostSessionEndReason::CaptureInactive);
     let first = expect_h264_frame(first);
     let second = expect_h264_frame(second);
-    let third = expect_h264_frame(third);
     assert_eq!(first.sequence_number, 0);
-    assert_eq!(second.sequence_number, 1);
-    assert_eq!(third.sequence_number, 2);
+    assert_eq!(second.sequence_number, 2);
     assert!(first.keyframe);
     assert!(!second.keyframe);
-    assert!(!third.keyframe);
 }
 
 #[test]

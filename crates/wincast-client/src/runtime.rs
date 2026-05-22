@@ -66,6 +66,7 @@ pub(crate) fn run_fullscreen_client(
         width: 1280,
         height: 720,
         fullscreen: true,
+        vsync: false,
     })
     .map_err(|error| format!("创建客户端 SDL2 全屏窗口失败: {error}"))?;
     let mut tick = 0;

@@ -38,10 +38,11 @@ impl SdlBgraPixelRenderer {
                 .set_fullscreen(FullscreenType::Desktop)
                 .map_err(RenderError::Backend)?;
         }
-        let canvas = window
-            .into_canvas()
-            .accelerated()
-            .present_vsync()
+        let mut canvas_builder = window.into_canvas().accelerated();
+        if config.vsync {
+            canvas_builder = canvas_builder.present_vsync();
+        }
+        let canvas = canvas_builder
             .build()
             .map_err(|error| RenderError::Backend(error.to_string()))?;
         let texture_creator = canvas.texture_creator();

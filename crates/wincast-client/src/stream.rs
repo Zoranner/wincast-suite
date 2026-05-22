@@ -75,6 +75,7 @@ pub(crate) fn read_h264_encoded_frames_with_sdl_window_from_first(
         width,
         height,
         fullscreen: true,
+        vsync: false,
     })
     .map_err(|error| format!("创建客户端 SDL2 窗口失败: {error}"))?;
     read_h264_encoded_frames_with_renderer_from_first(stream, first_frame, None, &mut renderer)
@@ -120,7 +121,7 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
         if frame_limit.is_some_and(|limit| frames >= limit) {
             break;
         }
-        if let Some(end) = handle_next_h264_stream_item(
+        if let Some(end) = handle_available_h264_stream_items(
             &mut stream_reader,
             control_stream,
             &mut decoder,
@@ -151,7 +152,7 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
         if write_client_control_message(control_stream, &ControlMessage::Heartbeat)? {
             break;
         }
-        if let Some(end) = handle_next_h264_stream_item(
+        if let Some(end) = handle_available_h264_stream_items(
             &mut stream_reader,
             control_stream,
             &mut decoder,
@@ -173,7 +174,7 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
 }
 
 #[cfg(any(test, target_os = "linux"))]
-fn handle_next_h264_stream_item(
+fn handle_available_h264_stream_items(
     stream_reader: &mut H264EncodedStreamReader,
     control_stream: &mut (impl Read + std::io::Write),
     decoder: &mut OpenH264Decoder,
@@ -181,23 +182,50 @@ fn handle_next_h264_stream_item(
     last_sequence_number: &mut Option<u64>,
     frames: &mut usize,
 ) -> Result<Option<VideoStreamEnd>, String> {
-    match stream_reader
-        .read_next(control_stream)
-        .map_err(format_h264_encoded_stream_error)?
-    {
-        Some(NextEncodedVideoStreamItem::Frame(frame)) => {
-            render_h264_encoded_frame(decoder, renderer, frame, last_sequence_number)?;
-            *frames += 1;
-            Ok(None)
+    let mut latest_frame = None;
+    loop {
+        match stream_reader
+            .read_next(control_stream)
+            .map_err(format_h264_encoded_stream_error)?
+        {
+            Some(NextEncodedVideoStreamItem::Frame(frame)) => {
+                latest_frame = Some(decode_h264_encoded_frame(
+                    decoder,
+                    frame,
+                    last_sequence_number,
+                )?);
+                *frames += 1;
+            }
+            Some(NextEncodedVideoStreamItem::Goodbye) => {
+                render_latest_decoded_frame(renderer, latest_frame)?;
+                return Ok(Some(VideoStreamEnd::Frames(encoded_video_receive_summary(
+                    *frames,
+                    *last_sequence_number,
+                )?)));
+            }
+            Some(NextEncodedVideoStreamItem::HostProgramExited(message)) => {
+                render_latest_decoded_frame(renderer, latest_frame)?;
+                return Ok(Some(VideoStreamEnd::HostProgramExited(message)));
+            }
+            None => {
+                render_latest_decoded_frame(renderer, latest_frame)?;
+                return Ok(None);
+            }
         }
-        Some(NextEncodedVideoStreamItem::Goodbye) => Ok(Some(VideoStreamEnd::Frames(
-            encoded_video_receive_summary(*frames, *last_sequence_number)?,
-        ))),
-        Some(NextEncodedVideoStreamItem::HostProgramExited(message)) => {
-            Ok(Some(VideoStreamEnd::HostProgramExited(message)))
-        }
-        None => Ok(None),
     }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn render_latest_decoded_frame(
+    renderer: &mut impl wincast_render::BgraPixelRenderer,
+    frame: Option<wincast_render::BgraPixelFrame>,
+) -> Result<(), String> {
+    let Some(frame) = frame else {
+        return Ok(());
+    };
+    renderer
+        .render_frame(&frame)
+        .map_err(|error| format!("渲染宿主端 H.264 视频帧失败: {error}"))
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -318,6 +346,9 @@ impl H264EncodedStreamReader {
                 return Ok(None);
             };
             if read == 0 {
+                if self.header_read == 0 {
+                    return Ok(None);
+                }
                 return Err(EncodedVideoStreamReadError::Interrupted(
                     "控制消息长度头不完整".to_owned(),
                 ));
@@ -491,21 +522,30 @@ fn render_h264_encoded_frame(
     frame: EncodedVideoFrame,
     last_sequence_number: &mut Option<u64>,
 ) -> Result<(), String> {
+    let raw = decode_h264_encoded_frame(decoder, frame, last_sequence_number)?;
+    renderer
+        .render_frame(&raw)
+        .map_err(|error| format!("渲染宿主端 H.264 视频帧失败: {error}"))
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn decode_h264_encoded_frame(
+    decoder: &mut OpenH264Decoder,
+    frame: EncodedVideoFrame,
+    last_sequence_number: &mut Option<u64>,
+) -> Result<wincast_render::BgraPixelFrame, String> {
     validate_h264_frame_sequence(&frame, last_sequence_number)?;
     let decoded = decoder
         .decode(&frame)
         .map_err(|error| format!("宿主端 H.264 编码帧解码失败: {error}"))?;
-    let raw = wincast_render::BgraPixelFrame {
+    Ok(wincast_render::BgraPixelFrame {
         width: decoded.width,
         height: decoded.height,
         row_pitch: decoded.row_pitch(),
         sequence_number: frame.sequence_number,
         timestamp_ns: frame.timestamp_ns,
         bytes: decoded.bytes.to_vec(),
-    };
-    renderer
-        .render_frame(&raw)
-        .map_err(|error| format!("渲染宿主端 H.264 视频帧失败: {error}"))
+    })
 }
 
 #[cfg(test)]
@@ -682,6 +722,39 @@ mod tests {
             written.is_empty(),
             "only the timeout loop should send heartbeat"
         );
+    }
+
+    #[test]
+    fn client_renders_latest_available_h264_frame_only() {
+        let frames = valid_h264_frames(4);
+        let mut bytes = Vec::new();
+        for frame in &frames[1..] {
+            write_message(
+                &mut bytes,
+                &ControlMessage::EncodedVideoFrame(frame.clone()),
+            )
+            .expect("encoded frame should encode");
+        }
+        let mut stream = DuplexTestStream::with_initial_timeout(bytes);
+        let mut renderer = RecordingRenderer::default();
+
+        let summary = read_h264_encoded_frames_with_renderer_from_first(
+            &mut stream,
+            frames[0].clone(),
+            Some(4),
+            &mut renderer,
+        )
+        .expect("available H.264 frames should drain and render latest frame");
+
+        assert_eq!(
+            summary,
+            VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
+                frames: 4,
+                last_sequence_number: 4,
+            })
+        );
+        assert_eq!(renderer.rendered_sequences, vec![1, 4]);
+        assert_eq!(renderer.poll_count, 1);
     }
 
     #[test]
