@@ -63,10 +63,10 @@ pub(super) fn start_screen_capture_session(
 }
 
 pub(super) fn screen_input_bounds(frame: &CapturedBgraFrame) -> CaptureInputBounds {
-    CaptureInputBounds {
-        origin_x: 0,
-        origin_y: 0,
-        width: frame.metadata.frame.width,
-        height: frame.metadata.frame.height,
-    }
+    CaptureInputBounds::from_capture_size(
+        0,
+        0,
+        frame.metadata.frame.width,
+        frame.metadata.frame.height,
+    )
 }

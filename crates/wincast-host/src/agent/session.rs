@@ -60,12 +60,10 @@ pub(super) fn handle_control_client_with_session_gate(
             ensure_remote_session_allowed(&mut writer, session_gate)?;
             let mut started =
                 crate::program::launch_with_runner(config, runner).map_err(|error| {
-                    let message = format!("启动宿主端程序失败: {error}");
-                    let _ = write_control_error(
-                        &mut writer,
-                        ErrorCode::ProgramLaunchFailed,
-                        message.clone(),
-                    );
+                    let detail = error.to_string();
+                    let message = format!("启动宿主端程序失败: {detail}");
+                    let _ =
+                        write_control_error(&mut writer, ErrorCode::ProgramLaunchFailed, detail);
                     message
                 })?;
             let result = run_started_session(
@@ -235,13 +233,14 @@ pub(super) fn run_started_session(
     }
     let (mut session, first_frame) =
         start_screen_capture_session(config, capture).map_err(|error| {
-            let message = format!("初始化画面捕获失败: {error}");
-            let write_result =
-                write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
+            let detail = error.to_string();
+            let message = format!("初始化画面捕获失败: {detail}");
+            let write_result = write_control_error(writer, ErrorCode::CaptureFailed, detail);
             let message = append_error_response_write_failure(message, write_result);
             HostSessionError::new(HostSessionEndReason::CaptureFailed, message)
         })?;
-    write_session_ready(writer, &first_frame)
+    let pipeline_config = h264_pipeline_config(config);
+    write_session_ready(writer, pipeline_config.width, pipeline_config.height)
         .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
     write_h264_encoded_stream(
         writer,
@@ -249,8 +248,9 @@ pub(super) fn run_started_session(
         &first_frame,
         session.as_mut(),
         H264StreamRuntime {
-            input_bounds: screen_input_bounds(&first_frame),
-            pipeline_config: h264_pipeline_config(config),
+            input_bounds: screen_input_bounds(&first_frame)
+                .with_client_size(pipeline_config.width, pipeline_config.height),
+            pipeline_config,
             session_gate,
             program_status: started,
         },

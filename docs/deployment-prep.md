@@ -39,7 +39,7 @@ Host 配置重点检查：
 
 - `listen` 与客户端 `port` 一致。
 - `video.codec` 固定为 `h264`。
-- `video.width` 与 `video.height` 不超过稳定版目标上限。
+- `video.width` 与 `video.height` 是 H.264 编码输出尺寸，不超过稳定版 1920x1080 上限。
 - `program.startup_delay_ms` 足够覆盖 Unity 或目标程序进入全屏画面的时间。
 - `capture.first_frame_timeout_ms` 大于 0，用于避免捕获后端异常时无限等待首帧。
 

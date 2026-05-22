@@ -33,12 +33,7 @@ fn screen_input_bounds_use_capture_frame_dimensions() {
 
     assert_eq!(
         bounds,
-        CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 1920,
-            height: 1080,
-        }
+        CaptureInputBounds::from_capture_size(0, 0, 1920, 1080)
     );
 }
 

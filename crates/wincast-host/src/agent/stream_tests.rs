@@ -24,12 +24,7 @@ fn input_event_reader_owner_can_join_reader_thread_result() {
 
     let input_reader = spawn_input_event_reader(
         server,
-        CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 1280,
-            height: 720,
-        },
+        CaptureInputBounds::from_capture_size(0, 0, 1280, 720),
     );
     write_message(&mut client, &ControlMessage::StopSession).expect("stop session should write");
 
@@ -49,12 +44,7 @@ fn input_event_reader_owner_can_stop_blocked_reader_thread() {
     let (server, _) = listener.accept().expect("server should accept");
     let input_reader = spawn_input_event_reader(
         server,
-        CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 1280,
-            height: 720,
-        },
+        CaptureInputBounds::from_capture_size(0, 0, 1280, 720),
     );
 
     assert_eq!(

@@ -65,16 +65,11 @@ pub(super) fn write_control_error(
 
 pub(super) fn write_session_ready(
     writer: &mut impl std::io::Write,
-    frame: &CapturedBgraFrame,
+    width: u32,
+    height: u32,
 ) -> Result<(), String> {
-    write_message(
-        writer,
-        &ControlMessage::SessionReady {
-            width: frame.metadata.frame.width,
-            height: frame.metadata.frame.height,
-        },
-    )
-    .map_err(|error| format!("写入会话就绪消息失败: {error}"))
+    write_message(writer, &ControlMessage::SessionReady { width, height })
+        .map_err(|error| format!("写入会话就绪消息失败: {error}"))
 }
 
 pub(super) fn write_h264_encoded_stream(
@@ -178,7 +173,15 @@ fn write_h264_encoded_stream_with_input_events_and_program_status(
             format!("H.264 编码器初始化失败: {}", media_error_message(&error)),
         )
     })?;
-    write_h264_frame_from_capture(writer, &mut encoder, first_frame, "H.264 首帧编码失败")?;
+    let mut scaled_frame_bytes = Vec::new();
+    write_h264_frame_from_capture(
+        writer,
+        &mut encoder,
+        first_frame,
+        pipeline_config,
+        &mut scaled_frame_bytes,
+        "H.264 首帧编码失败",
+    )?;
     if let Some(reason) = check_input_reader_events(input_events)? {
         write_session_goodbye(writer).map_err(|message| {
             HostSessionError::new(HostSessionEndReason::TransportFailed, message)
@@ -218,15 +221,23 @@ fn write_h264_encoded_stream_with_input_events_and_program_status(
                 continue;
             }
             Err(error) => {
-                let message = format!("读取后续 H.264 捕获帧失败: {error}");
-                let _ = write_control_error(writer, ErrorCode::CaptureFailed, message.clone());
+                let detail = error.to_string();
+                let message = format!("读取后续 H.264 捕获帧失败: {detail}");
+                let _ = write_control_error(writer, ErrorCode::CaptureFailed, detail);
                 return Err(HostSessionError::new(
                     HostSessionEndReason::CaptureFailed,
                     message,
                 ));
             }
         };
-        write_h264_frame_from_capture(writer, &mut encoder, &frame, "H.264 后续帧编码失败")?;
+        write_h264_frame_from_capture(
+            writer,
+            &mut encoder,
+            &frame,
+            pipeline_config,
+            &mut scaled_frame_bytes,
+            "H.264 后续帧编码失败",
+        )?;
         if let Some(reason) = check_input_reader_events(input_events)? {
             write_session_goodbye(writer).map_err(|message| {
                 HostSessionError::new(HostSessionEndReason::TransportFailed, message)
@@ -329,16 +340,23 @@ fn write_h264_frame_from_capture(
     writer: &mut impl std::io::Write,
     encoder: &mut impl VideoEncoder,
     frame: &CapturedBgraFrame,
+    pipeline_config: VideoPipelineConfig,
+    scaled_frame_bytes: &mut Vec<u8>,
     failure_prefix: &str,
 ) -> Result<(), HostSessionError> {
-    let encoded = encoder
-        .encode(raw_video_frame_from_capture(frame))
+    let raw_frame = raw_video_frame_from_capture(frame, pipeline_config, scaled_frame_bytes)
         .map_err(|error| {
             write_h264_encoding_error(
                 writer,
                 format!("{failure_prefix}: {}", media_error_message(&error)),
             )
         })?;
+    let encoded = encoder.encode(raw_frame).map_err(|error| {
+        write_h264_encoding_error(
+            writer,
+            format!("{failure_prefix}: {}", media_error_message(&error)),
+        )
+    })?;
     write_message(writer, &ControlMessage::EncodedVideoFrame(encoded)).map_err(|error| {
         HostSessionError::new(
             HostSessionEndReason::TransportFailed,
@@ -347,16 +365,135 @@ fn write_h264_frame_from_capture(
     })
 }
 
-fn raw_video_frame_from_capture(frame: &CapturedBgraFrame) -> RawVideoFrame<'_> {
-    RawVideoFrame {
-        width: frame.metadata.frame.width,
-        height: frame.metadata.frame.height,
-        row_pitch: frame.row_pitch,
-        format: RawPixelFormat::Bgra8Unorm,
-        sequence_number: frame.metadata.frame.sequence_number,
-        timestamp_ns: frame.metadata.frame.timestamp_ns,
-        bytes: &frame.bytes,
+fn raw_video_frame_from_capture<'a>(
+    frame: &'a CapturedBgraFrame,
+    pipeline_config: VideoPipelineConfig,
+    scaled_frame_bytes: &'a mut Vec<u8>,
+) -> Result<RawVideoFrame<'a>, MediaError> {
+    let source = &frame.metadata.frame;
+    if source.width == pipeline_config.width && source.height == pipeline_config.height {
+        return Ok(RawVideoFrame {
+            width: source.width,
+            height: source.height,
+            row_pitch: frame.row_pitch,
+            format: RawPixelFormat::Bgra8Unorm,
+            sequence_number: source.sequence_number,
+            timestamp_ns: source.timestamp_ns,
+            bytes: &frame.bytes,
+        });
     }
+
+    let row_pitch = scale_bgra_frame_to_dimensions(
+        frame,
+        pipeline_config.width,
+        pipeline_config.height,
+        scaled_frame_bytes,
+    )?;
+    Ok(RawVideoFrame {
+        width: pipeline_config.width,
+        height: pipeline_config.height,
+        row_pitch,
+        format: RawPixelFormat::Bgra8Unorm,
+        sequence_number: source.sequence_number,
+        timestamp_ns: source.timestamp_ns,
+        bytes: scaled_frame_bytes,
+    })
+}
+
+fn scale_bgra_frame_to_dimensions(
+    frame: &CapturedBgraFrame,
+    target_width: u32,
+    target_height: u32,
+    output: &mut Vec<u8>,
+) -> Result<u32, MediaError> {
+    let source = &frame.metadata.frame;
+    if source.width == 0 || source.height == 0 {
+        return Err(MediaError::InvalidRawFrame(
+            RawVideoFrameError::InvalidDimensions {
+                width: source.width,
+                height: source.height,
+            },
+        ));
+    }
+    if target_width == 0 || target_height == 0 {
+        return Err(MediaError::InvalidRawFrame(
+            RawVideoFrameError::InvalidDimensions {
+                width: target_width,
+                height: target_height,
+            },
+        ));
+    }
+
+    let source_row_pitch = frame.row_pitch as usize;
+    let source_min_row_pitch = source
+        .width
+        .checked_mul(4)
+        .ok_or(MediaError::InvalidRawFrame(
+            RawVideoFrameError::RowPitchOverflow,
+        ))? as usize;
+    if source_row_pitch < source_min_row_pitch {
+        return Err(MediaError::InvalidRawFrame(
+            RawVideoFrameError::InvalidRowPitch {
+                row_pitch: frame.row_pitch,
+                min_row_pitch: source_min_row_pitch as u32,
+            },
+        ));
+    }
+    let source_expected_len =
+        frame
+            .row_pitch
+            .checked_mul(source.height)
+            .ok_or(MediaError::InvalidRawFrame(
+                RawVideoFrameError::PayloadLengthOverflow,
+            ))? as usize;
+    if frame.bytes.len() != source_expected_len {
+        return Err(MediaError::InvalidRawFrame(
+            RawVideoFrameError::InvalidPayloadLength {
+                actual: frame.bytes.len(),
+                expected: source_expected_len,
+            },
+        ));
+    }
+
+    let target_row_pitch = target_width
+        .checked_mul(4)
+        .ok_or(MediaError::InvalidRawFrame(
+            RawVideoFrameError::RowPitchOverflow,
+        ))?;
+    let target_len =
+        target_row_pitch
+            .checked_mul(target_height)
+            .ok_or(MediaError::InvalidRawFrame(
+                RawVideoFrameError::PayloadLengthOverflow,
+            ))? as usize;
+    output.clear();
+    output.resize(target_len, 0);
+
+    for target_y in 0..target_height {
+        let source_y = scale_axis_to_source(target_y, source.height, target_height);
+        for target_x in 0..target_width {
+            let source_x = scale_axis_to_source(target_x, source.width, target_width);
+            let source_start =
+                source_y * source_row_pitch + source_x * std::mem::size_of::<[u8; 4]>();
+            let target_start = (target_y * target_row_pitch
+                + target_x * std::mem::size_of::<[u8; 4]>() as u32)
+                as usize;
+            output[target_start..target_start + 4]
+                .copy_from_slice(&frame.bytes[source_start..source_start + 4]);
+        }
+    }
+
+    Ok(target_row_pitch)
+}
+
+fn scale_axis_to_source(target_index: u32, source_span: u32, target_span: u32) -> usize {
+    if source_span <= 1 || target_span <= 1 {
+        return 0;
+    }
+
+    let numerator = target_index as u64 * source_span.saturating_sub(1) as u64
+        + target_span.saturating_sub(1) as u64 / 2;
+    (numerator / target_span.saturating_sub(1) as u64) as usize
 }
 
 fn write_h264_encoding_error(

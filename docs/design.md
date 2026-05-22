@@ -161,7 +161,7 @@ Capture Frame
 默认目标：
 
 - codec：H.264。
-- resolution：最高 1920x1080，按宿主实际画面走，不主动降采样。
+- resolution：编码输出尺寸由 `video.width` 与 `video.height` 决定，最高 1920x1080；整屏捕获画面与配置尺寸不一致时，宿主端在编码前缩放到配置尺寸。
 - fps：默认 30。
 - latency：优先低延迟，允许为低延迟牺牲压缩率。
 - bitrate：配置目标码率和上限，当前不做复杂自适应码率。
@@ -292,7 +292,7 @@ port = 7856
 - `program.path`、`program.args` 和 `program.work_dir` 描述本次会话启动的 Windows 程序。
 - `program.startup_delay_ms` 是程序启动后的固定等待时间，允许为 0。
 - `video.codec` 当前只支持 `h264`。
-- `video.width` 与 `video.height` 是目标上限，不用于强制降采样到更低清晰度。
+- `video.width` 与 `video.height` 是 H.264 编码输出尺寸，宿主端会把整屏捕获画面缩放到该尺寸后再编码。
 - `capture.first_frame_timeout_ms` 是整屏捕获启动后的首帧保护超时，必须大于 0。
 - 配置读取失败必须直接报错，不做隐式猜测。
 - Windows 路径在 TOML 中推荐用单引号，避免 `\` 被当作转义符。

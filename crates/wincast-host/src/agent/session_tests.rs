@@ -190,6 +190,43 @@ fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
 }
 
 #[test]
+fn host_sends_capture_failure_without_repeating_session_context() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let mut writer = server
+        .try_clone()
+        .expect("server writer should clone for protocol output");
+    let config = host_config("127.0.0.1:0".to_owned());
+    let mut capture = FailingCaptureStarter;
+    let mut started = StartedProgram::from_process_id(42);
+
+    let error = run_started_session(
+        &mut writer,
+        &server,
+        &config,
+        &mut capture,
+        &mut started,
+        &FixedSessionGate(RemoteSessionStatus::Allowed),
+    )
+    .expect_err("host should report session failure");
+    let message = read_message(&mut client).expect("capture failure should be sent");
+
+    assert_eq!(
+        message,
+        ControlMessage::Error {
+            code: ErrorCode::CaptureFailed,
+            message: "当前平台不支持桌面捕获".to_owned(),
+        }
+    );
+    assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
+    assert!(error.message.contains("初始化画面捕获失败"));
+}
+
+#[test]
 fn startup_delay_can_be_cancelled_by_stop_session_before_capture_starts() {
     let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = tcp_pair
@@ -648,7 +685,7 @@ fn expect_h264_frame(message: ControlMessage) -> wincast_protocol::message::Enco
 }
 
 #[test]
-fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_frame() {
+fn host_scales_capture_frame_to_configured_h264_resolution() {
     let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = tcp_pair
         .local_addr()
@@ -656,9 +693,60 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (server, _) = tcp_pair.accept().expect("server should accept");
     let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
-    let too_wide_frame = captured_bgra_frame_with_dimensions(1921, 720);
     let mut capture = RecordingCaptureStarter {
-        frames: VecDeque::from([Some(too_wide_frame)]),
+        frames: VecDeque::from([Some(captured_bgra_frame_with_dimensions(1920, 1080)), None]),
+        ..RecordingCaptureStarter::default()
+    };
+    let mut started = StartedProgram::from_process_id(42);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut capture,
+            &mut started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
+        )
+    });
+
+    assert_eq!(
+        read_message(&mut client).expect("session ready should decode"),
+        ControlMessage::SessionReady {
+            width: 1280,
+            height: 720,
+        }
+    );
+    let frame = expect_h264_frame(read_message(&mut client).expect("first frame should decode"));
+    assert_eq!(frame.width, 1280);
+    assert_eq!(frame.height, 720);
+    assert_eq!(
+        read_message(&mut client).expect("capture inactive goodbye should decode"),
+        ControlMessage::Goodbye
+    );
+    let reason = host
+        .join()
+        .expect("host thread should finish")
+        .expect("h264 stream should finish cleanly");
+
+    assert_eq!(reason, HostSessionEndReason::CaptureInactive);
+}
+
+#[test]
+fn host_reports_encoding_failed_when_h264_config_exceeds_resolution_limit() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let mut config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    config.video.width = 1921;
+    let mut capture = RecordingCaptureStarter {
+        frames: VecDeque::from([Some(captured_bgra_frame())]),
         ..RecordingCaptureStarter::default()
     };
     let mut started = StartedProgram::from_process_id(42);
@@ -698,15 +786,15 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
         error_message,
         ControlMessage::Error {
             code: ErrorCode::EncodingFailed,
-            message: "H.264 首帧编码失败: 视频尺寸 1921x720 超过上限 1920x1080".to_owned(),
+            message: "H.264 编码器初始化失败: 视频尺寸 1921x720 超过上限 1920x1080".to_owned(),
         }
     );
     assert!(next_after_error.is_err());
-    assert!(error.message.contains("H.264 首帧编码失败"));
+    assert!(error.message.contains("H.264 编码器初始化失败"));
 }
 
 #[test]
-fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_later_capture_frame() {
+fn host_scales_later_capture_frames_to_configured_h264_resolution() {
     let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = tcp_pair
         .local_addr()
@@ -739,22 +827,23 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_later_capture_fra
 
     read_message(&mut client).expect("session ready should decode");
     let first = expect_h264_frame(read_message(&mut client).expect("first frame should decode"));
-    let error_message = read_message(&mut client).expect("encoding failure should decode");
-    let error = host
+    let second = expect_h264_frame(read_message(&mut client).expect("second frame should decode"));
+    assert_eq!(
+        read_message(&mut client).expect("capture inactive goodbye should decode"),
+        ControlMessage::Goodbye
+    );
+    let reason = host
         .join()
         .expect("host thread should finish")
-        .expect_err("later h264 encoder rejection should fail the session");
+        .expect("later scaled h264 frame should finish cleanly");
 
     assert_eq!(first.sequence_number, 0);
-    assert_eq!(
-        error_message,
-        ControlMessage::Error {
-            code: ErrorCode::EncodingFailed,
-            message: "H.264 后续帧编码失败: 视频尺寸 1921x720 超过上限 1920x1080".to_owned(),
-        }
-    );
-    assert_eq!(error.reason, HostSessionEndReason::CaptureFailed);
-    assert!(error.message.contains("H.264 后续帧编码失败"));
+    assert_eq!(first.width, 1280);
+    assert_eq!(first.height, 720);
+    assert_eq!(second.sequence_number, 0);
+    assert_eq!(second.width, 1280);
+    assert_eq!(second.height, 720);
+    assert_eq!(reason, HostSessionEndReason::CaptureInactive);
 }
 
 struct FailingWriter;

@@ -138,12 +138,7 @@ fn spawned_input_reader_owner_joins_after_stop_session() {
     let (server, _) = listener.accept().expect("server should accept");
     let reader = spawn_input_event_reader(
         server,
-        CaptureInputBounds {
-            origin_x: 0,
-            origin_y: 0,
-            width: 1280,
-            height: 720,
-        },
+        CaptureInputBounds::from_capture_size(0, 0, 1280, 720),
     );
 
     write_message(&mut client, &ControlMessage::StopSession).expect("stop should write");
