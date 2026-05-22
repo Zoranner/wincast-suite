@@ -165,11 +165,10 @@ jobs:
 
               root="wincast-client-${{ matrix.target }}"
               rm -rf "$root"
-              mkdir -p "$root/docs" "$root/examples"
+              mkdir -p "$root/examples"
               install -m 0755 "$binary_path" "$root/${{ matrix.binary }}"
               install -m 0644 README.md "$root/README.md"
               install -m 0644 examples/client.toml "$root/examples/client.toml"
-              install -m 0644 docs/deployment-prep.md docs/smoke-test.md docs/current-status.md docs/development.md "$root/docs/"
               {
                 echo "version=${GITHUB_REF_NAME}"
                 echo "commit=${GITHUB_SHA}"
@@ -191,16 +190,10 @@ jobs:
           $root = "wincast-host-${{ matrix.target }}"
           $version = "${{ github.ref_name }}"
           $releaseDir = "target/${{ matrix.target }}/release"
-          New-Item -ItemType Directory -Force "$root/docs", "$root/examples" | Out-Null
+          New-Item -ItemType Directory -Force "$root/examples" | Out-Null
           Copy-Item "$releaseDir/${{ matrix.binary }}" "$root/${{ matrix.binary }}"
           Copy-Item "README.md" "$root/README.md"
           Copy-Item "examples/host.toml" "$root/examples/host.toml"
-          Copy-Item -Path @(
-            "docs/deployment-prep.md",
-            "docs/smoke-test.md",
-            "docs/current-status.md",
-            "docs/development.md"
-          ) -Destination "$root/docs/"
           @(
             "version=$version"
             "commit=${{ github.sha }}"
