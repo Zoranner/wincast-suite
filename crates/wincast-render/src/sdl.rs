@@ -11,7 +11,7 @@ use wincast_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 
 use crate::{
     BgraPixelFrame, BgraPixelRenderer, LoadingStatus, PixelDimensions, RenderConfig, RenderError,
-    RenderLoopAction, RenderLoopResult, map_window_point_to_frame_pixels,
+    RenderLoopAction, RenderLoopResult, coalesce_input_events, map_window_point_to_frame_pixels,
     mouse_button_input_events,
 };
 
@@ -196,7 +196,7 @@ impl BgraPixelRenderer for SdlBgraPixelRenderer {
 
         Ok(RenderLoopResult {
             action,
-            input_events,
+            input_events: coalesce_input_events(input_events),
         })
     }
 }

@@ -67,6 +67,7 @@ where
         let (stream, peer_addr) = listener
             .accept()
             .map_err(|error| format!("接受客户端连接失败: {error}"))?;
+        configure_control_stream(&stream)?;
         accepted_connections += 1;
         state = join_finished_session_if_reported(state, &session_finished_receiver)?;
 
@@ -273,6 +274,12 @@ fn reject_busy_control_client(mut stream: TcpStream, peer_addr: SocketAddr) {
     }
 }
 
+pub(super) fn configure_control_stream(stream: &TcpStream) -> Result<(), String> {
+    stream
+        .set_nodelay(true)
+        .map_err(|error| format!("配置宿主端 TCP 低延迟模式失败: {error}"))
+}
+
 #[cfg(test)]
 pub(super) fn run_control_listener_once_with_runtime(
     listener: TcpListener,
@@ -286,6 +293,7 @@ pub(super) fn run_control_listener_once_with_runtime(
     let (mut stream, _peer_addr) = listener
         .accept()
         .map_err(|error| format!("接受客户端连接失败: {error}"))?;
+    configure_control_stream(&stream)?;
     handle_control_client(&mut stream, config, runner, capture)?;
     Ok(local_addr)
 }
@@ -304,6 +312,7 @@ pub(super) fn run_control_listener_once_with_runtime_and_session_gate(
     let (mut stream, _peer_addr) = listener
         .accept()
         .map_err(|error| format!("接受客户端连接失败: {error}"))?;
+    configure_control_stream(&stream)?;
     super::session::handle_control_client_with_session_gate(
         &mut stream,
         config,

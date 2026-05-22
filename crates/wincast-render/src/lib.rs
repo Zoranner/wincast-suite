@@ -70,6 +70,47 @@ pub(crate) fn mouse_button_input_events(
 }
 
 #[cfg(any(test, target_os = "linux"))]
+pub(crate) fn coalesce_input_events(events: Vec<InputEvent>) -> Vec<InputEvent> {
+    let mut coalesced = Vec::with_capacity(events.len());
+    for event in events {
+        match (coalesced.last_mut(), event) {
+            (
+                Some(InputEvent::MouseMove { x, y }),
+                InputEvent::MouseMove {
+                    x: next_x,
+                    y: next_y,
+                },
+            ) => {
+                *x = next_x;
+                *y = next_y;
+            }
+            (
+                Some(InputEvent::MouseMoveAbsolute { x, y }),
+                InputEvent::MouseMoveAbsolute {
+                    x: next_x,
+                    y: next_y,
+                },
+            ) => {
+                *x = next_x;
+                *y = next_y;
+            }
+            (
+                Some(InputEvent::MouseMoveDelta { delta_x, delta_y }),
+                InputEvent::MouseMoveDelta {
+                    delta_x: next_delta_x,
+                    delta_y: next_delta_y,
+                },
+            ) => {
+                *delta_x += next_delta_x;
+                *delta_y += next_delta_y;
+            }
+            (_, event) => coalesced.push(event),
+        }
+    }
+    coalesced
+}
+
+#[cfg(any(test, target_os = "linux"))]
 fn map_window_axis_to_frame_axis(coordinate: i32, window_span: u32, frame_span: u32) -> f32 {
     if frame_span <= 1 {
         return 0.0;
@@ -413,6 +454,70 @@ mod tests {
                 InputEvent::MouseButton {
                     button: MouseButton::Right,
                     state: ButtonState::Released,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesces_consecutive_absolute_mouse_moves_to_latest_position() {
+        let events = coalesce_input_events(vec![
+            InputEvent::MouseMoveAbsolute { x: 10.0, y: 20.0 },
+            InputEvent::MouseMoveAbsolute { x: 11.0, y: 21.0 },
+            InputEvent::MouseMoveAbsolute { x: 12.0, y: 22.0 },
+            InputEvent::MouseButton {
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            },
+        ]);
+
+        assert_eq!(
+            events,
+            vec![
+                InputEvent::MouseMoveAbsolute { x: 12.0, y: 22.0 },
+                InputEvent::MouseButton {
+                    button: MouseButton::Left,
+                    state: ButtonState::Pressed,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesces_delta_mouse_moves_without_crossing_other_events() {
+        let events = coalesce_input_events(vec![
+            InputEvent::MouseMoveDelta {
+                delta_x: 1,
+                delta_y: -2,
+            },
+            InputEvent::MouseMoveDelta {
+                delta_x: 3,
+                delta_y: 4,
+            },
+            InputEvent::MouseWheel {
+                delta_x: 0,
+                delta_y: 1,
+            },
+            InputEvent::MouseMoveDelta {
+                delta_x: -5,
+                delta_y: 6,
+            },
+        ]);
+
+        assert_eq!(
+            events,
+            vec![
+                InputEvent::MouseMoveDelta {
+                    delta_x: 4,
+                    delta_y: 2,
+                },
+                InputEvent::MouseWheel {
+                    delta_x: 0,
+                    delta_y: 1,
+                },
+                InputEvent::MouseMoveDelta {
+                    delta_x: -5,
+                    delta_y: 6,
                 },
             ]
         );

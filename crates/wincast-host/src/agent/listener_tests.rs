@@ -8,7 +8,7 @@ use std::{
 use crate::{
     agent::{
         listener::{
-            log_session_result, run_control_listener_n_with_runtime,
+            configure_control_stream, log_session_result, run_control_listener_n_with_runtime,
             run_control_listener_once_with_runtime,
             run_control_listener_once_with_runtime_and_session_gate,
         },
@@ -22,6 +22,24 @@ use wincast_protocol::{
     handshake::send_client_hello,
     message::{ControlMessage, ErrorCode},
 };
+
+#[test]
+fn host_enables_tcp_nodelay_for_control_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener addr should be available");
+    let client = TcpStream::connect(endpoint).expect("client should connect");
+    let (stream, _) = listener.accept().expect("host should accept client");
+
+    configure_control_stream(&stream).expect("host control stream should configure");
+
+    assert!(
+        stream.nodelay().expect("nodelay should be readable"),
+        "host control stream should disable Nagle"
+    );
+    drop(client);
+}
 
 #[test]
 fn host_accepts_one_tcp_control_handshake_and_launches_program_before_streaming_h264() {

@@ -15,9 +15,9 @@ use wincast_protocol::{
 use crate::{
     errors::format_host_error,
     runtime::{
-        ClientRunError, RetryOptions, RetryReport, control_channel_ready_message,
-        format_retry_report, run_client_attempt_with_reporter, run_client_with_config,
-        run_with_retry, run_with_retry_and_reporter,
+        ClientRunError, RetryOptions, RetryReport, connect_control_stream,
+        control_channel_ready_message, format_retry_report, run_client_attempt_with_reporter,
+        run_client_with_config, run_with_retry, run_with_retry_and_reporter,
     },
     stream::validate_encoded_video_frame,
 };
@@ -74,6 +74,26 @@ fn client_run_performs_tcp_control_handshake() {
     assert!(message.contains("已建立宿主端控制通道"));
     assert!(message.contains(&config.endpoint()));
     assert!(!message.contains("运行时链路未实现"));
+}
+
+#[test]
+fn client_enables_tcp_nodelay_for_control_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+    let host_thread = thread::spawn(move || {
+        let (_stream, _) = listener.accept().expect("client should connect");
+    });
+
+    let stream = connect_control_stream(&endpoint.to_string())
+        .expect("client control stream should connect");
+
+    assert!(
+        stream.nodelay().expect("nodelay should be readable"),
+        "client control stream should disable Nagle"
+    );
+    host_thread.join().expect("host thread should finish");
 }
 
 #[test]

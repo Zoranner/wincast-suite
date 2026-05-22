@@ -142,9 +142,7 @@ pub(crate) fn run_client_attempt_with_reporter(
 ) -> Result<String, ClientRunError> {
     let endpoint = config.endpoint();
     reporter(ClientRuntimeEvent::Connecting);
-    let mut stream = TcpStream::connect(&endpoint).map_err(|error| {
-        ClientRunError::Connection(format!("无法连接宿主端 {endpoint}: {error}"))
-    })?;
+    let mut stream = connect_control_stream(&endpoint)?;
 
     reporter(ClientRuntimeEvent::Handshaking);
     send_client_hello(&mut stream).map_err(ClientRunError::Handshake)?;
@@ -172,9 +170,7 @@ fn run_client_attempt_with_renderer(
 ) -> Result<String, ClientRunError> {
     let endpoint = config.endpoint();
     let _ = render_runtime_loading_event(ClientRuntimeEvent::Connecting, renderer, tick);
-    let mut stream = TcpStream::connect(&endpoint).map_err(|error| {
-        ClientRunError::Connection(format!("无法连接宿主端 {endpoint}: {error}"))
-    })?;
+    let mut stream = connect_control_stream(&endpoint)?;
 
     let _ = render_runtime_loading_event(ClientRuntimeEvent::Handshaking, renderer, tick);
     send_client_hello(&mut stream).map_err(ClientRunError::Handshake)?;
@@ -191,6 +187,16 @@ fn run_client_attempt_with_renderer(
     let _ = render_runtime_loading_event(ClientRuntimeEvent::SessionEnded, renderer, tick);
 
     Ok(control_channel_ready_message(config))
+}
+
+pub(crate) fn connect_control_stream(endpoint: &str) -> Result<TcpStream, ClientRunError> {
+    let stream = TcpStream::connect(endpoint).map_err(|error| {
+        ClientRunError::Connection(format!("无法连接宿主端 {endpoint}: {error}"))
+    })?;
+    stream.set_nodelay(true).map_err(|error| {
+        ClientRunError::Connection(format!("配置客户端 TCP 低延迟模式失败: {error}"))
+    })?;
+    Ok(stream)
 }
 
 #[cfg(test)]
