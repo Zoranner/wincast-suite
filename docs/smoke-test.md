@@ -21,7 +21,7 @@ Windows host 使用 H.264 编码链路和整屏捕获策略，重点核对以下
 
 - `listen`：Host 监听地址，默认端口需与 Client 的 `port` 一致。
 - `program.path`、`program.args`、`program.work_dir`：待启动应用的启动命令和工作目录。
-- `program.startup_delay_ms`：启动程序后延迟多久开始整屏捕获。
+- `program.startup_delay_ms`：启动程序后延迟多久开始整屏捕获；延迟期间关闭客户端也应立即结束本次会话并清理宿主端程序。
 - `video.codec`：稳定版烟测使用 `h264`。
 - `video.width`、`video.height`：目标上限最高 1920x1080，按宿主实际画面走，不主动降采样。
 - `capture.first_frame_timeout_ms`：整屏捕获启动后等待首帧的保护超时。
@@ -38,7 +38,8 @@ Linux client 指向 Windows host，重点核对以下字段：
 - 客户端内置有限重试，覆盖初始连接失败、宿主端会话门禁的可恢复拒绝和 H.264 视频流中断；烟测时仍需观察重试次数耗尽后的错误提示，不能把它外推为锁屏/解锁恢复已经完成。
 - 观察客户端窗口，确认能看到 Windows 宿主机整块屏幕，且目标应用画面变化后客户端画面随之更新。
 - 在客户端窗口内移动鼠标、点击、滚轮滚动，并在目标应用可输入区域敲入普通字符，确认 Windows 目标应用收到鼠标和键盘输入。
-- 关闭 Linux 客户端 SDL2 窗口，确认客户端退出时发送 `StopSession`，Windows host 结束当前会话并清理捕获/输入链路。
+- 关闭 Linux 客户端 SDL2 窗口，确认客户端退出时发送 `StopSession`，Windows host 结束当前会话并清理捕获、输入链路和本次启动的程序树。
+- 在会话期间手动关闭目标应用，确认客户端收到宿主端程序已退出的错误或会话结束事件，并且 Windows host 能接受下一次连接。
 - 不重启 Windows host，再次启动 Linux client 连接同一 host，确认 host 能接受下一次连接并重新看到画面。
 
 ## Linux 真机验证入口

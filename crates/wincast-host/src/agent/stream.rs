@@ -20,6 +20,8 @@ use wincast_protocol::{
     message::{ControlMessage, ErrorCode},
 };
 
+use crate::program::StartedProgram;
+
 use super::capture::{CaptureRuntime, InputEventSink};
 use super::session::SessionGate;
 
@@ -33,6 +35,7 @@ pub(super) enum HostSessionEndReason {
     ClientDisconnected,
     CaptureFailed,
     InputFailed,
+    ProgramExited,
     TransportFailed,
     SessionUnavailable,
 }
@@ -79,9 +82,7 @@ pub(super) fn write_h264_encoded_stream(
     input_reader: &TcpStream,
     first_frame: &CapturedBgraFrame,
     session: &mut dyn CaptureRuntime,
-    input_bounds: CaptureInputBounds,
-    pipeline_config: VideoPipelineConfig,
-    session_gate: &impl SessionGate,
+    runtime: H264StreamRuntime<'_, impl SessionGate, impl ProgramStatusCheck>,
 ) -> Result<HostSessionEndReason, HostSessionError> {
     let input_stream = input_reader.try_clone().map_err(|error| {
         HostSessionError::new(
@@ -89,32 +90,46 @@ pub(super) fn write_h264_encoded_stream(
             format!("克隆客户端输入事件读取端失败: {error}"),
         )
     })?;
-    let input_events = spawn_input_event_reader(input_stream, input_bounds);
-    write_h264_encoded_stream_with_input_reader(
+    let input_events = spawn_input_event_reader(input_stream, runtime.input_bounds);
+    write_h264_encoded_stream_with_input_reader_and_program_status(
         writer,
         first_frame,
         session,
         input_events,
-        pipeline_config,
-        session_gate,
+        runtime.pipeline_config,
+        runtime.session_gate,
+        runtime.program_status,
     )
 }
 
-pub(super) fn write_h264_encoded_stream_with_input_reader(
+pub(super) struct H264StreamRuntime<'a, G, P>
+where
+    G: SessionGate,
+    P: ProgramStatusCheck,
+{
+    pub(super) input_bounds: CaptureInputBounds,
+    pub(super) pipeline_config: VideoPipelineConfig,
+    pub(super) session_gate: &'a G,
+    pub(super) program_status: &'a mut P,
+}
+
+fn write_h264_encoded_stream_with_input_reader_and_program_status(
     writer: &mut impl std::io::Write,
     first_frame: &CapturedBgraFrame,
     session: &mut dyn CaptureRuntime,
     input_reader: InputEventReader,
     pipeline_config: VideoPipelineConfig,
     session_gate: &impl SessionGate,
+    program_status: &mut impl ProgramStatusCheck,
 ) -> Result<HostSessionEndReason, HostSessionError> {
-    let result = write_h264_encoded_stream_with_input_events(
+    let result = write_h264_encoded_stream_with_input_events_and_program_status(
         writer,
         first_frame,
         session,
         input_reader.receiver(),
         pipeline_config,
         session_gate,
+        program_status,
     );
     let cleanup_result = match &result {
         Ok(HostSessionEndReason::StopSession) => join_input_reader(input_reader),
@@ -127,6 +142,7 @@ pub(super) fn write_h264_encoded_stream_with_input_reader(
     })
 }
 
+#[cfg(test)]
 pub(super) fn write_h264_encoded_stream_with_input_events(
     writer: &mut impl std::io::Write,
     first_frame: &CapturedBgraFrame,
@@ -134,6 +150,27 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
     input_events: &mpsc::Receiver<InputReaderEvent>,
     pipeline_config: VideoPipelineConfig,
     session_gate: &impl SessionGate,
+) -> Result<HostSessionEndReason, HostSessionError> {
+    let mut program_status = AlwaysRunningProgramStatus;
+    write_h264_encoded_stream_with_input_events_and_program_status(
+        writer,
+        first_frame,
+        session,
+        input_events,
+        pipeline_config,
+        session_gate,
+        &mut program_status,
+    )
+}
+
+fn write_h264_encoded_stream_with_input_events_and_program_status(
+    writer: &mut impl std::io::Write,
+    first_frame: &CapturedBgraFrame,
+    session: &mut dyn CaptureRuntime,
+    input_events: &mpsc::Receiver<InputReaderEvent>,
+    pipeline_config: VideoPipelineConfig,
+    session_gate: &impl SessionGate,
+    program_status: &mut impl ProgramStatusCheck,
 ) -> Result<HostSessionEndReason, HostSessionError> {
     let mut encoder = OpenH264Encoder::new(pipeline_config).map_err(|error| {
         write_h264_encoding_error(
@@ -149,6 +186,9 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
         return Ok(reason);
     }
     if let Some(reason) = check_session_gate(writer, session_gate)? {
+        return Ok(reason);
+    }
+    if let Some(reason) = check_program_status(writer, program_status)? {
         return Ok(reason);
     }
 
@@ -169,6 +209,9 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
                     return Ok(HostSessionEndReason::CaptureInactive);
                 }
                 if let Some(reason) = check_session_gate(writer, session_gate)? {
+                    return Ok(reason);
+                }
+                if let Some(reason) = check_program_status(writer, program_status)? {
                     return Ok(reason);
                 }
                 thread::sleep(Duration::from_millis(16));
@@ -193,7 +236,51 @@ pub(super) fn write_h264_encoded_stream_with_input_events(
         if let Some(reason) = check_session_gate(writer, session_gate)? {
             return Ok(reason);
         }
+        if let Some(reason) = check_program_status(writer, program_status)? {
+            return Ok(reason);
+        }
     }
+}
+
+pub(super) trait ProgramStatusCheck {
+    fn is_program_running(&mut self) -> Result<bool, String>;
+}
+
+impl ProgramStatusCheck for StartedProgram {
+    fn is_program_running(&mut self) -> Result<bool, String> {
+        self.is_running().map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+struct AlwaysRunningProgramStatus;
+
+#[cfg(test)]
+impl ProgramStatusCheck for AlwaysRunningProgramStatus {
+    fn is_program_running(&mut self) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
+fn check_program_status(
+    writer: &mut impl std::io::Write,
+    program_status: &mut impl ProgramStatusCheck,
+) -> Result<Option<HostSessionEndReason>, HostSessionError> {
+    if program_status.is_program_running().map_err(|message| {
+        HostSessionError::new(
+            HostSessionEndReason::ProgramExited,
+            format!("检查宿主端程序退出状态失败: {message}"),
+        )
+    })? {
+        return Ok(None);
+    }
+
+    let message = "宿主端程序已退出，结束远程会话。".to_owned();
+    write_control_error(writer, ErrorCode::ProgramExited, message.clone())
+        .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
+    write_session_goodbye(writer)
+        .map_err(|message| HostSessionError::new(HostSessionEndReason::TransportFailed, message))?;
+    Ok(Some(HostSessionEndReason::ProgramExited))
 }
 
 fn check_session_gate(

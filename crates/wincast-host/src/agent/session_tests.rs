@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     io,
     net::{TcpListener, TcpStream},
-    sync::Mutex,
+    sync::{Arc, Mutex, atomic::AtomicBool},
     thread,
     time::Duration,
 };
@@ -171,14 +171,14 @@ fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
     let mut writer = FailingWriter;
     let config = host_config("127.0.0.1:0".to_owned());
     let mut capture = FailingCaptureStarter;
-    let started = StartedProgram::from_process_id(42);
+    let mut started = StartedProgram::from_process_id(42);
 
     let error = run_started_session(
         &mut writer,
         &server,
         &config,
         &mut capture,
-        &started,
+        &mut started,
         &FixedSessionGate(RemoteSessionStatus::Allowed),
     )
     .expect_err("host should report session failure");
@@ -187,6 +187,100 @@ fn host_reports_error_response_write_failure_without_hiding_capture_failure() {
     assert!(error.message.contains("初始化画面捕获失败"));
     assert!(error.message.contains("写入控制错误消息失败"));
     drop(client);
+}
+
+#[test]
+fn startup_delay_can_be_cancelled_by_stop_session_before_capture_starts() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let mut config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    config.program.startup_delay_ms = 500;
+    let mut capture = RecordingCaptureStarter::default();
+    let mut started = StartedProgram::from_process_id(42);
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        let result = run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut capture,
+            &mut started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
+        );
+        (result, capture.targets)
+    });
+
+    write_message(&mut client, &ControlMessage::StopSession).expect("stop session should write");
+    assert_eq!(
+        read_message(&mut client).expect("goodbye should decode during startup delay"),
+        ControlMessage::Goodbye
+    );
+    let (result, targets) = host.join().expect("host thread should finish");
+
+    assert_eq!(
+        result.expect("startup delay should stop cleanly"),
+        HostSessionEndReason::StopSession
+    );
+    assert!(targets.is_empty(), "capture must not start after stop");
+}
+
+#[test]
+fn host_ends_session_when_started_program_exits_before_capture_starts() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let mut config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    config.program.startup_delay_ms = 500;
+    let mut capture = RecordingCaptureStarter::default();
+    let running = Arc::new(AtomicBool::new(false));
+    let mut started = StartedProgram::from_running_flag(42, Arc::clone(&running));
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        let result = run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut capture,
+            &mut started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
+        );
+        (result, capture.targets)
+    });
+
+    assert_eq!(
+        read_message(&mut client).expect("program exit error should decode"),
+        ControlMessage::Error {
+            code: ErrorCode::ProgramExited,
+            message: "宿主端程序已退出，结束远程会话。".to_owned(),
+        }
+    );
+    assert_eq!(
+        read_message(&mut client).expect("goodbye should decode after program exit"),
+        ControlMessage::Goodbye
+    );
+    let (result, targets) = host.join().expect("host thread should finish");
+
+    assert_eq!(
+        result.expect("program exit should end the session cleanly"),
+        HostSessionEndReason::ProgramExited
+    );
+    assert!(
+        targets.is_empty(),
+        "capture must not start after program exit"
+    );
 }
 
 #[test]
@@ -203,7 +297,7 @@ fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_b
         frames: VecDeque::from([Some(first_frame.clone())]),
         ..RecordingCaptureStarter::default()
     };
-    let started = StartedProgram::from_process_id(42);
+    let mut started = StartedProgram::from_process_id(42);
 
     let host = thread::spawn(move || {
         let mut writer = server
@@ -214,7 +308,7 @@ fn host_sends_first_h264_encoded_frame_after_session_ready_without_sending_raw_b
             &server,
             &config,
             &mut capture,
-            &started,
+            &mut started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
@@ -285,7 +379,7 @@ fn host_streams_multiple_h264_encoded_frames_until_capture_inactive() {
         ]),
         ..RecordingCaptureStarter::default()
     };
-    let started = StartedProgram::from_process_id(42);
+    let mut started = StartedProgram::from_process_id(42);
 
     let host = thread::spawn(move || {
         let mut writer = server
@@ -296,7 +390,7 @@ fn host_streams_multiple_h264_encoded_frames_until_capture_inactive() {
             &server,
             &config,
             &mut capture,
-            &started,
+            &mut started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
@@ -350,7 +444,7 @@ fn host_keeps_h264_stream_alive_when_no_frame_is_temporarily_available() {
         ]),
         ..RecordingCaptureStarter::default()
     };
-    let started = StartedProgram::from_process_id(42);
+    let mut started = StartedProgram::from_process_id(42);
 
     let host = thread::spawn(move || {
         let mut writer = server
@@ -361,7 +455,7 @@ fn host_keeps_h264_stream_alive_when_no_frame_is_temporarily_available() {
             &server,
             &config,
             &mut capture,
-            &started,
+            &mut started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
@@ -398,7 +492,7 @@ fn host_h264_stream_sends_goodbye_and_returns_stop_session() {
         frames,
         ..RecordingCaptureStarter::default()
     };
-    let started = StartedProgram::from_process_id(42);
+    let mut started = StartedProgram::from_process_id(42);
 
     let host = thread::spawn(move || {
         let mut writer = server
@@ -409,7 +503,7 @@ fn host_h264_stream_sends_goodbye_and_returns_stop_session() {
             &server,
             &config,
             &mut capture,
-            &started,
+            &mut started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
@@ -430,6 +524,60 @@ fn host_h264_stream_sends_goodbye_and_returns_stop_session() {
 }
 
 #[test]
+fn host_h264_stream_ends_when_started_program_exits_during_session() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config_with_codec("127.0.0.1:0".to_owned(), VideoCodec::H264);
+    let mut frames = VecDeque::from([Some(captured_bgra_frame_with_sequence(0))]);
+    frames.extend((0..100).map(|_| None));
+    let mut capture = RecordingCaptureStarter {
+        frames,
+        ..RecordingCaptureStarter::default()
+    };
+    let running = Arc::new(AtomicBool::new(true));
+    let mut started = StartedProgram::from_running_flag(42, Arc::clone(&running));
+
+    let host = thread::spawn(move || {
+        let mut writer = server
+            .try_clone()
+            .expect("server writer should clone for protocol output");
+        run_started_session(
+            &mut writer,
+            &server,
+            &config,
+            &mut capture,
+            &mut started,
+            &FixedSessionGate(RemoteSessionStatus::Allowed),
+        )
+    });
+
+    read_message(&mut client).expect("session ready should decode");
+    expect_h264_frame(read_message(&mut client).expect("first frame should decode"));
+    running.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        read_message(&mut client).expect("program exit error should decode"),
+        ControlMessage::Error {
+            code: ErrorCode::ProgramExited,
+            message: "宿主端程序已退出，结束远程会话。".to_owned(),
+        }
+    );
+    assert_eq!(
+        read_message(&mut client).expect("goodbye should decode after program exit"),
+        ControlMessage::Goodbye
+    );
+    let reason = host
+        .join()
+        .expect("host thread should finish")
+        .expect("program exit should end session cleanly");
+
+    assert_eq!(reason, HostSessionEndReason::ProgramExited);
+}
+
+#[test]
 fn host_h264_stream_stops_session_when_desktop_becomes_locked() {
     let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = tcp_pair
@@ -444,7 +592,7 @@ fn host_h264_stream_stops_session_when_desktop_becomes_locked() {
         frames,
         ..RecordingCaptureStarter::default()
     };
-    let started = StartedProgram::from_process_id(42);
+    let mut started = StartedProgram::from_process_id(42);
     let session_gate = SequenceSessionGate::new([
         RemoteSessionStatus::Allowed,
         RemoteSessionStatus::Rejected {
@@ -462,7 +610,7 @@ fn host_h264_stream_stops_session_when_desktop_becomes_locked() {
             &server,
             &config,
             &mut capture,
-            &started,
+            &mut started,
             &session_gate,
         )
     });
@@ -513,7 +661,7 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
         frames: VecDeque::from([Some(too_wide_frame)]),
         ..RecordingCaptureStarter::default()
     };
-    let started = StartedProgram::from_process_id(42);
+    let mut started = StartedProgram::from_process_id(42);
 
     let host = thread::spawn(move || {
         let mut writer = server
@@ -524,7 +672,7 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_first_capture_fra
             &server,
             &config,
             &mut capture,
-            &started,
+            &mut started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });
@@ -573,7 +721,7 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_later_capture_fra
         ]),
         ..RecordingCaptureStarter::default()
     };
-    let started = StartedProgram::from_process_id(42);
+    let mut started = StartedProgram::from_process_id(42);
 
     let host = thread::spawn(move || {
         let mut writer = server
@@ -584,7 +732,7 @@ fn host_reports_encoding_failed_when_h264_fake_encoder_rejects_later_capture_fra
             &server,
             &config,
             &mut capture,
-            &started,
+            &mut started,
             &FixedSessionGate(RemoteSessionStatus::Allowed),
         )
     });

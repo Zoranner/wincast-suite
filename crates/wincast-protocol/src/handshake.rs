@@ -106,11 +106,6 @@ pub fn send_session_ready(
     Ok(())
 }
 
-pub fn send_video_ready(writer: &mut impl Write) -> Result<(), HandshakeError> {
-    write_message(writer, &ControlMessage::VideoReady)?;
-    Ok(())
-}
-
 pub fn send_goodbye(writer: &mut impl Write) -> Result<(), HandshakeError> {
     write_message(writer, &ControlMessage::Goodbye)?;
     Ok(())

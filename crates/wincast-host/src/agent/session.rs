@@ -1,4 +1,7 @@
-use std::{net::TcpStream, thread, time::Duration};
+use std::{
+    net::TcpStream,
+    time::{Duration, Instant},
+};
 
 use crate::{
     program::{ProgramRunner, StartedProgram},
@@ -11,7 +14,7 @@ use crate::{
 use wincast_media::{VideoLatencyMode, VideoPipelineConfig};
 use wincast_protocol::{
     config::{HostConfig, VideoCodec},
-    frame::read_message,
+    frame::{FrameError, read_message},
     handshake::accept_client_hello,
     message::{ControlMessage, ErrorCode},
 };
@@ -19,10 +22,12 @@ use wincast_protocol::{
 use super::{
     capture::{CaptureStarter, screen_input_bounds, start_screen_capture_session},
     stream::{
-        HostSessionEndReason, HostSessionError, write_control_error, write_h264_encoded_stream,
-        write_session_ready,
+        H264StreamRuntime, HostSessionEndReason, HostSessionError, write_control_error,
+        write_h264_encoded_stream, write_session_goodbye, write_session_ready,
     },
 };
+
+const STARTUP_DELAY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(super) fn handle_control_client(
     stream: &mut TcpStream,
@@ -63,8 +68,14 @@ pub(super) fn handle_control_client_with_session_gate(
                     );
                     message
                 })?;
-            let result =
-                run_started_session(&mut writer, stream, config, capture, &started, session_gate);
+            let result = run_started_session(
+                &mut writer,
+                stream,
+                config,
+                capture,
+                &mut started,
+                session_gate,
+            );
             let cleanup_result = runner
                 .cleanup(&mut started)
                 .map_err(|error| format!("清理宿主端程序失败: {error}"));
@@ -210,11 +221,18 @@ pub(super) fn run_started_session(
     stream: &TcpStream,
     config: &HostConfig,
     capture: &mut impl CaptureStarter,
-    started: &StartedProgram,
+    started: &mut StartedProgram,
     session_gate: &impl SessionGate,
 ) -> Result<HostSessionEndReason, HostSessionError> {
-    let _ = started;
-    thread::sleep(Duration::from_millis(config.program.startup_delay_ms));
+    if let Some(reason) = wait_for_startup_delay(
+        writer,
+        stream,
+        config.program.startup_delay_ms,
+        started,
+        session_gate,
+    )? {
+        return Ok(reason);
+    }
     let (mut session, first_frame) =
         start_screen_capture_session(config, capture).map_err(|error| {
             let message = format!("初始化画面捕获失败: {error}");
@@ -230,10 +248,155 @@ pub(super) fn run_started_session(
         stream,
         &first_frame,
         session.as_mut(),
-        screen_input_bounds(&first_frame),
-        h264_pipeline_config(config),
-        session_gate,
+        H264StreamRuntime {
+            input_bounds: screen_input_bounds(&first_frame),
+            pipeline_config: h264_pipeline_config(config),
+            session_gate,
+            program_status: started,
+        },
     )
+}
+
+fn wait_for_startup_delay(
+    writer: &mut impl std::io::Write,
+    stream: &TcpStream,
+    startup_delay_ms: u64,
+    started: &mut StartedProgram,
+    session_gate: &impl SessionGate,
+) -> Result<Option<HostSessionEndReason>, HostSessionError> {
+    let delay = Duration::from_millis(startup_delay_ms);
+    if let Some(reason) = check_startup_runtime(writer, started, session_gate)? {
+        return Ok(Some(reason));
+    }
+    if delay.is_zero() {
+        return Ok(None);
+    }
+
+    let mut reader = stream.try_clone().map_err(|error| {
+        HostSessionError::new(
+            HostSessionEndReason::TransportFailed,
+            format!("克隆启动延迟控制读取端失败: {error}"),
+        )
+    })?;
+    let original_timeout = reader.read_timeout().map_err(|error| {
+        HostSessionError::new(
+            HostSessionEndReason::TransportFailed,
+            format!("读取启动延迟控制超时配置失败: {error}"),
+        )
+    })?;
+    let deadline = Instant::now() + delay;
+
+    let result = loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break Ok(None);
+        }
+        let timeout = (deadline - now).min(STARTUP_DELAY_POLL_INTERVAL);
+        reader.set_read_timeout(Some(timeout)).map_err(|error| {
+            HostSessionError::new(
+                HostSessionEndReason::TransportFailed,
+                format!("配置启动延迟控制读取超时失败: {error}"),
+            )
+        })?;
+
+        match read_message(&mut reader) {
+            Ok(ControlMessage::StopSession | ControlMessage::Goodbye) => {
+                write_session_goodbye(writer).map_err(|message| {
+                    HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+                })?;
+                break Ok(Some(HostSessionEndReason::StopSession));
+            }
+            Ok(ControlMessage::Heartbeat) => {}
+            Ok(message) => {
+                let message = format!("启动延迟期间控制消息无效: {message:?}");
+                let _ = write_control_error(writer, ErrorCode::TransportFailed, message.clone());
+                break Err(HostSessionError::new(
+                    HostSessionEndReason::TransportFailed,
+                    message,
+                ));
+            }
+            Err(error) if is_temporary_read_timeout(&error) => {}
+            Err(error) if is_control_stream_closed(&error) => {
+                break Ok(Some(HostSessionEndReason::ClientDisconnected));
+            }
+            Err(error) => {
+                break Err(HostSessionError::new(
+                    HostSessionEndReason::TransportFailed,
+                    format!("启动延迟期间读取控制消息失败: {error}"),
+                ));
+            }
+        }
+
+        if let Some(reason) = check_startup_runtime(writer, started, session_gate)? {
+            break Ok(Some(reason));
+        }
+    };
+
+    reader.set_read_timeout(original_timeout).map_err(|error| {
+        HostSessionError::new(
+            HostSessionEndReason::TransportFailed,
+            format!("恢复启动延迟控制读取超时配置失败: {error}"),
+        )
+    })?;
+    result
+}
+
+fn check_startup_runtime(
+    writer: &mut impl std::io::Write,
+    started: &mut StartedProgram,
+    session_gate: &impl SessionGate,
+) -> Result<Option<HostSessionEndReason>, HostSessionError> {
+    if !started.is_running().map_err(|error| {
+        HostSessionError::new(
+            HostSessionEndReason::ProgramExited,
+            format!("检查宿主端程序退出状态失败: {error}"),
+        )
+    })? {
+        let message = "宿主端程序已退出，结束远程会话。".to_owned();
+        write_control_error(writer, ErrorCode::ProgramExited, message.clone()).map_err(
+            |message| HostSessionError::new(HostSessionEndReason::TransportFailed, message),
+        )?;
+        write_session_goodbye(writer).map_err(|message| {
+            HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+        })?;
+        return Ok(Some(HostSessionEndReason::ProgramExited));
+    }
+
+    if let Some((code, message)) = session_gate.remote_session_status().to_protocol_error() {
+        write_control_error(writer, code, message.to_owned()).map_err(|message| {
+            HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+        })?;
+        write_session_goodbye(writer).map_err(|message| {
+            HostSessionError::new(HostSessionEndReason::TransportFailed, message)
+        })?;
+        return Ok(Some(HostSessionEndReason::SessionUnavailable));
+    }
+
+    Ok(None)
+}
+
+fn is_temporary_read_timeout(error: &FrameError) -> bool {
+    matches!(
+        error,
+        FrameError::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    )
+}
+
+fn is_control_stream_closed(error: &FrameError) -> bool {
+    match error {
+        FrameError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+        ),
+        _ => false,
+    }
 }
 
 fn h264_pipeline_config(config: &HostConfig) -> VideoPipelineConfig {

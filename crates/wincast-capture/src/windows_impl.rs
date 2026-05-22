@@ -22,8 +22,9 @@ use windows::{
                 ID3D11Texture2D,
             },
             Dxgi::{
-                CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter,
-                IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+                CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT,
+                DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
+                IDXGIOutputDuplication, IDXGIResource,
             },
         },
     },
@@ -43,6 +44,21 @@ struct DesktopDuplicationBackend {
     duplication: IDXGIOutputDuplication,
     width: u32,
     height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutputCandidateInfo {
+    adapter_index: u32,
+    output_index: u32,
+    attached_to_desktop: bool,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug)]
+struct EnumeratedOutput {
+    info: OutputCandidateInfo,
+    output: IDXGIOutput,
 }
 
 #[derive(Debug)]
@@ -373,11 +389,103 @@ fn create_d3d_device_inner(
 fn primary_output() -> Result<IDXGIOutput, CaptureError> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
         .map_err(|error| CaptureError::windows_d3d_initialization_failed(error.to_string()))?;
-    let adapter = unsafe { factory.EnumAdapters1(0) }.map_err(|error| {
-        CaptureError::windows_desktop_output_enumeration_failed(error.to_string())
-    })?;
-    unsafe { adapter.EnumOutputs(0) }
-        .map_err(|error| CaptureError::windows_desktop_output_enumeration_failed(error.to_string()))
+    let mut outputs = enumerate_desktop_outputs(&factory)?;
+    let infos = outputs
+        .iter()
+        .map(|candidate| candidate.info)
+        .collect::<Vec<_>>();
+    let selected = select_single_attached_desktop_output(&infos)?;
+    Ok(outputs.swap_remove(selected).output)
+}
+
+fn enumerate_desktop_outputs(
+    factory: &IDXGIFactory1,
+) -> Result<Vec<EnumeratedOutput>, CaptureError> {
+    let mut outputs = Vec::new();
+    let mut adapter_index = 0;
+    loop {
+        let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => {
+                return Err(CaptureError::windows_desktop_output_enumeration_failed(
+                    error.to_string(),
+                ));
+            }
+        };
+
+        let mut output_index = 0;
+        loop {
+            let output = match unsafe { adapter.EnumOutputs(output_index) } {
+                Ok(output) => output,
+                Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(error) => {
+                    return Err(CaptureError::windows_desktop_output_enumeration_failed(
+                        error.to_string(),
+                    ));
+                }
+            };
+            let desc = unsafe { output.GetDesc() }.map_err(|error| {
+                CaptureError::windows_desktop_output_enumeration_failed(error.to_string())
+            })?;
+            let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left)
+                .try_into()
+                .unwrap_or(0);
+            let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top)
+                .try_into()
+                .unwrap_or(0);
+            outputs.push(EnumeratedOutput {
+                info: OutputCandidateInfo {
+                    adapter_index,
+                    output_index,
+                    attached_to_desktop: desc.AttachedToDesktop.as_bool(),
+                    width,
+                    height,
+                },
+                output,
+            });
+            output_index += 1;
+        }
+
+        adapter_index += 1;
+    }
+
+    Ok(outputs)
+}
+
+fn select_single_attached_desktop_output(
+    outputs: &[OutputCandidateInfo],
+) -> Result<usize, CaptureError> {
+    let attached = outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.attached_to_desktop && output.width > 0 && output.height > 0)
+        .collect::<Vec<_>>();
+
+    match attached.as_slice() {
+        [] => Err(CaptureError::windows_desktop_output_enumeration_failed(
+            "没有找到可用桌面输出",
+        )),
+        [(index, _)] => Ok(*index),
+        _ => {
+            let details = attached
+                .iter()
+                .map(|(_, output)| {
+                    format!(
+                        "adapter {}/output {} {}x{}",
+                        output.adapter_index, output.output_index, output.width, output.height
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(CaptureError::windows_desktop_output_enumeration_failed(
+                format!(
+                    "检测到 {} 个可用桌面输出，当前稳定版只支持单显示器: {details}",
+                    attached.len()
+                ),
+            ))
+        }
+    }
 }
 
 fn adapter_for_output(output: &IDXGIOutput) -> Result<IDXGIAdapter, CaptureError> {
@@ -472,6 +580,61 @@ mod tests {
         assert_eq!(
             error,
             CaptureError::windows_frame_read_failed("readback 字节长度超过 isize::MAX")
+        );
+    }
+
+    #[test]
+    fn desktop_output_selection_uses_single_attached_desktop_output() {
+        let outputs = [
+            OutputCandidateInfo {
+                adapter_index: 0,
+                output_index: 0,
+                attached_to_desktop: false,
+                width: 0,
+                height: 0,
+            },
+            OutputCandidateInfo {
+                adapter_index: 1,
+                output_index: 0,
+                attached_to_desktop: true,
+                width: 1920,
+                height: 1080,
+            },
+        ];
+
+        let selected = select_single_attached_desktop_output(&outputs)
+            .expect("single attached output should be selected");
+
+        assert_eq!(selected, 1);
+    }
+
+    #[test]
+    fn desktop_output_selection_rejects_multiple_attached_desktop_outputs() {
+        let outputs = [
+            OutputCandidateInfo {
+                adapter_index: 0,
+                output_index: 0,
+                attached_to_desktop: true,
+                width: 1920,
+                height: 1080,
+            },
+            OutputCandidateInfo {
+                adapter_index: 0,
+                output_index: 1,
+                attached_to_desktop: true,
+                width: 1280,
+                height: 720,
+            },
+        ];
+
+        let error = select_single_attached_desktop_output(&outputs)
+            .expect_err("multiple attached outputs should be rejected");
+
+        assert_eq!(
+            error,
+            CaptureError::windows_desktop_output_enumeration_failed(
+                "检测到 2 个可用桌面输出，当前稳定版只支持单显示器: adapter 0/output 0 1920x1080; adapter 0/output 1 1280x720"
+            )
         );
     }
 }

@@ -1,5 +1,24 @@
 use std::{fmt, path::PathBuf};
 
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+#[cfg(windows)]
+use std::{mem::size_of, os::windows::io::AsRawHandle};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    },
+};
+
 use wincast_protocol::config::{HostConfig, ProgramConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +46,10 @@ pub(crate) struct StartedProgram {
     pub(crate) process_id: u32,
     #[cfg(windows)]
     child: Option<std::process::Child>,
+    #[cfg(windows)]
+    job: Option<JobHandle>,
+    #[cfg(test)]
+    running: Option<Arc<AtomicBool>>,
 }
 
 impl StartedProgram {
@@ -36,14 +59,117 @@ impl StartedProgram {
             process_id,
             #[cfg(windows)]
             child: None,
+            #[cfg(windows)]
+            job: None,
+            running: None,
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_running_flag(process_id: u32, running: Arc<AtomicBool>) -> Self {
+        Self {
+            process_id,
+            #[cfg(windows)]
+            child: None,
+            #[cfg(windows)]
+            job: None,
+            running: Some(running),
+        }
+    }
+
+    pub(crate) fn is_running(&mut self) -> Result<bool, LaunchError> {
+        #[cfg(test)]
+        if let Some(running) = &self.running {
+            return Ok(running.load(Ordering::SeqCst));
+        }
+
+        self.platform_is_running()
+    }
+
     #[cfg(windows)]
-    fn from_child(child: std::process::Child) -> Self {
+    fn platform_is_running(&mut self) -> Result<bool, LaunchError> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(true);
+        };
+        Ok(child
+            .try_wait()
+            .map_err(|error| LaunchError::from_io("检查宿主端程序退出状态失败", error))?
+            .is_none())
+    }
+
+    #[cfg(not(windows))]
+    fn platform_is_running(&mut self) -> Result<bool, LaunchError> {
+        Ok(true)
+    }
+
+    #[cfg(windows)]
+    fn from_child(child: std::process::Child, job: Option<JobHandle>) -> Self {
         Self {
             process_id: child.id(),
             child: Some(child),
+            job,
+            #[cfg(test)]
+            running: None,
+        }
+    }
+}
+
+#[cfg(windows)]
+struct JobHandle(HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for JobHandle {}
+
+#[cfg(windows)]
+impl JobHandle {
+    fn create_kill_on_close() -> Result<Self, LaunchError> {
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(LaunchError::from_io(
+                "创建宿主端程序作业对象失败",
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let result = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if result == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(LaunchError::from_io("配置宿主端程序作业对象失败", error));
+        }
+
+        Ok(Self(job))
+    }
+
+    fn assign_child(&self, child: &std::process::Child) -> Result<(), LaunchError> {
+        let result = unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) };
+        if result == 0 {
+            return Err(LaunchError::from_io(
+                "把宿主端程序加入作业对象失败",
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
         }
     }
 }
@@ -124,13 +250,19 @@ pub(crate) fn launch_with_runner(
 
 #[cfg(windows)]
 fn launch_std_process(request: &LaunchRequest) -> Result<StartedProgram, LaunchError> {
-    let child = std::process::Command::new(&request.program)
+    let job = JobHandle::create_kill_on_close()?;
+    let mut child = std::process::Command::new(&request.program)
         .args(&request.args)
         .current_dir(&request.work_dir)
         .spawn()
         .map_err(|error| LaunchError::from_io("启动宿主端配置程序失败", error))?;
+    if let Err(error) = job.assign_child(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
 
-    Ok(StartedProgram::from_child(child))
+    Ok(StartedProgram::from_child(child, Some(job)))
 }
 
 #[cfg(not(windows))]
@@ -148,12 +280,17 @@ fn cleanup_std_process(started: &mut StartedProgram) -> Result<(), LaunchError> 
         .try_wait()
         .map_err(|error| LaunchError::from_io("检查宿主端程序退出状态失败", error))?
     {
+        let _ = started.job.take();
         return Ok(());
     }
 
-    child
-        .kill()
-        .map_err(|error| LaunchError::from_io("终止宿主端程序失败", error))?;
+    if let Some(job) = started.job.take() {
+        drop(job);
+    } else {
+        child
+            .kill()
+            .map_err(|error| LaunchError::from_io("终止宿主端程序失败", error))?;
+    }
     child
         .wait()
         .map_err(|error| LaunchError::from_io("等待宿主端程序退出失败", error))?;

@@ -123,8 +123,8 @@ fn client_reports_encoding_failure_in_chinese() {
 fn client_formats_host_session_errors_with_specific_chinese_prefixes() {
     let cases = [
         (ErrorCode::Busy, "宿主端忙碌"),
-        (ErrorCode::WindowNotFound, "宿主端窗口定位失败"),
         (ErrorCode::ProgramLaunchFailed, "宿主端程序启动失败"),
+        (ErrorCode::ProgramExited, "宿主端程序已退出"),
         (ErrorCode::CaptureFailed, "宿主端画面捕获失败"),
         (ErrorCode::TransportFailed, "宿主端传输链路失败"),
         (ErrorCode::InvalidConfig, "宿主端配置无效"),

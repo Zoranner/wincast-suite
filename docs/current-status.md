@@ -12,9 +12,14 @@
 - README 的宿主端配置示例已包含 `[video]` 与 `[capture]` 必填段。
 - `wincast-media` 的 fake H.264 测试后端已通过 `test-support` feature 隔离，默认不会进入普通 public API。
 - 稳定版捕获边界已收敛为单显示器整屏捕获，不再维护窗口捕获、捕获模式选择和窗口标题定位。
-- Host 配置已改为 `[program]`、`[video]`、`[capture]` 三段，`program.startup_delay_ms` 表示启动程序后的固定等待时间。
+- Host 配置已改为 `[program]`、`[video]`、`[capture]` 三段，`program.startup_delay_ms` 表示启动程序后的可取消等待时间。
 - `capture.first_frame_timeout_ms` 只表示整屏捕获启动后的首帧保护超时。
 - Windows host 捕获实现固定为 DXGI Desktop Duplication，面向 Windows 10 1809 / Build 17763。
+- Host 在启动延迟期间可以响应客户端停止、连接断开、桌面会话不可用和目标程序退出，不再必须等延迟结束后才清理。
+- Host 会话期间会监控本次启动的目标程序；目标程序退出时向客户端发送 `ProgramExited` 错误并结束会话。
+- Windows 侧启动配置程序时使用 Job Object 管理本次启动的进程树，会话清理时不再只覆盖直接子进程。
+- DXGI 输出选择已从固定 adapter 0/output 0 改为枚举 attached desktop 输出；当前稳定版检测到多个可用桌面输出时明确拒绝。
+- 协议公开面已删除旧的 `VideoReady` 和 `WindowNotFound`。
 
 ## 当前仍未闭合
 
