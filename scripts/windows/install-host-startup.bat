@@ -5,6 +5,8 @@ set "TASK_NAME=WinCast Host"
 set "APP_DIR=%APPDATA%\WinCast"
 set "VBS_PATH=%APP_DIR%\run-host-hidden.vbs"
 set "CONFIG_PATH=%APP_DIR%\host.toml"
+set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+set "SHORTCUT_PATH=%STARTUP_DIR%\WinCast Host.lnk"
 set "ACTION=%~1"
 
 if "%ACTION%"=="" set "ACTION=install"
@@ -25,21 +27,9 @@ exit /b 2
 :install
 call :resolve_host "%~2" || exit /b 1
 call :write_launcher || exit /b 1
+call :write_shortcut || exit /b 1
 
-set "WINCAST_HOST_VBS=%VBS_PATH%"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ErrorActionPreference = 'Stop';" ^
-  "$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('//B //Nologo ""' + $env:WINCAST_HOST_VBS + '""');" ^
-  "$trigger = New-ScheduledTaskTrigger -AtLogOn;" ^
-  "$settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DisallowStartIfOnBatteries:$false -ExecutionTimeLimit (New-TimeSpan -Seconds 0);" ^
-  "Register-ScheduledTask -TaskName '%TASK_NAME%' -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null"
-
-if errorlevel 1 (
-    echo Failed to register startup task.
-    exit /b 1
-)
-
-echo Installed startup task: %TASK_NAME%
+echo Installed startup shortcut: %SHORTCUT_PATH%
 echo Host executable: %HOST_EXE%
 if not exist "%CONFIG_PATH%" (
     echo Warning: host config not found: %CONFIG_PATH%
@@ -47,14 +37,18 @@ if not exist "%CONFIG_PATH%" (
 exit /b 0
 
 :uninstall
-schtasks.exe /Delete /TN "%TASK_NAME%" /F >nul 2>nul
+if exist "%SHORTCUT_PATH%" del /F /Q "%SHORTCUT_PATH%" >nul 2>nul
 if exist "%VBS_PATH%" del /F /Q "%VBS_PATH%" >nul 2>nul
-echo Removed startup task: %TASK_NAME%
+echo Removed startup shortcut: %SHORTCUT_PATH%
 exit /b 0
 
 :status
-schtasks.exe /Query /TN "%TASK_NAME%" /FO LIST /V
-exit /b %ERRORLEVEL%
+if exist "%SHORTCUT_PATH%" (
+    echo Installed: %SHORTCUT_PATH%
+    exit /b 0
+)
+echo Not installed: %SHORTCUT_PATH%
+exit /b 1
 
 :run
 call :resolve_host "%~2" || exit /b 1
@@ -114,6 +108,30 @@ if errorlevel 1 (
 
 if errorlevel 1 (
     echo Failed to write launcher: %VBS_PATH%
+    exit /b 1
+)
+exit /b 0
+
+:write_shortcut
+if not exist "%STARTUP_DIR%" mkdir "%STARTUP_DIR%" >nul 2>nul
+if errorlevel 1 (
+    echo Failed to create startup directory: %STARTUP_DIR%
+    exit /b 1
+)
+
+set "WINCAST_HOST_VBS=%VBS_PATH%"
+set "WINCAST_HOST_LNK=%SHORTCUT_PATH%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference = 'Stop';" ^
+  "$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($env:WINCAST_HOST_LNK);" ^
+  "$shortcut.TargetPath = 'wscript.exe';" ^
+  "$shortcut.Arguments = '//B //Nologo ""' + $env:WINCAST_HOST_VBS + '""';" ^
+  "$shortcut.WorkingDirectory = '%APP_DIR%';" ^
+  "$shortcut.WindowStyle = 7;" ^
+  "$shortcut.Save()"
+
+if errorlevel 1 (
+    echo Failed to write startup shortcut: %SHORTCUT_PATH%
     exit /b 1
 )
 exit /b 0
