@@ -7,6 +7,7 @@ pub struct RenderConfig {
     pub title: String,
     pub width: u32,
     pub height: u32,
+    pub fullscreen: bool,
 }
 
 impl RenderConfig {
@@ -145,7 +146,24 @@ pub struct RenderLoopResult {
     pub input_events: Vec<InputEvent>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadingStatus {
+    pub message: String,
+    pub tick: u64,
+}
+
+impl LoadingStatus {
+    pub fn validate(&self) -> Result<(), RenderError> {
+        if self.message.trim().is_empty() {
+            return Err(RenderError::InvalidConfig("加载状态不能为空".to_owned()));
+        }
+        Ok(())
+    }
+}
+
 pub trait BgraPixelRenderer {
+    fn render_loading(&mut self, status: &LoadingStatus) -> Result<(), RenderError>;
+
     fn render_frame(&mut self, frame: &BgraPixelFrame) -> Result<(), RenderError>;
 
     fn poll_input(&mut self) -> Result<RenderLoopResult, RenderError>;
@@ -204,6 +222,7 @@ mod tests {
             title: "  ".to_owned(),
             width: 800,
             height: 600,
+            fullscreen: false,
         };
 
         assert_eq!(
@@ -218,6 +237,7 @@ mod tests {
             title: "WinCast".to_owned(),
             width: 0,
             height: 600,
+            fullscreen: false,
         };
 
         assert_eq!(
@@ -245,6 +265,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn loading_status_rejects_empty_message() {
+        let status = LoadingStatus {
+            message: " ".to_owned(),
+            tick: 0,
+        };
+
+        assert_eq!(
+            status.validate(),
+            Err(RenderError::InvalidConfig("加载状态不能为空".to_owned()))
+        );
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn sdl_renderer_reports_unsupported_platform_outside_linux() {
@@ -252,6 +285,7 @@ mod tests {
             title: "WinCast".to_owned(),
             width: 800,
             height: 600,
+            fullscreen: false,
         })
         .expect_err("non-Linux platform should not construct SDL renderer");
 

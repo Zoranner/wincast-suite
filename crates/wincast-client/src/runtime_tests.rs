@@ -16,7 +16,8 @@ use crate::{
     errors::format_host_error,
     runtime::{
         ClientRunError, RetryOptions, RetryReport, control_channel_ready_message,
-        format_retry_report, run_client_with_config, run_with_retry, run_with_retry_and_reporter,
+        format_retry_report, run_client_attempt_with_reporter, run_client_with_config,
+        run_with_retry, run_with_retry_and_reporter,
     },
     stream::validate_encoded_video_frame,
 };
@@ -146,6 +147,16 @@ fn client_formats_host_session_errors_with_specific_chinese_prefixes() {
 }
 
 #[test]
+fn client_deduplicates_host_error_prefixes_when_message_already_has_context() {
+    let error = format_host_error(
+        ErrorCode::CaptureFailed,
+        "宿主端画面捕获失败: 初始化 Direct3D 捕获设备失败".to_owned(),
+    );
+
+    assert_eq!(error, "宿主端画面捕获失败: 初始化 Direct3D 捕获设备失败");
+}
+
+#[test]
 fn client_accepts_encoded_video_frame_after_openh264_decode_without_reading_raw_bgra_stream() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let endpoint = listener
@@ -242,6 +253,103 @@ fn client_rejects_invalid_encoded_video_frame_from_host() {
     host_thread.join().expect("host thread should finish");
     assert!(error.contains("H.264 编码帧无效"));
     assert!(!error.contains("raw BGRA"));
+}
+
+#[test]
+fn client_treats_program_exited_during_stream_as_normal_session_end() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        read_message(&mut stream).expect("client hello should decode");
+        send_client_hello(&mut stream).expect("host hello should encode");
+        read_message(&mut stream).expect("start session should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::SessionReady {
+                width: 2,
+                height: 2,
+            },
+        )
+        .expect("session ready should encode");
+        write_message(
+            &mut stream,
+            &ControlMessage::EncodedVideoFrame(test_h264_frame(1)),
+        )
+        .expect("first frame should encode");
+        write_message(
+            &mut stream,
+            &ControlMessage::Error {
+                code: ErrorCode::ProgramExited,
+                message: "宿主端程序已退出，结束远程会话。".to_owned(),
+            },
+        )
+        .expect("program exited should encode");
+        write_message(&mut stream, &ControlMessage::Goodbye).expect("goodbye should encode");
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let message = run_client_with_config(&config)
+        .expect("program exit should end the client session normally");
+
+    host_thread.join().expect("host thread should finish");
+    assert!(message.contains("宿主端程序已退出"));
+}
+
+#[test]
+fn client_reports_startup_and_streaming_runtime_events_in_order() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = listener
+        .local_addr()
+        .expect("listener address should exist");
+
+    let host_thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        read_message(&mut stream).expect("client hello should decode");
+        send_client_hello(&mut stream).expect("host hello should encode");
+        read_message(&mut stream).expect("start session should decode");
+        write_message(
+            &mut stream,
+            &ControlMessage::SessionReady {
+                width: 2,
+                height: 2,
+            },
+        )
+        .expect("session ready should encode");
+        for frame in test_h264_frames(3) {
+            write_message(&mut stream, &ControlMessage::EncodedVideoFrame(frame))
+                .expect("encoded frame should encode");
+        }
+    });
+
+    let config = ClientConfig {
+        host: endpoint.ip().to_string(),
+        port: endpoint.port(),
+    };
+    let mut events = Vec::new();
+    let message = run_client_attempt_with_reporter(&config, |event| events.push(event))
+        .expect("client should complete the stream boundary check");
+
+    host_thread.join().expect("host thread should finish");
+    assert!(message.contains("已建立宿主端控制通道"));
+    assert_eq!(
+        events,
+        vec![
+            crate::runtime::ClientRuntimeEvent::Connecting,
+            crate::runtime::ClientRuntimeEvent::Handshaking,
+            crate::runtime::ClientRuntimeEvent::StartingSession,
+            crate::runtime::ClientRuntimeEvent::WaitingForSession,
+            crate::runtime::ClientRuntimeEvent::WaitingForFirstFrame,
+            crate::runtime::ClientRuntimeEvent::Streaming,
+            crate::runtime::ClientRuntimeEvent::SessionEnded,
+        ]
+    );
 }
 
 #[test]

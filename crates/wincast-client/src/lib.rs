@@ -12,6 +12,18 @@ const DEFAULT_RETRIES: u32 = 3;
 const DEFAULT_RETRY_DELAY_MS: u64 = 1_000;
 
 pub fn run_default_client() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return runtime::run_fullscreen_client(&default_config_path(), default_retry_options());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        runtime::run_client(&default_config_path(), default_retry_options())
+    }
+}
+
+pub fn run_headless_client() -> Result<String, String> {
     runtime::run_client(&default_config_path(), default_retry_options())
 }
 

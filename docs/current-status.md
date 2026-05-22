@@ -8,6 +8,8 @@
 
 - `wincast-client` 已具备 lib target，`src/main.rs` 只负责调用 `wincast_client::run_default_client()` 并处理退出码。
 - 客户端 H.264 渲染循环已使用短读取超时，下一帧暂时不可用时仍会继续轮询 SDL 输入并发送心跳。
+- Linux 客户端默认启动路径已改为 SDL 全屏窗口，启动后先显示加载进度，收到首帧后复用同一窗口渲染远程画面。
+- 客户端已将宿主端 `ProgramExited` 会话结束识别为正常退出，不再把目标程序主动退出显示为运行失败。
 - Host session 事件层已使用 `DesktopSessionError` 与 `SessionEventError` 分类错误，不再把 public API 固定为 `String` 错误。
 - README 的宿主端配置示例已包含 `[video]` 与 `[capture]` 必填段。
 - `wincast-media` 的 fake H.264 测试后端已通过 `test-support` feature 隔离，默认不会进入普通 public API。
@@ -24,7 +26,7 @@
 ## 当前仍未闭合
 
 - 未执行 Windows host 到 Linux x86_64 client 的真机端到端烟测。
-- Linux x86_64 与 Linux aarch64/ARM64 真机上的 SDL2、OpenH264、窗口创建、渲染和输入回传仍未验证。
+- Linux x86_64 与 Linux aarch64/ARM64 真机上的 SDL2 全屏窗口、加载页、OpenH264、渲染和输入回传仍未验证。
 - 锁屏、解锁后的完整自动恢复编排仍未完成，当前只能按文档口径处理为感知、拒绝、断开或后续重连尝试。
 - 打包和部署步骤需要先形成稳定产物、配置路径、防火墙和目标机依赖检查，再进入真机烟测。
 

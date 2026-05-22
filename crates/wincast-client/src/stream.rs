@@ -6,13 +6,19 @@ use wincast_protocol::{
     message::{ControlMessage, EncodedVideoFrame},
 };
 
-use crate::errors::format_host_error;
+use crate::errors::{format_host_error, prepend_context_once};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VideoStreamEnd {
+    Frames(EncodedVideoReceiveSummary),
+    HostProgramExited(String),
+}
 
 pub(crate) fn read_h264_encoded_frames_from_first(
     reader: &mut impl std::io::Read,
     first_frame: EncodedVideoFrame,
     frame_count: usize,
-) -> Result<EncodedVideoReceiveSummary, String> {
+) -> Result<VideoStreamEnd, String> {
     if frame_count == 0 {
         return Err("H.264 编码视频帧接收数量不能为 0".to_owned());
     }
@@ -38,6 +44,9 @@ pub(crate) fn read_h264_encoded_frames_from_first(
             NextEncodedVideoStreamItem::Goodbye => {
                 break;
             }
+            NextEncodedVideoStreamItem::HostProgramExited(message) => {
+                return Ok(VideoStreamEnd::HostProgramExited(message));
+            }
         }
     }
 
@@ -45,10 +54,10 @@ pub(crate) fn read_h264_encoded_frames_from_first(
         return Err("未收到 H.264 编码视频帧".to_owned());
     };
 
-    Ok(EncodedVideoReceiveSummary {
+    Ok(VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
         frames,
         last_sequence_number,
-    })
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -57,7 +66,7 @@ pub(crate) fn read_h264_encoded_frames_with_sdl_window_from_first(
     first_frame: EncodedVideoFrame,
     width: u32,
     height: u32,
-) -> Result<(), String> {
+) -> Result<VideoStreamEnd, String> {
     stream
         .set_read_timeout(Some(std::time::Duration::from_millis(20)))
         .map_err(|error| format!("设置客户端 H.264 视频流读取超时失败: {error}"))?;
@@ -65,10 +74,10 @@ pub(crate) fn read_h264_encoded_frames_with_sdl_window_from_first(
         title: "WinCast Client".to_owned(),
         width,
         height,
+        fullscreen: true,
     })
     .map_err(|error| format!("创建客户端 SDL2 窗口失败: {error}"))?;
     read_h264_encoded_frames_with_renderer_from_first(stream, first_frame, None, &mut renderer)
-        .map(|_| ())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -77,7 +86,7 @@ pub(crate) fn read_h264_encoded_frames_with_sdl_window_from_first(
     _first_frame: EncodedVideoFrame,
     _width: u32,
     _height: u32,
-) -> Result<(), String> {
+) -> Result<VideoStreamEnd, String> {
     Err("当前平台不支持 SDL2 客户端窗口".to_owned())
 }
 
@@ -87,7 +96,13 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
     first_frame: EncodedVideoFrame,
     frame_limit: Option<usize>,
     renderer: &mut impl wincast_render::BgraPixelRenderer,
-) -> Result<EncodedVideoReceiveSummary, String> {
+) -> Result<VideoStreamEnd, String> {
+    renderer
+        .render_loading(&wincast_render::LoadingStatus {
+            message: "正在接收宿主端首帧".to_owned(),
+            tick: 75,
+        })
+        .map_err(|error| format!("渲染客户端加载状态失败: {error}"))?;
     let mut decoder = OpenH264Decoder::new()
         .map_err(|error| format!("初始化客户端 OpenH264 解码器失败: {error}"))?;
     let mut last_sequence_number = None;
@@ -138,6 +153,9 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
                 frames += 1;
             }
             Some(NextEncodedVideoStreamItem::Goodbye) => break,
+            Some(NextEncodedVideoStreamItem::HostProgramExited(message)) => {
+                return Ok(VideoStreamEnd::HostProgramExited(message));
+            }
             None => continue,
         }
     }
@@ -145,10 +163,10 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
     let Some(last_sequence_number) = last_sequence_number else {
         return Err("未收到 H.264 编码视频帧".to_owned());
     };
-    Ok(EncodedVideoReceiveSummary {
+    Ok(VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
         frames,
         last_sequence_number,
-    })
+    }))
 }
 
 fn read_next_h264_encoded_stream_item(
@@ -164,7 +182,14 @@ fn read_next_h264_encoded_stream_item(
 }
 
 pub(crate) fn format_h264_encoded_read_error(error: impl std::fmt::Display) -> String {
-    format!("视频流中断: 读取宿主端 H.264 编码视频帧失败: {error}")
+    let message = error.to_string();
+    if message.starts_with("视频流中断: ") || message.starts_with("视频流中断：") {
+        return message;
+    }
+    prepend_context_once(
+        "视频流中断",
+        format!("读取宿主端 H.264 编码视频帧失败: {message}"),
+    )
 }
 
 fn format_h264_encoded_stream_error(error: EncodedVideoStreamReadError) -> String {
@@ -185,6 +210,7 @@ enum EncodedVideoStreamReadError {
 
 enum NextEncodedVideoStreamItem {
     Frame(EncodedVideoFrame),
+    HostProgramExited(String),
     Goodbye,
 }
 
@@ -277,6 +303,13 @@ fn decode_h264_stream_message(
 ) -> Result<NextEncodedVideoStreamItem, EncodedVideoStreamReadError> {
     match message {
         ControlMessage::EncodedVideoFrame(frame) => Ok(NextEncodedVideoStreamItem::Frame(frame)),
+        ControlMessage::Error { code, message }
+            if code == wincast_protocol::message::ErrorCode::ProgramExited =>
+        {
+            Ok(NextEncodedVideoStreamItem::HostProgramExited(
+                format_host_error(code, message),
+            ))
+        }
         ControlMessage::Error { code, message } => Err(EncodedVideoStreamReadError::Host(
             format_host_error(code, message),
         )),
@@ -423,10 +456,10 @@ mod tests {
 
         assert_eq!(
             summary,
-            EncodedVideoReceiveSummary {
+            VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
                 frames: 3,
                 last_sequence_number: 3,
-            }
+            })
         );
     }
 
@@ -451,10 +484,10 @@ mod tests {
 
         assert_eq!(
             summary,
-            EncodedVideoReceiveSummary {
+            VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
                 frames: 1,
                 last_sequence_number: 7,
-            }
+            })
         );
     }
 
@@ -480,10 +513,10 @@ mod tests {
 
         assert_eq!(
             summary,
-            EncodedVideoReceiveSummary {
+            VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
                 frames: 2,
                 last_sequence_number: 2,
-            }
+            })
         );
         assert_eq!(renderer.rendered_sequences, vec![1, 2]);
         assert_eq!(renderer.rendered_dimensions, vec![(16, 16), (16, 16)]);
@@ -548,10 +581,10 @@ mod tests {
 
         assert_eq!(
             summary,
-            EncodedVideoReceiveSummary {
+            VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
                 frames: 2,
                 last_sequence_number: 2,
-            }
+            })
         );
         assert_eq!(renderer.poll_count, 2);
 
@@ -599,6 +632,18 @@ mod tests {
         assert!(error.contains("视频流中断"));
         assert!(error.contains("读取宿主端 H.264 编码视频帧失败"));
         assert!(error.contains("暂时没有收到 H.264 编码流数据"));
+    }
+
+    #[test]
+    fn h264_read_error_formatter_does_not_repeat_stream_interrupted_prefix() {
+        let error = format_h264_encoded_read_error(
+            "视频流中断: 读取宿主端 H.264 编码视频帧失败: 连接被重置",
+        );
+
+        assert_eq!(
+            error,
+            "视频流中断: 读取宿主端 H.264 编码视频帧失败: 连接被重置"
+        );
     }
 
     #[test]
@@ -722,6 +767,14 @@ mod tests {
     }
 
     impl wincast_render::BgraPixelRenderer for RecordingRenderer {
+        fn render_loading(
+            &mut self,
+            status: &wincast_render::LoadingStatus,
+        ) -> Result<(), wincast_render::RenderError> {
+            status.validate()?;
+            Ok(())
+        }
+
         fn render_frame(
             &mut self,
             frame: &wincast_render::BgraPixelFrame,
