@@ -667,6 +667,7 @@ fn test_h264_frames(count: u64) -> Vec<EncodedVideoFrame> {
                     bytes: &test_bgra_frame(16, 16),
                 })
                 .expect("test H.264 frame should encode")
+                .expect("test H.264 frame should not be skipped")
         })
         .collect()
 }
@@ -706,4 +707,5 @@ fn test_h264_frame(sequence_number: u64) -> EncodedVideoFrame {
             bytes: &test_bgra_frame(16, 16),
         })
         .expect("test H.264 frame should encode")
+        .expect("test H.264 frame should not be skipped")
 }

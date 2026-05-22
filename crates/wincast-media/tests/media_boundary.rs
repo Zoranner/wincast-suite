@@ -130,8 +130,8 @@ fn encoder_and_decoder_traits_use_protocol_frame_boundary() {
         fn encode(
             &mut self,
             _frame: wincast_media::RawVideoFrame<'_>,
-        ) -> wincast_media::MediaResult<EncodedVideoFrame> {
-            Ok(EncodedVideoFrame {
+        ) -> wincast_media::MediaResult<Option<EncodedVideoFrame>> {
+            Ok(Some(EncodedVideoFrame {
                 codec: VideoCodec::H264,
                 width: 1920,
                 height: 1080,
@@ -139,7 +139,7 @@ fn encoder_and_decoder_traits_use_protocol_frame_boundary() {
                 timestamp_ns: 1,
                 keyframe: true,
                 bytes: vec![1],
-            })
+            }))
         }
 
         fn request_keyframe(&mut self) -> wincast_media::MediaResult<()> {

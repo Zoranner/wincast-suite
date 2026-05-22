@@ -98,7 +98,7 @@ impl BgraPixelRenderer for SdlBgraPixelRenderer {
         frame.validate()?;
         let mut texture = self
             .texture_creator
-            .create_texture_streaming(PixelFormatEnum::BGRA8888, frame.width, frame.height)
+            .create_texture_streaming(PixelFormatEnum::BGRA32, frame.width, frame.height)
             .map_err(|error| RenderError::Backend(error.to_string()))?;
 
         texture

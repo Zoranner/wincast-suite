@@ -173,10 +173,55 @@ fn write_h264_encoded_stream_with_input_events_and_program_status(
             format!("H.264 编码器初始化失败: {}", media_error_message(&error)),
         )
     })?;
+    let context = H264EncodedStreamContext {
+        writer,
+        first_frame,
+        session,
+        input_events,
+        pipeline_config,
+        session_gate,
+        program_status,
+    };
+    write_h264_encoded_stream_with_encoder(context, &mut encoder)
+}
+
+struct H264EncodedStreamContext<'a, W, G, P>
+where
+    W: std::io::Write,
+    G: SessionGate,
+    P: ProgramStatusCheck,
+{
+    writer: &'a mut W,
+    first_frame: &'a CapturedBgraFrame,
+    session: &'a mut dyn CaptureRuntime,
+    input_events: &'a mpsc::Receiver<InputReaderEvent>,
+    pipeline_config: VideoPipelineConfig,
+    session_gate: &'a G,
+    program_status: &'a mut P,
+}
+
+fn write_h264_encoded_stream_with_encoder(
+    context: H264EncodedStreamContext<
+        '_,
+        impl std::io::Write,
+        impl SessionGate,
+        impl ProgramStatusCheck,
+    >,
+    encoder: &mut impl VideoEncoder,
+) -> Result<HostSessionEndReason, HostSessionError> {
+    let H264EncodedStreamContext {
+        writer,
+        first_frame,
+        session,
+        input_events,
+        pipeline_config,
+        session_gate,
+        program_status,
+    } = context;
     let mut scaled_frame_bytes = Vec::new();
     write_h264_frame_from_capture(
         writer,
-        &mut encoder,
+        encoder,
         first_frame,
         pipeline_config,
         &mut scaled_frame_bytes,
@@ -232,7 +277,7 @@ fn write_h264_encoded_stream_with_input_events_and_program_status(
         };
         write_h264_frame_from_capture(
             writer,
-            &mut encoder,
+            encoder,
             &frame,
             pipeline_config,
             &mut scaled_frame_bytes,
@@ -251,6 +296,29 @@ fn write_h264_encoded_stream_with_input_events_and_program_status(
             return Ok(reason);
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn write_h264_encoded_stream_with_test_encoder(
+    writer: &mut impl std::io::Write,
+    first_frame: &CapturedBgraFrame,
+    session: &mut dyn CaptureRuntime,
+    input_events: &mpsc::Receiver<InputReaderEvent>,
+    pipeline_config: VideoPipelineConfig,
+    session_gate: &impl SessionGate,
+    encoder: &mut impl VideoEncoder,
+) -> Result<HostSessionEndReason, HostSessionError> {
+    let mut program_status = AlwaysRunningProgramStatus;
+    let context = H264EncodedStreamContext {
+        writer,
+        first_frame,
+        session,
+        input_events,
+        pipeline_config,
+        session_gate,
+        program_status: &mut program_status,
+    };
+    write_h264_encoded_stream_with_encoder(context, encoder)
 }
 
 pub(super) trait ProgramStatusCheck {
@@ -351,12 +419,15 @@ fn write_h264_frame_from_capture(
                 format!("{failure_prefix}: {}", media_error_message(&error)),
             )
         })?;
-    let encoded = encoder.encode(raw_frame).map_err(|error| {
+    let Some(encoded) = encoder.encode(raw_frame).map_err(|error| {
         write_h264_encoding_error(
             writer,
             format!("{failure_prefix}: {}", media_error_message(&error)),
         )
-    })?;
+    })?
+    else {
+        return Ok(());
+    };
     write_message(writer, &ControlMessage::EncodedVideoFrame(encoded)).map_err(|error| {
         HostSessionError::new(
             HostSessionEndReason::TransportFailed,

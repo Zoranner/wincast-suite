@@ -30,6 +30,7 @@ fn openh264_backend_encodes_and_decodes_bgra_frame() {
             bytes: &bgra,
         })
         .expect("OpenH264 should encode BGRA input");
+    let encoded = encoded.expect("test frame should not be skipped");
     let decoded = decoder
         .decode(&encoded)
         .expect("OpenH264 should decode encoded frame");

@@ -120,43 +120,46 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
         if frame_limit.is_some_and(|limit| frames >= limit) {
             break;
         }
+        if let Some(end) = handle_next_h264_stream_item(
+            &mut stream_reader,
+            control_stream,
+            &mut decoder,
+            renderer,
+            &mut last_sequence_number,
+            &mut frames,
+        )? {
+            return Ok(end);
+        }
         let render_loop = renderer
             .poll_input()
             .map_err(|error| format!("读取客户端输入事件失败: {error}"))?;
-        for input_event in render_loop.input_events {
-            wincast_protocol::frame::write_message(
-                control_stream,
-                &ControlMessage::InputEvent(input_event),
-            )
-            .map_err(|error| format!("发送客户端输入事件失败: {error}"))?;
-        }
-        wincast_protocol::frame::write_message(control_stream, &ControlMessage::Heartbeat)
-            .map_err(|error| format!("发送客户端心跳失败: {error}"))?;
         if render_loop.action == wincast_render::RenderLoopAction::Quit {
-            let _ = wincast_protocol::frame::write_message(
-                control_stream,
-                &ControlMessage::StopSession,
-            );
+            let _ = write_client_control_message(control_stream, &ControlMessage::StopSession);
             break;
         }
-        match stream_reader
-            .read_next(control_stream)
-            .map_err(format_h264_encoded_stream_error)?
-        {
-            Some(NextEncodedVideoStreamItem::Frame(frame)) => {
-                render_h264_encoded_frame(
-                    &mut decoder,
-                    renderer,
-                    frame,
-                    &mut last_sequence_number,
-                )?;
-                frames += 1;
+        for input_event in render_loop.input_events {
+            if write_client_control_message(
+                control_stream,
+                &ControlMessage::InputEvent(input_event),
+            )? {
+                return Ok(VideoStreamEnd::Frames(encoded_video_receive_summary(
+                    frames,
+                    last_sequence_number,
+                )?));
             }
-            Some(NextEncodedVideoStreamItem::Goodbye) => break,
-            Some(NextEncodedVideoStreamItem::HostProgramExited(message)) => {
-                return Ok(VideoStreamEnd::HostProgramExited(message));
-            }
-            None => continue,
+        }
+        if write_client_control_message(control_stream, &ControlMessage::Heartbeat)? {
+            break;
+        }
+        if let Some(end) = handle_next_h264_stream_item(
+            &mut stream_reader,
+            control_stream,
+            &mut decoder,
+            renderer,
+            &mut last_sequence_number,
+            &mut frames,
+        )? {
+            return Ok(end);
         }
     }
 
@@ -167,6 +170,88 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
         frames,
         last_sequence_number,
     }))
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn handle_next_h264_stream_item(
+    stream_reader: &mut H264EncodedStreamReader,
+    control_stream: &mut (impl Read + std::io::Write),
+    decoder: &mut OpenH264Decoder,
+    renderer: &mut impl wincast_render::BgraPixelRenderer,
+    last_sequence_number: &mut Option<u64>,
+    frames: &mut usize,
+) -> Result<Option<VideoStreamEnd>, String> {
+    match stream_reader
+        .read_next(control_stream)
+        .map_err(format_h264_encoded_stream_error)?
+    {
+        Some(NextEncodedVideoStreamItem::Frame(frame)) => {
+            render_h264_encoded_frame(decoder, renderer, frame, last_sequence_number)?;
+            *frames += 1;
+            Ok(None)
+        }
+        Some(NextEncodedVideoStreamItem::Goodbye) => Ok(Some(VideoStreamEnd::Frames(
+            encoded_video_receive_summary(*frames, *last_sequence_number)?,
+        ))),
+        Some(NextEncodedVideoStreamItem::HostProgramExited(message)) => {
+            Ok(Some(VideoStreamEnd::HostProgramExited(message)))
+        }
+        None => Ok(None),
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn encoded_video_receive_summary(
+    frames: usize,
+    last_sequence_number: Option<u64>,
+) -> Result<EncodedVideoReceiveSummary, String> {
+    let Some(last_sequence_number) = last_sequence_number else {
+        return Err("未收到 H.264 编码视频帧".to_owned());
+    };
+    Ok(EncodedVideoReceiveSummary {
+        frames,
+        last_sequence_number,
+    })
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn write_client_control_message(
+    writer: &mut impl std::io::Write,
+    message: &ControlMessage,
+) -> Result<bool, String> {
+    match wincast_protocol::frame::write_message(writer, message) {
+        Ok(()) => Ok(false),
+        Err(error) if is_control_stream_closed(&error) => Ok(true),
+        Err(error) => Err(format_client_control_write_error(message, error)),
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn format_client_control_write_error(
+    message: &ControlMessage,
+    error: impl std::fmt::Display,
+) -> String {
+    let action = match message {
+        ControlMessage::InputEvent(_) => "发送客户端输入事件失败",
+        ControlMessage::Heartbeat => "发送客户端心跳失败",
+        ControlMessage::StopSession => "发送客户端停止会话消息失败",
+        _ => "发送客户端控制消息失败",
+    };
+    format!("{action}: {error}")
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn is_control_stream_closed(error: &wincast_protocol::frame::FrameError) -> bool {
+    match error {
+        wincast_protocol::frame::FrameError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+        ),
+        _ => false,
+    }
 }
 
 fn read_next_h264_encoded_stream_item(
@@ -500,7 +585,7 @@ mod tests {
             &ControlMessage::EncodedVideoFrame(frames[1].clone()),
         )
         .expect("second encoded frame should encode");
-        let mut stream = DuplexTestStream::new(bytes);
+        let mut stream = DuplexTestStream::with_initial_timeout(bytes);
         let mut renderer = RecordingRenderer::with_input_event();
 
         let summary = read_h264_encoded_frames_with_renderer_from_first(
@@ -541,7 +626,7 @@ mod tests {
             &ControlMessage::EncodedVideoFrame(frames[1].clone()),
         )
         .expect("second encoded frame should encode");
-        let mut stream = DuplexTestStream::new(bytes);
+        let mut stream = DuplexTestStream::with_initial_timeout(bytes);
         let mut renderer = RecordingRenderer::default();
 
         read_h264_encoded_frames_with_renderer_from_first(
@@ -586,16 +671,77 @@ mod tests {
                 last_sequence_number: 2,
             })
         );
-        assert_eq!(renderer.poll_count, 2);
+        assert_eq!(renderer.poll_count, 1);
 
         let mut written = stream.written.as_slice();
         assert_eq!(
             read_message(&mut written).expect("first heartbeat should be sent"),
             ControlMessage::Heartbeat
         );
+        assert!(
+            written.is_empty(),
+            "only the timeout loop should send heartbeat"
+        );
+    }
+
+    #[test]
+    fn client_finishes_h264_render_loop_when_heartbeat_write_sees_closed_control_stream() {
+        let frames = valid_h264_frames(1);
+        let mut stream = DuplexTestStream::with_initial_timeout_and_write_failure(
+            Vec::new(),
+            std::io::ErrorKind::BrokenPipe,
+            "host closed control stream",
+        );
+        let mut renderer = RecordingRenderer::default();
+
+        let summary = read_h264_encoded_frames_with_renderer_from_first(
+            &mut stream,
+            frames[0].clone(),
+            None,
+            &mut renderer,
+        )
+        .expect("closed control stream during heartbeat should finish current stream");
+
         assert_eq!(
-            read_message(&mut written).expect("second heartbeat should be sent"),
-            ControlMessage::Heartbeat
+            summary,
+            VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
+                frames: 1,
+                last_sequence_number: 1,
+            })
+        );
+        assert_eq!(renderer.poll_count, 1);
+    }
+
+    #[test]
+    fn client_sends_stop_session_before_heartbeat_when_renderer_requests_quit() {
+        let frames = valid_h264_frames(1);
+        let mut stream = DuplexTestStream::with_initial_timeout(Vec::new());
+        let mut renderer = RecordingRenderer::with_quit_on_first_poll();
+
+        let summary = read_h264_encoded_frames_with_renderer_from_first(
+            &mut stream,
+            frames[0].clone(),
+            None,
+            &mut renderer,
+        )
+        .expect("renderer quit should stop H.264 render loop cleanly");
+
+        assert_eq!(
+            summary,
+            VideoStreamEnd::Frames(EncodedVideoReceiveSummary {
+                frames: 1,
+                last_sequence_number: 1,
+            })
+        );
+
+        let mut written = stream.written.as_slice();
+        assert_eq!(
+            read_message(&mut written).expect("stop session should be sent"),
+            ControlMessage::StopSession
+        );
+        assert!(
+            written.is_empty(),
+            "heartbeat should not be sent after quit"
         );
     }
 
@@ -708,6 +854,7 @@ mod tests {
                         bytes: &test_bgra_frame(16, 16),
                     })
                     .expect("test H.264 frame should encode")
+                    .expect("test H.264 frame should not be skipped")
             })
             .collect()
     }
@@ -734,6 +881,7 @@ mod tests {
                 bytes: &test_bgra_frame(16, 16),
             })
             .expect("test H.264 frame should encode")
+            .expect("test H.264 frame should not be skipped")
     }
 
     fn test_bgra_frame(width: u32, height: u32) -> Vec<u8> {
@@ -755,12 +903,20 @@ mod tests {
         rendered_dimensions: Vec<(u32, u32)>,
         poll_count: usize,
         emit_input: bool,
+        quit_on_first_poll: bool,
     }
 
     impl RecordingRenderer {
         fn with_input_event() -> Self {
             Self {
                 emit_input: true,
+                ..Self::default()
+            }
+        }
+
+        fn with_quit_on_first_poll() -> Self {
+            Self {
+                quit_on_first_poll: true,
                 ..Self::default()
             }
         }
@@ -800,7 +956,11 @@ mod tests {
                 Vec::new()
             };
             Ok(wincast_render::RenderLoopResult {
-                action: wincast_render::RenderLoopAction::Continue,
+                action: if self.quit_on_first_poll && self.poll_count == 1 {
+                    wincast_render::RenderLoopAction::Quit
+                } else {
+                    wincast_render::RenderLoopAction::Continue
+                },
                 input_events,
             })
         }
@@ -810,22 +970,29 @@ mod tests {
         reader: std::io::Cursor<Vec<u8>>,
         written: Vec<u8>,
         timeouts_before_read: usize,
+        write_error: Option<(std::io::ErrorKind, &'static str)>,
     }
 
     impl DuplexTestStream {
-        fn new(read_bytes: Vec<u8>) -> Self {
-            Self {
-                reader: std::io::Cursor::new(read_bytes),
-                written: Vec::new(),
-                timeouts_before_read: 0,
-            }
-        }
-
         fn with_initial_timeout(read_bytes: Vec<u8>) -> Self {
             Self {
                 reader: std::io::Cursor::new(read_bytes),
                 written: Vec::new(),
                 timeouts_before_read: 1,
+                write_error: None,
+            }
+        }
+
+        fn with_initial_timeout_and_write_failure(
+            read_bytes: Vec<u8>,
+            kind: std::io::ErrorKind,
+            message: &'static str,
+        ) -> Self {
+            Self {
+                reader: std::io::Cursor::new(read_bytes),
+                written: Vec::new(),
+                timeouts_before_read: 1,
+                write_error: Some((kind, message)),
             }
         }
     }
@@ -845,6 +1012,9 @@ mod tests {
 
     impl std::io::Write for DuplexTestStream {
         fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if let Some((kind, message)) = self.write_error {
+                return Err(std::io::Error::new(kind, message));
+            }
             self.written.extend_from_slice(buffer);
             Ok(buffer.len())
         }

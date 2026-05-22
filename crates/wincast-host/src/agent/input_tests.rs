@@ -12,13 +12,16 @@ use crate::agent::{
     stream::{
         HostSessionEndReason, InputReaderEvent, read_input_events_until_stop,
         read_input_events_until_stop_with_timeout_limit, spawn_input_event_reader,
-        write_h264_encoded_stream_with_input_events,
+        write_h264_encoded_stream_with_input_events, write_h264_encoded_stream_with_test_encoder,
     },
     tests::*,
 };
 use crate::session_state::RemoteSessionStatus;
 use wincast_input::CaptureInputBounds;
-use wincast_media::{VideoLatencyMode, VideoPipelineConfig};
+use wincast_media::{
+    EncodedVideoFrame, MediaResult, RawVideoFrame, VideoEncoder, VideoLatencyMode,
+    VideoPipelineConfig,
+};
 use wincast_protocol::{
     config::VideoCodec,
     frame::{read_message, write_message},
@@ -193,4 +196,73 @@ fn h264_stream_stops_cleanly_when_input_reader_stops() {
     let frame = expect_h264_frame(read_message(&mut reader).expect("first frame should decode"));
     assert_eq!(frame.sequence_number, 0);
     assert_eq!(session.attempts.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn h264_stream_ignores_skipped_encoded_frames_without_failing_session() {
+    let mut writer = Vec::new();
+    let mut session = RecordingCaptureRuntime {
+        frames: VecDeque::from([Some(captured_bgra_frame_with_sequence(1)), None]),
+        attempts: Default::default(),
+        block_after_empty: None,
+    };
+    let (_sender, receiver) = mpsc::channel();
+    let mut encoder = SkipsSecondFrameEncoder { calls: 0 };
+
+    let reason = write_h264_encoded_stream_with_test_encoder(
+        &mut writer,
+        &captured_bgra_frame(),
+        &mut session,
+        &receiver,
+        VideoPipelineConfig {
+            codec: VideoCodec::H264,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+            max_bitrate_kbps: 6000,
+            latency_mode: VideoLatencyMode::LowLatency,
+        },
+        &FixedSessionGate(RemoteSessionStatus::Allowed),
+        &mut encoder,
+    )
+    .expect("skipped H.264 frame should not fail the session");
+
+    assert_eq!(reason, HostSessionEndReason::CaptureInactive);
+
+    let mut reader = writer.as_slice();
+    let first = expect_h264_frame(read_message(&mut reader).expect("first frame should decode"));
+    assert_eq!(first.sequence_number, 0);
+    assert_eq!(
+        read_message(&mut reader).expect("goodbye should decode after skipped frame"),
+        ControlMessage::Goodbye
+    );
+    assert_eq!(encoder.calls, 2);
+}
+
+struct SkipsSecondFrameEncoder {
+    calls: usize,
+}
+
+impl VideoEncoder for SkipsSecondFrameEncoder {
+    fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<Option<EncodedVideoFrame>> {
+        self.calls += 1;
+        if self.calls == 2 {
+            return Ok(None);
+        }
+
+        Ok(Some(EncodedVideoFrame {
+            codec: VideoCodec::H264,
+            width: frame.width,
+            height: frame.height,
+            sequence_number: frame.sequence_number,
+            timestamp_ns: frame.timestamp_ns,
+            keyframe: true,
+            bytes: vec![1],
+        }))
+    }
+
+    fn request_keyframe(&mut self) -> MediaResult<()> {
+        Ok(())
+    }
 }

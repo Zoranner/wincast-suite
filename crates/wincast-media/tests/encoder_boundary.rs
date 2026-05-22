@@ -12,7 +12,8 @@ fn fake_h264_encoder_outputs_protocol_frame_boundary() {
 
     let encoded = encoder
         .encode(raw)
-        .expect("fake encoder should produce frame");
+        .expect("fake encoder should produce frame")
+        .expect("fake encoder should not skip frame");
 
     assert_eq!(encoded.codec, VideoCodec::H264);
     assert_eq!(encoded.width, 640);
@@ -33,16 +34,19 @@ fn fake_h264_encoder_marks_next_frame_keyframe_after_request() {
 
     let first = encoder
         .encode(raw_frame(640, 360, 1, 100, &bytes))
-        .expect("first frame should encode");
+        .expect("first frame should encode")
+        .expect("first frame should not be skipped");
     let second = encoder
         .encode(raw_frame(640, 360, 2, 200, &bytes))
-        .expect("second frame should encode");
+        .expect("second frame should encode")
+        .expect("second frame should not be skipped");
     encoder
         .request_keyframe()
         .expect("fake encoder should accept keyframe request");
     let third = encoder
         .encode(raw_frame(640, 360, 3, 300, &bytes))
-        .expect("requested frame should encode");
+        .expect("requested frame should encode")
+        .expect("requested frame should not be skipped");
 
     assert!(first.keyframe);
     assert!(!second.keyframe);

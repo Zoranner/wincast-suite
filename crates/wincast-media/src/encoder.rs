@@ -42,7 +42,7 @@ impl OpenH264Encoder {
 }
 
 impl VideoEncoder for OpenH264Encoder {
-    fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<EncodedVideoFrame> {
+    fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<Option<EncodedVideoFrame>> {
         validate_raw_frame(self.config, frame)?;
 
         self.rgb_buffer.clear();
@@ -59,12 +59,15 @@ impl VideoEncoder for OpenH264Encoder {
                 openh264::Timestamp::from_millis(frame.timestamp_ns / 1_000_000),
             )
             .map_err(|error| MediaError::Backend(format!("OpenH264 编码失败: {error}")))?;
+        if bitstream.frame_type() == openh264::encoder::FrameType::Skip {
+            return Ok(None);
+        }
         let bytes = bitstream.to_vec();
         if bytes.is_empty() {
             return Err(MediaError::Backend("OpenH264 编码器输出空载荷".to_owned()));
         }
 
-        Ok(EncodedVideoFrame {
+        Ok(Some(EncodedVideoFrame {
             codec: VideoCodec::H264,
             width: frame.width,
             height: frame.height,
@@ -75,7 +78,7 @@ impl VideoEncoder for OpenH264Encoder {
                 openh264::encoder::FrameType::IDR | openh264::encoder::FrameType::I
             ),
             bytes,
-        })
+        }))
     }
 
     fn request_keyframe(&mut self) -> MediaResult<()> {
@@ -106,7 +109,7 @@ impl FakeH264Encoder {
 
 #[cfg(feature = "test-support")]
 impl VideoEncoder for FakeH264Encoder {
-    fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<EncodedVideoFrame> {
+    fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<Option<EncodedVideoFrame>> {
         validate_raw_frame(self.config, frame)?;
 
         let keyframe = self.force_keyframe;
@@ -127,7 +130,7 @@ impl VideoEncoder for FakeH264Encoder {
             ));
         }
 
-        Ok(EncodedVideoFrame {
+        Ok(Some(EncodedVideoFrame {
             codec: VideoCodec::H264,
             width: frame.width,
             height: frame.height,
@@ -135,7 +138,7 @@ impl VideoEncoder for FakeH264Encoder {
             timestamp_ns: frame.timestamp_ns,
             keyframe,
             bytes,
-        })
+        }))
     }
 
     fn request_keyframe(&mut self) -> MediaResult<()> {

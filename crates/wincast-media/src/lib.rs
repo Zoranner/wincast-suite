@@ -212,7 +212,7 @@ impl DecodedVideoFrame<'_> {
 }
 
 pub trait VideoEncoder {
-    fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<EncodedVideoFrame>;
+    fn encode(&mut self, frame: RawVideoFrame<'_>) -> MediaResult<Option<EncodedVideoFrame>>;
 
     fn request_keyframe(&mut self) -> MediaResult<()>;
 }
