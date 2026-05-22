@@ -14,6 +14,9 @@ pub(crate) enum VideoStreamEnd {
     HostProgramExited(String),
 }
 
+#[cfg(any(test, target_os = "linux"))]
+const MAX_DRAINED_H264_FRAMES_PER_RENDER_TICK: usize = 4;
+
 pub(crate) fn read_h264_encoded_frames_from_first(
     reader: &mut impl std::io::Read,
     first_frame: EncodedVideoFrame,
@@ -121,6 +124,7 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
         if frame_limit.is_some_and(|limit| frames >= limit) {
             break;
         }
+        let frame_budget = h264_drain_frame_budget(frame_limit, frames);
         if let Some(end) = handle_available_h264_stream_items(
             &mut stream_reader,
             control_stream,
@@ -128,6 +132,7 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
             renderer,
             &mut last_sequence_number,
             &mut frames,
+            frame_budget,
         )? {
             return Ok(end);
         }
@@ -152,6 +157,10 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
         if write_client_control_message(control_stream, &ControlMessage::Heartbeat)? {
             break;
         }
+        if frame_limit.is_some_and(|limit| frames >= limit) {
+            break;
+        }
+        let frame_budget = h264_drain_frame_budget(frame_limit, frames);
         if let Some(end) = handle_available_h264_stream_items(
             &mut stream_reader,
             control_stream,
@@ -159,6 +168,7 @@ pub(crate) fn read_h264_encoded_frames_with_renderer_from_first(
             renderer,
             &mut last_sequence_number,
             &mut frames,
+            frame_budget,
         )? {
             return Ok(end);
         }
@@ -181,9 +191,10 @@ fn handle_available_h264_stream_items(
     renderer: &mut impl wincast_render::BgraPixelRenderer,
     last_sequence_number: &mut Option<u64>,
     frames: &mut usize,
+    frame_budget: usize,
 ) -> Result<Option<VideoStreamEnd>, String> {
     let mut latest_frame = None;
-    loop {
+    for _ in 0..frame_budget {
         match stream_reader
             .read_next(control_stream)
             .map_err(format_h264_encoded_stream_error)?
@@ -213,6 +224,16 @@ fn handle_available_h264_stream_items(
             }
         }
     }
+    render_latest_decoded_frame(renderer, latest_frame)?;
+    Ok(None)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn h264_drain_frame_budget(frame_limit: Option<usize>, frames: usize) -> usize {
+    frame_limit
+        .map(|limit| limit.saturating_sub(frames))
+        .unwrap_or(MAX_DRAINED_H264_FRAMES_PER_RENDER_TICK)
+        .min(MAX_DRAINED_H264_FRAMES_PER_RENDER_TICK)
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -758,6 +779,42 @@ mod tests {
     }
 
     #[test]
+    fn client_yields_h264_drain_before_exhausting_available_backlog() {
+        let frames = valid_h264_frames(20);
+        let mut bytes = Vec::new();
+        for frame in &frames[1..] {
+            write_message(
+                &mut bytes,
+                &ControlMessage::EncodedVideoFrame(frame.clone()),
+            )
+            .expect("encoded frame should encode");
+        }
+        let mut stream = DuplexTestStream::with_no_initial_timeout(bytes);
+        let mut renderer = RecordingRenderer::with_quit_on_first_poll();
+
+        let summary = read_h264_encoded_frames_with_renderer_from_first(
+            &mut stream,
+            frames[0].clone(),
+            None,
+            &mut renderer,
+        )
+        .expect("H.264 renderer helper should yield to input polling");
+
+        let VideoStreamEnd::Frames(summary) = summary else {
+            panic!("unexpected stream end");
+        };
+        assert_eq!(renderer.poll_count, 1);
+        assert!(
+            summary.last_sequence_number < 20,
+            "client should poll input before exhausting a constantly available H.264 backlog"
+        );
+        assert!(
+            !renderer.rendered_sequences.contains(&20),
+            "client should not render the tail frame before yielding to input polling"
+        );
+    }
+
+    #[test]
     fn client_finishes_h264_render_loop_when_heartbeat_write_sees_closed_control_stream() {
         let frames = valid_h264_frames(1);
         let mut stream = DuplexTestStream::with_initial_timeout_and_write_failure(
@@ -1052,6 +1109,15 @@ mod tests {
                 reader: std::io::Cursor::new(read_bytes),
                 written: Vec::new(),
                 timeouts_before_read: 1,
+                write_error: None,
+            }
+        }
+
+        fn with_no_initial_timeout(read_bytes: Vec<u8>) -> Self {
+            Self {
+                reader: std::io::Cursor::new(read_bytes),
+                written: Vec::new(),
+                timeouts_before_read: 0,
                 write_error: None,
             }
         }
