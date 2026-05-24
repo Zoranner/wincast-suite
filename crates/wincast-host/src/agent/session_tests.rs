@@ -24,7 +24,7 @@ use crate::session_state::{
 };
 use wincast_media::{VideoDecoder, test_support::FakeH264Decoder};
 use wincast_protocol::{
-    config::VideoCodec,
+    config::{MonitorPowerAfterLaunch, VideoCodec},
     frame::{read_message, write_message},
     handshake::send_client_hello,
     message::{ControlMessage, ErrorCode},
@@ -171,7 +171,7 @@ fn host_turns_off_monitor_after_program_launch_when_configured() {
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (mut server, _) = tcp_pair.accept().expect("server should accept");
     let mut config = host_config("127.0.0.1:0".to_owned());
-    config.program.turn_off_monitor_after_launch = true;
+    config.program.turn_off_monitor_after_launch = MonitorPowerAfterLaunch::DdcCiDim;
     let mut runner = RecordingProgramRunner::default();
     let mut capture = RecordingCaptureStarter::default();
     let mut session_gate = FixedSessionGate(RemoteSessionStatus::Allowed);
@@ -202,7 +202,52 @@ fn host_turns_off_monitor_after_program_launch_when_configured() {
 
     assert_eq!(runner.launched.len(), 1);
     assert_eq!(runner.cleaned, vec![42]);
-    assert_eq!(monitor_power.calls, 1);
+    assert_eq!(
+        monitor_power.policies,
+        vec![MonitorPowerAfterLaunch::DdcCiDim]
+    );
+}
+
+#[test]
+fn host_skips_monitor_power_when_disabled() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (mut server, _) = tcp_pair.accept().expect("server should accept");
+    let config = host_config("127.0.0.1:0".to_owned());
+    let mut runner = RecordingProgramRunner::default();
+    let mut capture = RecordingCaptureStarter::default();
+    let mut session_gate = FixedSessionGate(RemoteSessionStatus::Allowed);
+    let mut monitor_power = RecordingMonitorPowerController::default();
+    let host = thread::spawn(move || {
+        let result = handle_control_client_with_runtime(
+            &mut server,
+            &config,
+            &mut runner,
+            &mut capture,
+            &mut session_gate,
+            &mut monitor_power,
+        );
+        (result, runner, capture, monitor_power)
+    });
+
+    send_client_hello(&mut client).expect("client hello should write");
+    assert_eq!(
+        read_message(&mut client).expect("host hello should read"),
+        ControlMessage::Hello { version: 1 }
+    );
+    write_message(&mut client, &ControlMessage::StartSession).expect("start session should write");
+    read_message(&mut client).expect("session ready should read");
+    read_message(&mut client).expect("first encoded frame should read");
+
+    let (result, runner, _capture, monitor_power) = host.join().expect("host thread should finish");
+    result.expect("disabled monitor power session should finish");
+
+    assert_eq!(runner.launched.len(), 1);
+    assert_eq!(runner.cleaned, vec![42]);
+    assert!(monitor_power.policies.is_empty());
 }
 
 #[test]
@@ -214,7 +259,7 @@ fn host_cleans_started_program_when_monitor_power_off_fails() {
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (mut server, _) = tcp_pair.accept().expect("server should accept");
     let mut config = host_config("127.0.0.1:0".to_owned());
-    config.program.turn_off_monitor_after_launch = true;
+    config.program.turn_off_monitor_after_launch = MonitorPowerAfterLaunch::DdcCiPowerOff;
     let mut runner = RecordingProgramRunner::default();
     let mut capture = RecordingCaptureStarter::default();
     let mut session_gate = FixedSessionGate(RemoteSessionStatus::Allowed);
@@ -248,7 +293,10 @@ fn host_cleans_started_program_when_monitor_power_off_fails() {
     assert!(error.contains("simulated monitor power failure"));
     assert_eq!(runner.launched.len(), 1);
     assert_eq!(runner.cleaned, vec![42]);
-    assert_eq!(monitor_power.calls, 1);
+    assert_eq!(
+        monitor_power.policies,
+        vec![MonitorPowerAfterLaunch::DdcCiPowerOff]
+    );
     assert!(capture.targets.is_empty());
 }
 

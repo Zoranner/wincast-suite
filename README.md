@@ -22,7 +22,7 @@ path = 'C:\Program Files\SomeApp\app.exe'
 args = []
 work_dir = 'C:\Program Files\SomeApp'
 startup_delay_ms = 3000
-turn_off_monitor_after_launch = false
+turn_off_monitor_after_launch = "disabled"
 
 [video]
 width = 1280
@@ -36,7 +36,7 @@ max_bitrate_kbps = 6000
 first_frame_timeout_ms = 5000
 ```
 
-`program.path` 改成要打开的 Windows 程序路径。`program.startup_delay_ms` 表示程序启动后延迟多久开始整屏捕获。`program.turn_off_monitor_after_launch` 设为 `true` 时，宿主端会在目标程序启动成功后请求 Windows 关闭物理显示器。`listen` 的端口要和客户端配置一致。
+`program.path` 改成要打开的 Windows 程序路径。`program.startup_delay_ms` 表示程序启动后延迟多久开始整屏捕获。`program.turn_off_monitor_after_launch` 控制目标程序启动成功后的显示器处理策略，默认 `disabled`；可选 `windows_power_message`、`ddc_ci_power_off` 和 `ddc_ci_dim`。`windows_power_message` 会发送 Windows 显示器电源关闭消息，可能影响 DXGI Desktop Duplication 采集；`ddc_ci_power_off` 通过 DDC/CI VCP 0xD6 请求显示器硬件关屏，更接近手动关闭显示器；`ddc_ci_dim` 通过 DDC/CI 尝试把显示器亮度调到最低，优先保持显示输出 active。DDC/CI 能力依赖显示器、线缆和显卡驱动支持，必须在目标 Windows 真机上烟测确认。`listen` 的端口要和客户端配置一致。
 
 ## 配置 Linux 端
 

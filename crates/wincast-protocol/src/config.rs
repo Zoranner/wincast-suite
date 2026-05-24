@@ -17,6 +17,7 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostConfig {
     pub listen: String,
     pub program: ProgramConfig,
@@ -49,6 +50,7 @@ impl HostConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProgramConfig {
     pub path: String,
     #[serde(default)]
@@ -56,7 +58,7 @@ pub struct ProgramConfig {
     pub work_dir: String,
     pub startup_delay_ms: u64,
     #[serde(default)]
-    pub turn_off_monitor_after_launch: bool,
+    pub turn_off_monitor_after_launch: MonitorPowerAfterLaunch,
 }
 
 impl ProgramConfig {
@@ -76,7 +78,21 @@ impl ProgramConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MonitorPowerAfterLaunch {
+    #[default]
+    #[serde(rename = "disabled")]
+    Disabled,
+    #[serde(rename = "windows_power_message")]
+    WindowsPowerMessage,
+    #[serde(rename = "ddc_ci_power_off")]
+    DdcCiPowerOff,
+    #[serde(rename = "ddc_ci_dim")]
+    DdcCiDim,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VideoConfig {
     pub width: u32,
     pub height: u32,
@@ -110,6 +126,7 @@ pub enum VideoCodec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureConfig {
     pub first_frame_timeout_ms: u64,
 }
@@ -124,6 +141,7 @@ impl CaptureConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     pub host: String,
     pub port: u16,

@@ -18,7 +18,9 @@ use crate::{
 };
 use wincast_capture::{CaptureError, CaptureTarget, CapturedBgraFrame};
 use wincast_protocol::{
-    config::{CaptureConfig, HostConfig, ProgramConfig, VideoCodec, VideoConfig},
+    config::{
+        CaptureConfig, HostConfig, MonitorPowerAfterLaunch, ProgramConfig, VideoCodec, VideoConfig,
+    },
     frame::{read_message, write_message},
     handshake::send_client_hello,
     input::InputEvent,
@@ -61,13 +63,16 @@ impl ProgramRunner for RecordingProgramRunner {
 
 #[derive(Default)]
 pub(super) struct RecordingMonitorPowerController {
-    pub(super) calls: usize,
+    pub(super) policies: Vec<MonitorPowerAfterLaunch>,
     pub(super) fail_message: Option<&'static str>,
 }
 
 impl MonitorPowerController for RecordingMonitorPowerController {
-    fn turn_off_monitor(&mut self) -> Result<(), MonitorPowerError> {
-        self.calls += 1;
+    fn apply_after_launch(
+        &mut self,
+        policy: MonitorPowerAfterLaunch,
+    ) -> Result<(), MonitorPowerError> {
+        self.policies.push(policy);
         match self.fail_message {
             Some(message) => Err(monitor_power_error(message)),
             None => Ok(()),
@@ -233,7 +238,7 @@ pub(super) fn host_config_with_codec(listen: String, codec: VideoCodec) -> HostC
             args: Vec::new(),
             work_dir: "C:\\Program Files\\SomeApp".to_owned(),
             startup_delay_ms: 0,
-            turn_off_monitor_after_launch: false,
+            turn_off_monitor_after_launch: MonitorPowerAfterLaunch::Disabled,
         },
         video: VideoConfig {
             width: 1280,

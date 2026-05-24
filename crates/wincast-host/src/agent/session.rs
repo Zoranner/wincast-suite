@@ -14,7 +14,7 @@ use crate::{
 };
 use wincast_media::{VideoLatencyMode, VideoPipelineConfig};
 use wincast_protocol::{
-    config::{HostConfig, VideoCodec},
+    config::{HostConfig, MonitorPowerAfterLaunch, VideoCodec},
     frame::{FrameError, read_message},
     handshake::accept_client_hello,
     message::{ControlMessage, ErrorCode},
@@ -86,9 +86,7 @@ pub(super) fn handle_control_client_with_runtime(
                         write_control_error(&mut writer, ErrorCode::ProgramLaunchFailed, detail);
                     message
                 })?;
-            if config.program.turn_off_monitor_after_launch
-                && let Err(error) = monitor_power.turn_off_monitor()
-            {
+            if let Err(error) = apply_turn_off_monitor_after_launch(config, monitor_power) {
                 let cleanup_result = runner
                     .cleanup(&mut started)
                     .map_err(|error| format!("清理宿主端程序失败: {error}"));
@@ -128,6 +126,18 @@ pub(super) fn handle_control_client_with_runtime(
             Err("控制消息顺序无效，期望 StartSession".to_owned())
         }
     }
+}
+
+fn apply_turn_off_monitor_after_launch(
+    config: &HostConfig,
+    monitor_power: &mut impl MonitorPowerController,
+) -> Result<(), crate::monitor_power::MonitorPowerError> {
+    let policy = config.program.turn_off_monitor_after_launch;
+    if policy == MonitorPowerAfterLaunch::Disabled {
+        return Ok(());
+    }
+
+    monitor_power.apply_after_launch(policy)
 }
 
 pub(super) trait SessionGate {

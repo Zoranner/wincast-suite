@@ -307,7 +307,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use wincast_protocol::config::{
-        CaptureConfig, HostConfig, ProgramConfig, VideoCodec, VideoConfig,
+        CaptureConfig, HostConfig, MonitorPowerAfterLaunch, ProgramConfig, VideoCodec, VideoConfig,
     };
 
     #[test]
@@ -382,7 +382,7 @@ mod tests {
                 args: vec!["--profile".to_owned(), "default".to_owned()],
                 work_dir: "C:\\Tools\\Demo App".to_owned(),
                 startup_delay_ms: 3000,
-                turn_off_monitor_after_launch: true,
+                turn_off_monitor_after_launch: MonitorPowerAfterLaunch::DdcCiDim,
             },
             video: VideoConfig {
                 width: 1280,

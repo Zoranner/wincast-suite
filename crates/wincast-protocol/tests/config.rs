@@ -1,4 +1,6 @@
-use wincast_protocol::config::{ClientConfig, ConfigError, HostConfig, VideoCodec};
+use wincast_protocol::config::{
+    ClientConfig, ConfigError, HostConfig, MonitorPowerAfterLaunch, VideoCodec,
+};
 
 fn example_config(name: &str) -> String {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -70,15 +72,50 @@ first_frame_timeout_ms = 5000
     assert_eq!(config.program.args, ["--demo"]);
     assert_eq!(config.program.work_dir, "C:\\Program Files\\SomeApp");
     assert_eq!(config.program.startup_delay_ms, 0);
-    assert!(!config.program.turn_off_monitor_after_launch);
+    assert_eq!(
+        config.program.turn_off_monitor_after_launch,
+        MonitorPowerAfterLaunch::Disabled
+    );
     assert_eq!(config.video.width, 1280);
     assert_eq!(config.video.codec, VideoCodec::H264);
     assert_eq!(config.capture.first_frame_timeout_ms, 5000);
 }
 
 #[test]
-fn parses_host_config_with_monitor_power_off_after_program_launch() {
+fn parses_host_config_with_ddc_ci_monitor_power_strategy() {
     let config = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+
+[program]
+path = 'C:\Program Files\SomeApp\app.exe'
+work_dir = 'C:\Program Files\SomeApp'
+startup_delay_ms = 3000
+turn_off_monitor_after_launch = "ddc_ci_dim"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+first_frame_timeout_ms = 5000
+"#,
+    )
+    .expect("host config with DDC/CI monitor power strategy should parse");
+
+    assert_eq!(
+        config.program.turn_off_monitor_after_launch,
+        MonitorPowerAfterLaunch::DdcCiDim
+    );
+}
+
+#[test]
+fn rejects_boolean_monitor_power_config() {
+    let err = HostConfig::from_toml_str(
         r#"
 listen = "0.0.0.0:7856"
 
@@ -100,9 +137,38 @@ max_bitrate_kbps = 6000
 first_frame_timeout_ms = 5000
 "#,
     )
-    .expect("host config with monitor power option should parse");
+    .expect_err("boolean monitor power config should no longer parse");
 
-    assert!(config.program.turn_off_monitor_after_launch);
+    assert!(matches!(err, ConfigError::InvalidToml(_)));
+}
+
+#[test]
+fn rejects_unknown_monitor_power_strategy() {
+    let err = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+
+[program]
+path = 'C:\Program Files\SomeApp\app.exe'
+work_dir = 'C:\Program Files\SomeApp'
+startup_delay_ms = 3000
+turn_off_monitor_after_launch = "sleep"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+first_frame_timeout_ms = 5000
+"#,
+    )
+    .expect_err("unknown monitor power strategy should be rejected");
+
+    assert!(matches!(err, ConfigError::InvalidToml(_)));
 }
 
 #[test]
