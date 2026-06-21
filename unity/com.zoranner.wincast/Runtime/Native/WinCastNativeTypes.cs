@@ -41,6 +41,7 @@ namespace Zoranner.WinCast.Native
 
     public sealed class WinCastConfig
     {
+        public string ListenHost;
         public int Port;
         public int Width;
         public int Height;

@@ -15,8 +15,9 @@ use wincast_protocol::{
 };
 use wincast_unity_native::{
     WincastUnityFrameFormat, WincastUnityInputEvent, WincastUnityInputEventType,
-    WincastUnityPointerButton, wincast_unity_create, wincast_unity_poll_input,
-    wincast_unity_shutdown, wincast_unity_start, wincast_unity_submit_frame,
+    WincastUnityPointerButton, WincastUnityRuntimeStatus, wincast_unity_create,
+    wincast_unity_get_status, wincast_unity_poll_input, wincast_unity_shutdown,
+    wincast_unity_start, wincast_unity_submit_frame,
 };
 
 #[test]
@@ -174,12 +175,16 @@ fn native_listener_sends_latest_submitted_frame_as_h264_encoded_video_frame() {
     assert_eq!(encoded.sequence_number, 1);
     assert_eq!(encoded.timestamp_ns, timestamp_ns);
     assert!(!encoded.bytes.is_empty());
+    let status = unsafe { wincast_unity_get_status(handle) };
+    assert_eq!(status.connected_client_count, 1);
+    assert_eq!(status.sent_frame_count, 1);
 
     write_message(&mut client, &ControlMessage::StopSession).expect("stop session should write");
     assert_eq!(
         read_message(&mut client).expect("goodbye should read"),
         ControlMessage::Goodbye
     );
+    wait_until_status(handle, |status| status.connected_client_count == 0);
     assert_eq!(unsafe { wincast_unity_shutdown(handle) }, 0);
 }
 
@@ -334,6 +339,20 @@ fn connect_with_retry(endpoint: &str) -> TcpStream {
             }
             Err(error) => panic!("client should connect to native listener: {error}"),
         }
+    }
+}
+
+fn wait_until_status(handle: u64, predicate: impl Fn(WincastUnityRuntimeStatus) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let status = unsafe { wincast_unity_get_status(handle) };
+        if predicate(status) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("native runtime status did not reach expected state: {status:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

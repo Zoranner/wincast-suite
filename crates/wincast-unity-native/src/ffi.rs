@@ -6,8 +6,8 @@ use crate::error::{UnityNativeError, clear_last_error, set_last_error, write_las
 use crate::frame::WincastUnityFrameFormat;
 use crate::input::WincastUnityInputEvent;
 use crate::runtime::{
-    WincastUnityStatus, create_runtime, get_status, poll_input, shutdown_runtime, start_runtime,
-    submit_frame,
+    WincastUnityRuntimeStatus, create_runtime, get_status, poll_input, shutdown_runtime,
+    start_runtime, submit_frame,
 };
 
 const SUCCESS: c_int = 0;
@@ -123,8 +123,8 @@ pub unsafe extern "C" fn wincast_unity_poll_input(
 /// # Safety
 ///
 /// `handle` may be any integer value. Unknown handles return
-/// `WincastUnityStatus::Invalid`.
-pub unsafe extern "C" fn wincast_unity_get_status(handle: u64) -> WincastUnityStatus {
+/// an invalid state.
+pub unsafe extern "C" fn wincast_unity_get_status(handle: u64) -> WincastUnityRuntimeStatus {
     get_status(handle)
 }
 

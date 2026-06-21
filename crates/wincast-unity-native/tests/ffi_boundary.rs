@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::mem;
+use std::net::TcpStream;
 use std::ptr;
 
 use serial_test::serial;
@@ -38,6 +39,39 @@ fn valid_config() -> CString {
     .unwrap()
 }
 
+fn config_with_endpoint(endpoint: &str) -> CString {
+    CString::new(format!(
+        r#"{{
+            "listen_addr": "{endpoint}",
+            "width": 1280,
+            "height": 720,
+            "fps": 30
+        }}"#
+    ))
+    .unwrap()
+}
+
+fn reserve_loopback_endpoint() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    endpoint
+}
+
+fn connect_with_retry(endpoint: &str) -> TcpStream {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match TcpStream::connect(endpoint) {
+            Ok(stream) => return stream,
+            Err(error) if std::time::Instant::now() < deadline => {
+                let _ = error;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("client should connect to native listener: {error}"),
+        }
+    }
+}
+
 #[test]
 #[serial]
 fn invalid_config_json_create_fails_and_exposes_last_error() {
@@ -59,19 +93,133 @@ fn valid_config_create_start_status_and_shutdown() {
 
     assert_ne!(handle, 0);
     assert_eq!(
-        unsafe { wincast_unity_get_status(handle) },
+        unsafe { wincast_unity_get_status(handle) }.state,
         WincastUnityStatus::Created
     );
     assert_eq!(unsafe { wincast_unity_start(handle) }, 0);
     assert_eq!(
-        unsafe { wincast_unity_get_status(handle) },
+        unsafe { wincast_unity_get_status(handle) }.state,
         WincastUnityStatus::Started
     );
     assert_eq!(unsafe { wincast_unity_shutdown(handle) }, 0);
     assert_eq!(
-        unsafe { wincast_unity_get_status(handle) },
-        WincastUnityStatus::Stopped
+        unsafe { wincast_unity_get_status(handle) }.state,
+        WincastUnityStatus::Invalid
     );
+}
+
+#[test]
+#[serial]
+fn shutdown_releases_runtime_handle() {
+    let config = valid_config();
+    let handle = unsafe { wincast_unity_create(config.as_ptr()) };
+    assert_ne!(handle, 0);
+
+    assert_eq!(unsafe { wincast_unity_shutdown(handle) }, 0);
+    assert_eq!(
+        unsafe { wincast_unity_get_status(handle) }.state,
+        WincastUnityStatus::Invalid
+    );
+    assert_eq!(unsafe { wincast_unity_start(handle) }, -1);
+    assert!(read_last_error(256).contains("runtime handle is invalid"));
+}
+
+#[test]
+#[serial]
+fn create_rejects_second_active_runtime_until_shutdown() {
+    let first_config = valid_config();
+    let first = unsafe { wincast_unity_create(first_config.as_ptr()) };
+    assert_ne!(first, 0);
+
+    let second_config = valid_config();
+    assert_eq!(unsafe { wincast_unity_create(second_config.as_ptr()) }, 0);
+    assert!(read_last_error(256).contains("active runtime already exists"));
+
+    assert_eq!(unsafe { wincast_unity_shutdown(first) }, 0);
+    let third_config = valid_config();
+    let third = unsafe { wincast_unity_create(third_config.as_ptr()) };
+    assert_ne!(third, 0);
+    assert_eq!(unsafe { wincast_unity_shutdown(third) }, 0);
+}
+
+#[test]
+#[serial]
+fn shutdown_keeps_runtime_active_until_listener_stops() {
+    let endpoint = reserve_loopback_endpoint();
+    let config = config_with_endpoint(&endpoint);
+    let handle = unsafe { wincast_unity_create(config.as_ptr()) };
+    assert_ne!(handle, 0);
+    assert_eq!(unsafe { wincast_unity_start(handle) }, 0);
+
+    let shutdown_thread = std::thread::spawn(move || unsafe { wincast_unity_shutdown(handle) });
+    let client = connect_with_retry(&endpoint);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let blocked_config = valid_config();
+    assert_eq!(unsafe { wincast_unity_create(blocked_config.as_ptr()) }, 0);
+    assert!(read_last_error(256).contains("active runtime already exists"));
+    drop(client);
+    assert_eq!(shutdown_thread.join().expect("shutdown should join"), 0);
+
+    let next_config = valid_config();
+    let next = unsafe { wincast_unity_create(next_config.as_ptr()) };
+    assert_ne!(next, 0);
+    assert_eq!(unsafe { wincast_unity_shutdown(next) }, 0);
+}
+
+#[test]
+#[serial]
+fn get_status_reports_runtime_counters() {
+    let config = valid_config();
+    let handle = unsafe { wincast_unity_create(config.as_ptr()) };
+    assert_ne!(handle, 0);
+
+    let created = unsafe { wincast_unity_get_status(handle) };
+    assert_eq!(created.state, WincastUnityStatus::Created);
+    assert_eq!(created.submitted_frame_count, 0);
+    assert_eq!(created.received_input_count, 0);
+
+    let frame = [7_u8; 16];
+    assert_eq!(
+        unsafe {
+            wincast_unity_submit_frame(
+                handle,
+                frame.as_ptr(),
+                2,
+                2,
+                8,
+                WincastUnityFrameFormat::Rgba8,
+                10,
+            )
+        },
+        0
+    );
+    inject_input_event_for_test(
+        handle,
+        WincastUnityInputEvent {
+            event_type: WincastUnityInputEventType::KeyDown,
+            pointer_id: 0,
+            x: 0.0,
+            y: 0.0,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            button: WincastUnityPointerButton::None,
+            key_code: 65,
+            unicode_scalar: 0,
+            timestamp_microseconds: 11,
+        },
+    )
+    .expect("input event should enqueue");
+
+    let status = unsafe { wincast_unity_get_status(handle) };
+    assert_eq!(status.state, WincastUnityStatus::Created);
+    assert_eq!(status.submitted_frame_count, 1);
+    assert_eq!(status.received_input_count, 1);
+    assert_eq!(status.connected_client_count, 0);
+    assert_eq!(status.sent_frame_count, 0);
+    assert_eq!(status.dropped_frame_count, 0);
+
+    assert_eq!(unsafe { wincast_unity_shutdown(handle) }, 0);
 }
 
 #[test]
@@ -92,7 +240,7 @@ fn config_accepts_bitrate_and_defaults_max_bitrate_for_json_compatibility() {
 
     assert_ne!(handle, 0);
     assert_eq!(
-        unsafe { wincast_unity_get_status(handle) },
+        unsafe { wincast_unity_get_status(handle) }.state,
         WincastUnityStatus::Created
     );
     assert_eq!(unsafe { wincast_unity_shutdown(handle) }, 0);

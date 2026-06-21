@@ -18,7 +18,11 @@ use crate::config::UnityNativeConfig;
 use crate::error::{UnityNativeError, UnityNativeResult};
 use crate::frame::{SubmittedFrame, WincastUnityFrameFormat};
 use crate::input::from_protocol_input;
-use crate::runtime::{push_input_for_session, runtime_snapshot_for_session};
+use crate::runtime::{
+    mark_client_connected_for_session, mark_client_disconnected_for_session,
+    push_input_for_session, record_dropped_frames_for_session, record_sent_frame_for_session,
+    runtime_snapshot_for_session,
+};
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_millis(100);
@@ -106,6 +110,10 @@ fn handle_client(
     if send_session_ready(&mut stream, config.width, config.height).is_err() {
         return;
     }
+    if mark_client_connected_for_session(handle).is_err() {
+        return;
+    }
+    let _connected_client = ConnectedClientGuard::new(handle);
     let Ok(mut encoder) = OpenH264Encoder::new(config.video_pipeline_config()) else {
         let _ = write_control_error(
             &mut stream,
@@ -197,9 +205,34 @@ fn write_latest_submitted_frame(
         raw_video_frame_from_submitted(&frame, snapshot.submitted_frame_count, bgra_buffer)?;
     if let Some(encoded) = encoder.encode(raw_frame)? {
         write_message(writer, &ControlMessage::EncodedVideoFrame(encoded))?;
+        let dropped_count = snapshot
+            .submitted_frame_count
+            .saturating_sub(*last_encoded_frame_count)
+            .saturating_sub(1);
+        if dropped_count > 0 {
+            record_dropped_frames_for_session(handle, dropped_count)?;
+        }
+        record_sent_frame_for_session(handle)?;
     }
     *last_encoded_frame_count = snapshot.submitted_frame_count;
     Ok(())
+}
+
+#[derive(Debug)]
+struct ConnectedClientGuard {
+    handle: u64,
+}
+
+impl ConnectedClientGuard {
+    fn new(handle: u64) -> Self {
+        Self { handle }
+    }
+}
+
+impl Drop for ConnectedClientGuard {
+    fn drop(&mut self) {
+        let _ = mark_client_disconnected_for_session(self.handle);
+    }
 }
 
 fn raw_video_frame_from_submitted<'a>(
@@ -305,7 +338,7 @@ mod tests {
 
     use crate::{
         frame::WincastUnityFrameFormat,
-        runtime::{create_runtime, submit_frame},
+        runtime::{create_runtime, get_status, shutdown_runtime, submit_frame},
     };
 
     use super::{FRAME_POLL_INTERVAL, write_latest_submitted_frame};
@@ -348,6 +381,7 @@ mod tests {
         assert_eq!(encoder.encoded_timestamps, [30]);
         assert_eq!(last_encoded_frame_count, 3);
         assert_encoded_sequence(&writer, 3, 30);
+        assert_eq!(get_status(handle).dropped_frame_count, 2);
 
         write_latest_submitted_frame(
             &mut writer,
@@ -359,6 +393,7 @@ mod tests {
         .expect("unchanged latest frame should not encode again");
 
         assert_eq!(encoder.encoded_sequences, [3]);
+        shutdown_runtime(handle).expect("runtime should shutdown");
     }
 
     #[test]

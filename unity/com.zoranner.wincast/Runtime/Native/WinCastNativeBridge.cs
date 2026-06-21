@@ -128,7 +128,16 @@ namespace Zoranner.WinCast.Native
             ThrowIfDisposed();
             ThrowIfNotCreated();
 
-            return new WinCastStatus { State = ToManagedState(wincast_unity_get_status(handle)) };
+            var nativeStatus = wincast_unity_get_status(handle);
+            return new WinCastStatus
+            {
+                State = ToManagedState(nativeStatus.State),
+                ConnectedClientCount = checked((int)nativeStatus.ConnectedClientCount),
+                SubmittedFrameCount = nativeStatus.SubmittedFrameCount,
+                DroppedFrameCount = nativeStatus.DroppedFrameCount,
+                SentFrameCount = nativeStatus.SentFrameCount,
+                ReceivedInputCount = nativeStatus.ReceivedInputCount,
+            };
         }
 
         public string GetLastError()
@@ -186,9 +195,13 @@ namespace Zoranner.WinCast.Native
 
         private static string BuildConfigJson(WinCastConfig config)
         {
+            var listenHost = string.IsNullOrWhiteSpace(config.ListenHost)
+                ? "0.0.0.0"
+                : config.ListenHost;
             return string.Format(
                 System.Globalization.CultureInfo.InvariantCulture,
-                "{{\"listen_addr\":\"127.0.0.1:{0}\",\"width\":{1},\"height\":{2},\"fps\":{3},\"bitrate_kbps\":{4}}}",
+                "{{\"listen_addr\":\"{0}:{1}\",\"width\":{2},\"height\":{3},\"fps\":{4},\"bitrate_kbps\":{5}}}",
+                EscapeJsonString(listenHost),
                 config.Port,
                 config.Width,
                 config.Height,
@@ -205,6 +218,11 @@ namespace Zoranner.WinCast.Native
                 WinCastFrameFormat.Bgra32 => WincastUnityFrameFormat.Bgra8,
                 _ => WincastUnityFrameFormat.Rgba8,
             };
+        }
+
+        private static string EscapeJsonString(string value)
+        {
+            return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
         private static WinCastRuntimeState ToManagedState(WincastUnityStatus status)
@@ -298,7 +316,7 @@ namespace Zoranner.WinCast.Native
         );
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern WincastUnityStatus wincast_unity_get_status(ulong handle);
+        private static extern WincastUnityRuntimeStatus wincast_unity_get_status(ulong handle);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         private static extern UIntPtr wincast_unity_get_last_error(
@@ -316,6 +334,17 @@ namespace Zoranner.WinCast.Native
             Started = 1,
             Stopped = 2,
             Failed = 3,
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WincastUnityRuntimeStatus
+        {
+            public WincastUnityStatus State;
+            public uint ConnectedClientCount;
+            public ulong SubmittedFrameCount;
+            public ulong DroppedFrameCount;
+            public ulong SentFrameCount;
+            public ulong ReceivedInputCount;
         }
 
         private enum WincastUnityFrameFormat : int

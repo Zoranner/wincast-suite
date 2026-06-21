@@ -2,7 +2,7 @@
 
 ## 复核口径
 
-本复核基于当前 `master` 工作树，只覆盖真机烟测前可以在本地确认的工程状态、文档状态和后续工作边界。Linux x86_64 与 Linux aarch64/ARM64 真机烟测暂不执行，必须等部署准备工作完成后再按 [稳定版真机烟测清单](smoke-test.md) 验证。
+本复核基于当前 `master` 工作树，只覆盖真机烟测前可以在本地确认的工程状态、文档状态和后续工作边界。Linux x86_64、Linux aarch64/ARM64 与 Unity Player 真机烟测暂不执行，必须等部署准备工作完成后再按 [稳定版真机烟测清单](smoke-test.md) 验证。
 
 ## 已收敛事项
 
@@ -22,11 +22,15 @@
 - Windows 侧启动配置程序时使用 Job Object 管理本次启动的进程树，会话清理时不再只覆盖直接子进程。
 - DXGI 输出选择已从固定 adapter 0/output 0 改为枚举 attached desktop 输出；当前稳定版检测到多个可用桌面输出时明确拒绝。
 - 协议公开面已删除旧的 `VideoReady` 和 `WindowNotFound`。
+- 文档已补充 Unity embedded 部署准备和烟测记录口径：Unity native DLL 需要放入 Unity 插件目录，Host 在该模式下只传 `--wincast-port <port>`，Linux client 连接 `[unity].port`。
+- 文档已明确 `desktop_dxgi` 原真机烟测清单仍适用于普通模式，Unity embedded 需要单独在真实 Unity Player 上验证。
 
 ## 当前仍未闭合
 
 - 未执行 Windows host 到 Linux x86_64 client 的真机端到端烟测。
 - Linux x86_64 与 Linux aarch64/ARM64 真机上的 SDL2 全屏窗口、加载页、OpenH264、渲染和输入回传仍未验证。
+- 未执行 Unity embedded 真机端到端烟测；Unity Player 启动、`wincast_unity_native.dll` 加载、最终 Game View 捕获、Unity 输入分发和 Linux client 连接 `[unity].port` 均不能写作已验证。
+- Unity embedded 的 Windows 防火墙规则仍需在现场按 `[unity].port` 开放，并限制到需要访问的 Linux client IP 或网段。
 - 锁屏、解锁后的完整自动恢复编排仍未完成，当前只能按文档口径处理为感知、拒绝、断开或后续重连尝试。
 - 打包和部署步骤需要先形成稳定产物、配置路径、防火墙和目标机依赖检查，再进入真机烟测。
 
@@ -40,3 +44,4 @@
 
 - 按部署准备文档准备 Windows host 与 Linux client 的实际产物、配置、依赖和防火墙前置项。
 - 等部署准备完成并具备目标机器后，按 `docs/smoke-test.md` 执行 Windows host、Linux x86_64 client 和 Linux ARM64 client 真机烟测。
+- 如果进入 Unity embedded 验证，先准备 Unity Player、Unity 插件目录中的 native DLL、Host `[unity]` 配置、Linux client 指向 `[unity].port` 的配置和端口防火墙规则，再单独记录 Unity Player 真机结果。

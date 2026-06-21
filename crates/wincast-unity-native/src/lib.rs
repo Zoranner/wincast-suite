@@ -13,4 +13,7 @@ pub use ffi::{
 };
 pub use frame::{FrameMetadata, RuntimeSnapshot, WincastUnityFrameFormat};
 pub use input::{WincastUnityInputEvent, WincastUnityInputEventType, WincastUnityPointerButton};
-pub use runtime::{WincastUnityStatus, inject_input_event_for_test, runtime_snapshot_for_test};
+pub use runtime::{
+    WincastUnityRuntimeStatus, WincastUnityStatus, inject_input_event_for_test,
+    runtime_snapshot_for_test,
+};

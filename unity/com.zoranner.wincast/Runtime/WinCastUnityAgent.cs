@@ -10,6 +10,9 @@ namespace Zoranner.WinCast
 {
     public sealed class WinCastUnityAgent : MonoBehaviour
     {
+        private const string DefaultListenHost = "0.0.0.0";
+        private static WinCastUnityAgent activeAgent;
+
         [SerializeField]
         private int port = 7856;
 
@@ -86,10 +89,18 @@ namespace Zoranner.WinCast
                 return;
             }
 
+            if (activeAgent != null && activeAgent != this)
+            {
+                throw new InvalidOperationException(
+                    "Only one active WinCastUnityAgent is allowed in a Unity Player."
+                );
+            }
+
             ApplyCommandLineOverrides();
 
             var config = new WinCastConfig
             {
+                ListenHost = DefaultListenHost,
                 Port = Math.Max(1, port),
                 Width = VideoSize.x,
                 Height = VideoSize.y,
@@ -101,6 +112,7 @@ namespace Zoranner.WinCast
             {
                 nativeBridge.Create(config);
                 nativeBridge.Start();
+                activeAgent = this;
 
                 remoteInputGateway = new RemoteInputGateway(
                     nativeBridge,
@@ -116,6 +128,10 @@ namespace Zoranner.WinCast
             {
                 finalFrameCapture.Stop();
                 TryShutdownNativeBridge();
+                if (activeAgent == this)
+                {
+                    activeAgent = null;
+                }
                 remoteInputGateway = null;
                 throw;
             }
@@ -129,6 +145,10 @@ namespace Zoranner.WinCast
             }
 
             started = false;
+            if (activeAgent == this)
+            {
+                activeAgent = null;
+            }
             finalFrameCapture.Stop();
             nativeBridge.Shutdown();
         }

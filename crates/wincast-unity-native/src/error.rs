@@ -28,6 +28,8 @@ pub(crate) enum UnityNativeError {
     InvalidHandle,
     #[error("runtime is stopped")]
     RuntimeStopped,
+    #[error("an active runtime already exists in this process")]
+    RuntimeAlreadyExists,
     #[error("frame_ptr pointer is null")]
     NullFrame,
     #[error("width must be greater than zero")]

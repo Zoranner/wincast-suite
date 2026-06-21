@@ -14,6 +14,8 @@ WinCast Unity 是 Unity 内嵌远控后端的 runtime package。它负责在 Uni
 
 `WinCastUnityAgent` 保留 Inspector 默认配置，同时只支持 Host 通过启动参数覆盖端口：`--wincast-port`。`--wincast-port value` 和 `--wincast-port=value` 两种形式都可解析。画面尺寸、目标帧率和码率均由 Unity 组件或项目配置决定，Host 不通过启动参数覆盖。Unity package 按单实例 Player 接入，native config 内部使用固定 runtime 标识，不暴露为 Inspector 或 Host 配置。
 
+native runtime 默认监听 `0.0.0.0:<port>`，让 Linux client 可以直接连接 Unity Player 的远控端口。部署时需要在 Windows 防火墙中放通该端口，并按现场网络边界限制来源 IP 或网段。
+
 `FinalFrameCapture` 使用 `WaitForEndOfFrame`、`ScreenCapture.CaptureScreenshotIntoRenderTexture` 和 `AsyncGPUReadback` 表达最终 Game View 捕获路径。这个路径用于覆盖以 Screen Space Overlay 为主的 UI，而不是抓取单个 Camera。
 
 `RemoteInputGateway` 在 `Update` 中轮询 native 输入队列，并把事件分发给 `UiEventDispatcher` 和 `RemoteInputAdapter`。UI 事件通过 Unity `EventSystem` 处理，业务场景操作通过可替换的 adapter 扩展。
