@@ -1,12 +1,17 @@
+using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.UI;
 using Zoranner.WinCast.Native;
 
 namespace Zoranner.WinCast.Input
 {
     public sealed class UiEventDispatcher
     {
+        private const BindingFlags PublicInstance = BindingFlags.Public | BindingFlags.Instance;
+
         private readonly List<RaycastResult> raycastResults = new();
         private GameObject currentPointerTarget;
         private GameObject currentPressTarget;
@@ -38,6 +43,8 @@ namespace Zoranner.WinCast.Input
                     return DispatchPointerUp(inputEvent, videoSize);
                 case WinCastInputEventType.PointerScroll:
                     return DispatchPointerScroll(inputEvent, videoSize);
+                case WinCastInputEventType.Text:
+                    return DispatchText(inputEvent);
                 default:
                     return false;
             }
@@ -225,6 +232,112 @@ namespace Zoranner.WinCast.Input
             return handled != null;
         }
 
+        private bool DispatchText(WinCastInputEvent inputEvent)
+        {
+            var text = ToText(inputEvent.UnicodeScalar);
+            if (string.IsNullOrEmpty(text))
+            {
+                return false;
+            }
+
+            var target = EventSystem.currentSelectedGameObject;
+            if (target == null)
+            {
+                return false;
+            }
+
+            return TryDispatchUnityInputField(target, text)
+                || TryDispatchTmpInputField(target, text);
+        }
+
+        private static bool TryDispatchUnityInputField(GameObject target, string text)
+        {
+            var inputField = target.GetComponentInParent<InputField>();
+            if (inputField == null || !inputField.isActiveAndEnabled || !inputField.interactable)
+            {
+                return false;
+            }
+
+            var currentText = inputField.text ?? string.Empty;
+            var selectionStart = Mathf.Clamp(
+                Math.Min(inputField.selectionAnchorPosition, inputField.selectionFocusPosition),
+                0,
+                currentText.Length
+            );
+            var selectionEnd = Mathf.Clamp(
+                Math.Max(inputField.selectionAnchorPosition, inputField.selectionFocusPosition),
+                0,
+                currentText.Length
+            );
+            var caretPosition = selectionStart + text.Length;
+
+            inputField.text = currentText
+                .Remove(selectionStart, selectionEnd - selectionStart)
+                .Insert(selectionStart, text);
+            inputField.caretPosition = caretPosition;
+            inputField.selectionAnchorPosition = caretPosition;
+            inputField.selectionFocusPosition = caretPosition;
+            inputField.ForceLabelUpdate();
+            return true;
+        }
+
+        private static bool TryDispatchTmpInputField(GameObject target, string text)
+        {
+            var inputField = FindTmpInputField(target);
+            if (inputField == null)
+            {
+                return false;
+            }
+
+            var type = inputField.GetType();
+            if (
+                !GetBoolProperty(type, inputField, "isActiveAndEnabled", true)
+                || !GetBoolProperty(type, inputField, "interactable", true)
+            )
+            {
+                return false;
+            }
+
+            var currentText = GetStringProperty(type, inputField, "text");
+            if (currentText == null)
+            {
+                return false;
+            }
+
+            var fallbackCaret = GetIntProperty(type, inputField, "caretPosition", 0);
+            var selectionStart = Mathf.Clamp(
+                Math.Min(
+                    GetIntProperty(type, inputField, "selectionAnchorPosition", fallbackCaret),
+                    GetIntProperty(type, inputField, "selectionFocusPosition", fallbackCaret)
+                ),
+                0,
+                currentText.Length
+            );
+            var selectionEnd = Mathf.Clamp(
+                Math.Max(
+                    GetIntProperty(type, inputField, "selectionAnchorPosition", fallbackCaret),
+                    GetIntProperty(type, inputField, "selectionFocusPosition", fallbackCaret)
+                ),
+                0,
+                currentText.Length
+            );
+            var caretPosition = selectionStart + text.Length;
+            var nextText = currentText
+                .Remove(selectionStart, selectionEnd - selectionStart)
+                .Insert(selectionStart, text);
+
+            if (!SetStringProperty(type, inputField, "text", nextText))
+            {
+                return false;
+            }
+
+            SetIntProperty(type, inputField, "caretPosition", caretPosition);
+            SetIntProperty(type, inputField, "selectionAnchorPosition", caretPosition);
+            SetIntProperty(type, inputField, "selectionFocusPosition", caretPosition);
+            InvokePublicMethod(type, inputField, "ForceLabelUpdate");
+            return true;
+        }
+
         private PointerEventData CreatePointerEventData(
             WinCastInputEvent inputEvent,
             Vector2Int videoSize
@@ -277,6 +390,99 @@ namespace Zoranner.WinCast.Input
             var x = inputEvent.DeltaX / width * Screen.width;
             var y = -inputEvent.DeltaY / height * Screen.height;
             return new Vector2(x, y);
+        }
+
+        private static string ToText(uint unicodeScalar)
+        {
+            if (unicodeScalar == 0 || unicodeScalar > 0x10FFFF)
+            {
+                return string.Empty;
+            }
+
+            if (unicodeScalar >= 0xD800 && unicodeScalar <= 0xDFFF)
+            {
+                return string.Empty;
+            }
+
+            return char.ConvertFromUtf32((int)unicodeScalar);
+        }
+
+        private static Component FindTmpInputField(GameObject target)
+        {
+            var behaviours = target.GetComponentsInParent<MonoBehaviour>(true);
+            for (var index = 0; index < behaviours.Length; index += 1)
+            {
+                var behaviour = behaviours[index];
+                if (behaviour != null && behaviour.GetType().FullName == "TMPro.TMP_InputField")
+                {
+                    return behaviour;
+                }
+            }
+
+            return null;
+        }
+
+        private static string GetStringProperty(Type type, object instance, string propertyName)
+        {
+            return type.GetProperty(propertyName, PublicInstance)?.GetValue(instance) as string;
+        }
+
+        private static bool GetBoolProperty(
+            Type type,
+            object instance,
+            string propertyName,
+            bool defaultValue
+        )
+        {
+            var value = type.GetProperty(propertyName, PublicInstance)?.GetValue(instance);
+            return value is bool result ? result : defaultValue;
+        }
+
+        private static int GetIntProperty(
+            Type type,
+            object instance,
+            string propertyName,
+            int defaultValue
+        )
+        {
+            var value = type.GetProperty(propertyName, PublicInstance)?.GetValue(instance);
+            return value is int result ? result : defaultValue;
+        }
+
+        private static bool SetStringProperty(
+            Type type,
+            object instance,
+            string propertyName,
+            string value
+        )
+        {
+            var property = type.GetProperty(propertyName, PublicInstance);
+            if (property == null || !property.CanWrite)
+            {
+                return false;
+            }
+
+            property.SetValue(instance, value);
+            return true;
+        }
+
+        private static void SetIntProperty(
+            Type type,
+            object instance,
+            string propertyName,
+            int value
+        )
+        {
+            var property = type.GetProperty(propertyName, PublicInstance);
+            if (property != null && property.CanWrite)
+            {
+                property.SetValue(instance, value);
+            }
+        }
+
+        private static void InvokePublicMethod(Type type, object instance, string methodName)
+        {
+            type.GetMethod(methodName, PublicInstance)?.Invoke(instance, Array.Empty<object>());
         }
 
         private static PointerEventData.InputButton ToInputButton(WinCastPointerButton button)

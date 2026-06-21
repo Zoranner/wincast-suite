@@ -2,8 +2,14 @@
   "name": "com.zoranner.wincast",
   "version": "0.1.0",
   "displayName": "WinCast Unity",
-  "description": "Unity package skeleton for embedded WinCast final-frame streaming and remote input dispatch.",
+  "description": "Unity runtime package for embedded WinCast final-frame streaming and remote input dispatch.",
   "unity": "2021.3",
+  "keywords": [
+    "streaming",
+    "remote-input",
+    "unity"
+  ],
+  "license": "UNLICENSED",
   "author": {
     "name": "Zoranner"
   }

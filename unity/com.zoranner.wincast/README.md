@@ -1,6 +1,6 @@
 # WinCast Unity
 
-WinCast Unity 是 Unity 内嵌远控后端的 package 骨架。它负责在 Unity 进程内采集最终画面、把画面提交给 Rust native 库，并在 Unity 主线程轮询远端输入事件后分发给 UI 和业务控制层。
+WinCast Unity 是 Unity 内嵌远控后端的 runtime package。它负责在 Unity 进程内采集最终画面、把画面提交给 Rust native 库，并在 Unity 主线程轮询远端输入事件后分发给 UI 和业务控制层。
 
 ## 边界
 
@@ -18,15 +18,26 @@ WinCast Unity 是 Unity 内嵌远控后端的 package 骨架。它负责在 Unit
 
 `RemoteInputGateway` 在 `Update` 中轮询 native 输入队列，并把事件分发给 `UiEventDispatcher` 和 `RemoteInputAdapter`。UI 事件通过 Unity `EventSystem` 处理，业务场景操作通过可替换的 adapter 扩展。
 
-## 当前状态
+## 已完成开发项
 
-当前 package 是工程骨架，不包含 Rust native DLL、Unity `.meta` 文件或 Unity Editor 内验证结果。入口启动参数解析和输入分发已经具备源码层结构：native 输入队列轮询、pointer move/down/up/scroll 的基础 EventSystem 分发，以及未被 UI 消费时转交 `RemoteInputAdapter` 的扩展点；这些还没有经过 Unity 运行验证。接入时需要把 native DLL 放到 Unity 项目的插件目录，并继续完成 Unity Player 真机验证、端到端客户端验收、会话生命周期完善、单实例稳定性和 UI 输入验收。
+当前 package 已补齐 Runtime assembly definition，Unity 项目可以按 `Zoranner.WinCast` assembly 引用 runtime 源码。
 
-## 未完成项
+源码层已具备以下结构：
 
-- Unity Player 真机验证。
+- native 输入队列轮询。
+- pointer move/down/up/scroll 的基础 EventSystem 分发。
+- Text 事件优先尝试写入当前选中的 Unity `InputField`。
+- TextMeshPro `TMP_InputField` 按反射可选支持，不让 package 强依赖 TMP assembly。
+- 未被 UI 消费的输入事件转交 `RemoteInputAdapter` 扩展点。
+- Host 启动参数只识别 `--wincast-port`。
+
+## 仍需验收项
+
+- Unity Player 真机验证，包含最终 Game View 捕获路径、native DLL 加载和主线程轮询行为。
 - 端到端客户端验收。
 - 会话生命周期完善。
 - 单实例稳定性和 UI 输入验收。
+
+当前仓库不包含 Rust native DLL、Unity `.meta` 文件或 Unity Editor 内验证结果。接入时需要把 native DLL 放到 Unity 项目的插件目录，再进行 Player 运行验证。
 
 第一阶段不通过 Host、启动参数或 native config 处理鉴权，也不要求 Unity package 配置 token。后续如需要鉴权能力，应按单实例会话生命周期单独设计授权边界。
