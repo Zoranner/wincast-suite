@@ -259,7 +259,7 @@ fn host_cleans_started_program_when_monitor_power_off_fails() {
     let mut client = TcpStream::connect(endpoint).expect("client should connect");
     let (mut server, _) = tcp_pair.accept().expect("server should accept");
     let mut config = host_config("127.0.0.1:0".to_owned());
-    config.program.turn_off_monitor_after_launch = MonitorPowerAfterLaunch::DdcCiPowerOff;
+    config.program.turn_off_monitor_after_launch = MonitorPowerAfterLaunch::DdcCiDim;
     let mut runner = RecordingProgramRunner::default();
     let mut capture = RecordingCaptureStarter::default();
     let mut session_gate = FixedSessionGate(RemoteSessionStatus::Allowed);
@@ -295,8 +295,51 @@ fn host_cleans_started_program_when_monitor_power_off_fails() {
     assert_eq!(runner.cleaned, vec![42]);
     assert_eq!(
         monitor_power.policies,
-        vec![MonitorPowerAfterLaunch::DdcCiPowerOff]
+        vec![MonitorPowerAfterLaunch::DdcCiDim]
     );
+    assert!(capture.targets.is_empty());
+}
+
+#[test]
+fn host_rejects_real_monitor_power_off_without_calling_controller() {
+    let tcp_pair = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let endpoint = tcp_pair
+        .local_addr()
+        .expect("listener addr should be available");
+    let mut client = TcpStream::connect(endpoint).expect("client should connect");
+    let (mut server, _) = tcp_pair.accept().expect("server should accept");
+    let mut config = host_config("127.0.0.1:0".to_owned());
+    config.program.turn_off_monitor_after_launch = MonitorPowerAfterLaunch::WindowsPowerMessage;
+    let mut runner = RecordingProgramRunner::default();
+    let mut capture = RecordingCaptureStarter::default();
+    let mut session_gate = FixedSessionGate(RemoteSessionStatus::Allowed);
+    let mut monitor_power = RecordingMonitorPowerController::default();
+    let host = thread::spawn(move || {
+        let result = handle_control_client_with_runtime(
+            &mut server,
+            &config,
+            &mut runner,
+            &mut capture,
+            &mut session_gate,
+            &mut monitor_power,
+        );
+        (result, runner, capture, monitor_power)
+    });
+
+    send_client_hello(&mut client).expect("client hello should write");
+    assert_eq!(
+        read_message(&mut client).expect("host hello should read"),
+        ControlMessage::Hello { version: 1 }
+    );
+    write_message(&mut client, &ControlMessage::StartSession).expect("start session should write");
+
+    let (result, runner, capture, monitor_power) = host.join().expect("host thread should finish");
+    let error = result.expect_err("real monitor power-off should fail session startup");
+
+    assert!(error.contains("真正关闭显示器会破坏 DXGI Desktop Duplication 画面捕获"));
+    assert_eq!(runner.launched.len(), 1);
+    assert_eq!(runner.cleaned, vec![42]);
+    assert!(monitor_power.policies.is_empty());
     assert!(capture.targets.is_empty());
 }
 

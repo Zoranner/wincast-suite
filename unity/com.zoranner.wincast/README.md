@@ -1,0 +1,32 @@
+# WinCast Unity
+
+WinCast Unity 是 Unity 内嵌远控后端的 package 骨架。它负责在 Unity 进程内采集最终画面、把画面提交给 Rust native 库，并在 Unity 主线程轮询远端输入事件后分发给 UI 和业务控制层。
+
+## 边界
+
+- Unity package 负责最终帧采集、readback 调度、native bridge 调用和输入分发。
+- Rust native 库负责网络、协议、编码、帧队列和输入事件队列。
+- Host 进程负责读取配置、拉起一个 Unity Player、传入固定端口和前台监控进程生命周期。
+
+## 运行结构
+
+`WinCastUnityAgent` 是入口组件，挂到 Unity 场景中的一个 GameObject 上。它持有 `FinalFrameCapture`、`WinCastNativeBridge` 和 `RemoteInputGateway`，并在生命周期内启动、提交画面、轮询输入和关闭 native runtime。
+
+`WinCastUnityAgent` 保留 Inspector 默认配置，同时只支持 Host 通过启动参数覆盖端口：`--wincast-port`。`--wincast-port value` 和 `--wincast-port=value` 两种形式都可解析。画面尺寸、目标帧率和码率均由 Unity 组件或项目配置决定，Host 不通过启动参数覆盖。Unity package 按单实例 Player 接入，native config 内部使用固定 runtime 标识，不暴露为 Inspector 或 Host 配置。
+
+`FinalFrameCapture` 使用 `WaitForEndOfFrame`、`ScreenCapture.CaptureScreenshotIntoRenderTexture` 和 `AsyncGPUReadback` 表达最终 Game View 捕获路径。这个路径用于覆盖以 Screen Space Overlay 为主的 UI，而不是抓取单个 Camera。
+
+`RemoteInputGateway` 在 `Update` 中轮询 native 输入队列，并把事件分发给 `UiEventDispatcher` 和 `RemoteInputAdapter`。UI 事件通过 Unity `EventSystem` 处理，业务场景操作通过可替换的 adapter 扩展。
+
+## 当前状态
+
+当前 package 是工程骨架，不包含 Rust native DLL、Unity `.meta` 文件或 Unity Editor 内验证结果。入口启动参数解析和输入分发已经具备源码层结构：native 输入队列轮询、pointer move/down/up/scroll 的基础 EventSystem 分发，以及未被 UI 消费时转交 `RemoteInputAdapter` 的扩展点；这些还没有经过 Unity 运行验证。接入时需要把 native DLL 放到 Unity 项目的插件目录，并继续完成 Unity Player 真机验证、端到端客户端验收、会话生命周期完善、单实例稳定性和 UI 输入验收。
+
+## 未完成项
+
+- Unity Player 真机验证。
+- 端到端客户端验收。
+- 会话生命周期完善。
+- 单实例稳定性和 UI 输入验收。
+
+第一阶段不通过 Host、启动参数或 native config 处理鉴权，也不要求 Unity package 配置 token。后续如需要鉴权能力，应按单实例会话生命周期单独设计授权边界。

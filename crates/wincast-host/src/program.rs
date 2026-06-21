@@ -30,7 +30,14 @@ pub(crate) struct LaunchRequest {
 
 impl LaunchRequest {
     pub(crate) fn from_config(config: &HostConfig) -> Self {
-        Self::from_program_config(&config.program)
+        match config.mode {
+            wincast_protocol::config::HostBackendMode::DesktopDxgi => {
+                Self::from_program_config(&config.program)
+            }
+            wincast_protocol::config::HostBackendMode::UnityEmbedded => {
+                Self::from_unity_config(config)
+            }
+        }
     }
 
     fn from_program_config(config: &ProgramConfig) -> Self {
@@ -40,6 +47,22 @@ impl LaunchRequest {
             work_dir: PathBuf::from(&config.work_dir),
         }
     }
+
+    fn from_unity_config(config: &HostConfig) -> Self {
+        let unity = config
+            .unity
+            .as_ref()
+            .expect("validated unity_embedded host config should include unity section");
+        Self {
+            program: PathBuf::from(&unity.executable),
+            args: unity_launch_args(unity.port),
+            work_dir: PathBuf::from(&unity.work_dir),
+        }
+    }
+}
+
+fn unity_launch_args(port: u16) -> Vec<String> {
+    vec!["--wincast-port".to_owned(), port.to_string()]
 }
 
 pub(crate) struct StartedProgram {
@@ -307,7 +330,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use wincast_protocol::config::{
-        CaptureConfig, HostConfig, MonitorPowerAfterLaunch, ProgramConfig, VideoCodec, VideoConfig,
+        CaptureConfig, HostBackendMode, HostConfig, MonitorPowerAfterLaunch, ProgramConfig,
+        UnityConfig, VideoCodec, VideoConfig,
     };
 
     #[test]
@@ -339,6 +363,26 @@ mod tests {
                 work_dir: PathBuf::from("C:\\Tools\\Demo App"),
             }
         );
+    }
+
+    #[test]
+    fn unity_embedded_launch_request_uses_unity_executable_and_wincast_args() {
+        let mut config = host_config();
+        config.mode = HostBackendMode::UnityEmbedded;
+        config.unity = Some(UnityConfig {
+            executable: "C:\\UnityApps\\Demo\\Demo.exe".to_owned(),
+            work_dir: "C:\\UnityApps\\Demo".to_owned(),
+            port: 7900,
+        });
+
+        let request = LaunchRequest::from_config(&config);
+
+        assert_eq!(
+            request.program,
+            PathBuf::from("C:\\UnityApps\\Demo\\Demo.exe")
+        );
+        assert_eq!(request.work_dir, PathBuf::from("C:\\UnityApps\\Demo"));
+        assert_eq!(request.args, ["--wincast-port", "7900"]);
     }
 
     #[test]
@@ -377,6 +421,7 @@ mod tests {
     fn host_config() -> HostConfig {
         HostConfig {
             listen: "127.0.0.1:7856".to_owned(),
+            mode: HostBackendMode::DesktopDxgi,
             program: ProgramConfig {
                 path: "C:\\Tools\\Demo App\\demo.exe".to_owned(),
                 args: vec!["--profile".to_owned(), "default".to_owned()],
@@ -384,6 +429,7 @@ mod tests {
                 startup_delay_ms: 3000,
                 turn_off_monitor_after_launch: MonitorPowerAfterLaunch::DdcCiDim,
             },
+            unity: None,
             video: VideoConfig {
                 width: 1280,
                 height: 720,

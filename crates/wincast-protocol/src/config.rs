@@ -20,7 +20,11 @@ pub enum ConfigError {
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
     pub listen: String,
+    #[serde(default)]
+    pub mode: HostBackendMode,
     pub program: ProgramConfig,
+    #[serde(default)]
+    pub unity: Option<UnityConfig>,
     pub video: VideoConfig,
     pub capture: CaptureConfig,
 }
@@ -43,10 +47,20 @@ impl HostConfig {
             })?;
 
         self.program.validate()?;
+        validate_unity_config(self.mode, self.unity.as_ref())?;
         self.video.validate()?;
         self.capture.validate()?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HostBackendMode {
+    #[default]
+    #[serde(rename = "desktop_dxgi")]
+    DesktopDxgi,
+    #[serde(rename = "unity_embedded")]
+    UnityEmbedded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,9 +88,50 @@ impl ProgramConfig {
             return Err(ConfigError::MissingField("program.work_dir"));
         }
 
+        if self
+            .turn_off_monitor_after_launch
+            .breaks_desktop_duplication()
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "program.turn_off_monitor_after_launch",
+                reason: REAL_MONITOR_POWER_OFF_REJECTION_REASON,
+            });
+        }
+
         Ok(())
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnityConfig {
+    pub executable: String,
+    pub work_dir: String,
+    pub port: u16,
+}
+
+impl UnityConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        validate_required("unity.executable", &self.executable)?;
+        validate_required("unity.work_dir", &self.work_dir)?;
+        validate_non_zero_u16("unity.port", self.port)
+    }
+}
+
+fn validate_unity_config(
+    mode: HostBackendMode,
+    unity: Option<&UnityConfig>,
+) -> Result<(), ConfigError> {
+    match (mode, unity) {
+        (HostBackendMode::DesktopDxgi, None) => Ok(()),
+        (HostBackendMode::DesktopDxgi, Some(config)) => config.validate(),
+        (HostBackendMode::UnityEmbedded, Some(config)) => config.validate(),
+        (HostBackendMode::UnityEmbedded, None) => Err(ConfigError::MissingField("unity")),
+    }
+}
+
+pub const REAL_MONITOR_POWER_OFF_REJECTION_REASON: &str =
+    "真正关闭显示器会破坏 DXGI Desktop Duplication 画面捕获；请使用 disabled 或 ddc_ci_dim";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MonitorPowerAfterLaunch {
@@ -89,6 +144,15 @@ pub enum MonitorPowerAfterLaunch {
     DdcCiPowerOff,
     #[serde(rename = "ddc_ci_dim")]
     DdcCiDim,
+}
+
+impl MonitorPowerAfterLaunch {
+    pub fn breaks_desktop_duplication(self) -> bool {
+        matches!(
+            self,
+            MonitorPowerAfterLaunch::WindowsPowerMessage | MonitorPowerAfterLaunch::DdcCiPowerOff
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

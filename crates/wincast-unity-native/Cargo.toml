@@ -1,0 +1,19 @@
+[package]
+name = "wincast-unity-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+wincast-media.workspace = true
+wincast-protocol.workspace = true
+
+[dev-dependencies]
+serial_test = "3.2.0"

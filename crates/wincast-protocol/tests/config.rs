@@ -1,5 +1,5 @@
 use wincast_protocol::config::{
-    ClientConfig, ConfigError, HostConfig, MonitorPowerAfterLaunch, VideoCodec,
+    ClientConfig, ConfigError, HostBackendMode, HostConfig, MonitorPowerAfterLaunch, VideoCodec,
 };
 
 fn example_config(name: &str) -> String {
@@ -68,6 +68,7 @@ first_frame_timeout_ms = 5000
     .expect("host config should parse");
 
     assert_eq!(config.listen, "0.0.0.0:7856");
+    assert_eq!(config.mode, HostBackendMode::DesktopDxgi);
     assert_eq!(config.program.path, "C:\\Program Files\\SomeApp\\app.exe");
     assert_eq!(config.program.args, ["--demo"]);
     assert_eq!(config.program.work_dir, "C:\\Program Files\\SomeApp");
@@ -79,6 +80,154 @@ first_frame_timeout_ms = 5000
     assert_eq!(config.video.width, 1280);
     assert_eq!(config.video.codec, VideoCodec::H264);
     assert_eq!(config.capture.first_frame_timeout_ms, 5000);
+}
+
+#[test]
+fn parses_unity_embedded_host_config() {
+    let config = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+mode = "unity_embedded"
+
+[program]
+path = 'C:\Program Files\SomeUnityApp\UnityApp.exe'
+args = ["--profile", "demo"]
+work_dir = 'C:\Program Files\SomeUnityApp'
+startup_delay_ms = 0
+
+[unity]
+executable = 'C:\Program Files\SomeUnityApp\UnityApp.exe'
+work_dir = 'C:\Program Files\SomeUnityApp'
+port = 7900
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+first_frame_timeout_ms = 5000
+"#,
+    )
+    .expect("unity embedded host config should parse");
+
+    assert_eq!(config.mode, HostBackendMode::UnityEmbedded);
+    let unity = config
+        .unity
+        .expect("unity config should be present for embedded backend");
+    assert_eq!(
+        unity.executable,
+        "C:\\Program Files\\SomeUnityApp\\UnityApp.exe"
+    );
+    assert_eq!(unity.port, 7900);
+}
+
+#[test]
+fn rejects_unity_embedded_host_config_without_unity_section() {
+    let error = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+mode = "unity_embedded"
+
+[program]
+path = 'C:\Program Files\SomeUnityApp\UnityApp.exe'
+work_dir = 'C:\Program Files\SomeUnityApp'
+startup_delay_ms = 0
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+first_frame_timeout_ms = 5000
+"#,
+    )
+    .expect_err("unity embedded mode should require unity section");
+
+    assert_eq!(error, ConfigError::MissingField("unity"));
+}
+
+#[test]
+fn rejects_unity_embedded_host_config_with_zero_port() {
+    let error = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+mode = "unity_embedded"
+
+[program]
+path = 'C:\Program Files\SomeUnityApp\UnityApp.exe'
+work_dir = 'C:\Program Files\SomeUnityApp'
+startup_delay_ms = 0
+
+[unity]
+executable = 'C:\Program Files\SomeUnityApp\UnityApp.exe'
+work_dir = 'C:\Program Files\SomeUnityApp'
+port = 0
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+first_frame_timeout_ms = 5000
+"#,
+    )
+    .expect_err("unity port should be validated");
+
+    assert_eq!(
+        error,
+        ConfigError::InvalidValue {
+            field: "unity.port",
+            reason: "必须大于 0",
+        }
+    );
+}
+
+#[test]
+fn rejects_legacy_unity_embedded_host_config_with_port_range() {
+    let error = HostConfig::from_toml_str(
+        r#"
+listen = "0.0.0.0:7856"
+mode = "unity_embedded"
+
+[program]
+path = 'C:\Program Files\SomeUnityApp\UnityApp.exe'
+work_dir = 'C:\Program Files\SomeUnityApp'
+startup_delay_ms = 0
+
+[unity]
+executable = 'C:\Program Files\SomeUnityApp\UnityApp.exe'
+work_dir = 'C:\Program Files\SomeUnityApp'
+instance_port_start = 7900
+instance_port_end = 7999
+max_instances = 4
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 6000
+
+[capture]
+first_frame_timeout_ms = 5000
+"#,
+    )
+    .expect_err("legacy unity port range should be rejected");
+
+    assert!(matches!(error, ConfigError::InvalidToml(_)));
 }
 
 #[test]
@@ -110,6 +259,78 @@ first_frame_timeout_ms = 5000
     assert_eq!(
         config.program.turn_off_monitor_after_launch,
         MonitorPowerAfterLaunch::DdcCiDim
+    );
+}
+
+#[test]
+fn rejects_windows_power_message_monitor_power_strategy() {
+    let source = r#"
+listen = "127.0.0.1:47011"
+
+[program]
+path = "C:\\Windows\\System32\\notepad.exe"
+args = []
+work_dir = "C:\\Windows\\System32"
+startup_delay_ms = 100
+turn_off_monitor_after_launch = "windows_power_message"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 8000
+
+[capture]
+first_frame_timeout_ms = 1000
+"#;
+
+    let error = HostConfig::from_toml_str(source)
+        .expect_err("Windows monitor power message should be rejected");
+
+    assert_eq!(
+        error,
+        ConfigError::InvalidValue {
+            field: "program.turn_off_monitor_after_launch",
+            reason: "真正关闭显示器会破坏 DXGI Desktop Duplication 画面捕获；请使用 disabled 或 ddc_ci_dim",
+        }
+    );
+}
+
+#[test]
+fn rejects_ddc_ci_power_off_monitor_power_strategy() {
+    let source = r#"
+listen = "127.0.0.1:47011"
+
+[program]
+path = "C:\\Windows\\System32\\notepad.exe"
+args = []
+work_dir = "C:\\Windows\\System32"
+startup_delay_ms = 100
+turn_off_monitor_after_launch = "ddc_ci_power_off"
+
+[video]
+width = 1280
+height = 720
+fps = 30
+codec = "h264"
+bitrate_kbps = 4000
+max_bitrate_kbps = 8000
+
+[capture]
+first_frame_timeout_ms = 1000
+"#;
+
+    let error =
+        HostConfig::from_toml_str(source).expect_err("DDC/CI monitor power off should be rejected");
+
+    assert_eq!(
+        error,
+        ConfigError::InvalidValue {
+            field: "program.turn_off_monitor_after_launch",
+            reason: "真正关闭显示器会破坏 DXGI Desktop Duplication 画面捕获；请使用 disabled 或 ddc_ci_dim",
+        }
     );
 }
 

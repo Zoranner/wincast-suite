@@ -14,7 +14,9 @@ use crate::{
 };
 use wincast_media::{VideoLatencyMode, VideoPipelineConfig};
 use wincast_protocol::{
-    config::{HostConfig, MonitorPowerAfterLaunch, VideoCodec},
+    config::{
+        HostConfig, MonitorPowerAfterLaunch, REAL_MONITOR_POWER_OFF_REJECTION_REASON, VideoCodec,
+    },
     frame::{FrameError, read_message},
     handshake::accept_client_hello,
     message::{ControlMessage, ErrorCode},
@@ -135,6 +137,11 @@ fn apply_turn_off_monitor_after_launch(
     let policy = config.program.turn_off_monitor_after_launch;
     if policy == MonitorPowerAfterLaunch::Disabled {
         return Ok(());
+    }
+    if policy.breaks_desktop_duplication() {
+        return Err(crate::monitor_power::monitor_power_error(
+            REAL_MONITOR_POWER_OFF_REJECTION_REASON,
+        ));
     }
 
     monitor_power.apply_after_launch(policy)

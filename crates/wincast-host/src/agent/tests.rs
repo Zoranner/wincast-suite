@@ -19,7 +19,8 @@ use crate::{
 use wincast_capture::{CaptureError, CaptureTarget, CapturedBgraFrame};
 use wincast_protocol::{
     config::{
-        CaptureConfig, HostConfig, MonitorPowerAfterLaunch, ProgramConfig, VideoCodec, VideoConfig,
+        CaptureConfig, HostBackendMode, HostConfig, MonitorPowerAfterLaunch, ProgramConfig,
+        VideoCodec, VideoConfig,
     },
     frame::{read_message, write_message},
     handshake::send_client_hello,
@@ -233,6 +234,7 @@ pub(super) fn host_config(listen: String) -> HostConfig {
 pub(super) fn host_config_with_codec(listen: String, codec: VideoCodec) -> HostConfig {
     HostConfig {
         listen,
+        mode: HostBackendMode::DesktopDxgi,
         program: ProgramConfig {
             path: "C:\\Program Files\\SomeApp\\app.exe".to_owned(),
             args: Vec::new(),
@@ -240,6 +242,7 @@ pub(super) fn host_config_with_codec(listen: String, codec: VideoCodec) -> HostC
             startup_delay_ms: 0,
             turn_off_monitor_after_launch: MonitorPowerAfterLaunch::Disabled,
         },
+        unity: None,
         video: VideoConfig {
             width: 1280,
             height: 720,

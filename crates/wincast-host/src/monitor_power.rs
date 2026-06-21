@@ -1,6 +1,6 @@
 use std::fmt;
 
-use wincast_protocol::config::MonitorPowerAfterLaunch;
+use wincast_protocol::config::{MonitorPowerAfterLaunch, REAL_MONITOR_POWER_OFF_REJECTION_REASON};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MonitorPowerError {
@@ -23,7 +23,6 @@ impl fmt::Display for MonitorPowerError {
 
 impl std::error::Error for MonitorPowerError {}
 
-#[cfg(test)]
 pub(crate) fn monitor_power_error(message: impl Into<String>) -> MonitorPowerError {
     make_monitor_power_error(message)
 }
@@ -48,36 +47,19 @@ impl MonitorPowerController for StdMonitorPowerController {
 }
 
 fn apply_after_launch(policy: MonitorPowerAfterLaunch) -> Result<(), MonitorPowerError> {
+    if policy.breaks_desktop_duplication() {
+        return Err(make_monitor_power_error(
+            REAL_MONITOR_POWER_OFF_REJECTION_REASON,
+        ));
+    }
+
     match policy {
         MonitorPowerAfterLaunch::Disabled => Ok(()),
-        MonitorPowerAfterLaunch::WindowsPowerMessage => platform_turn_off_monitor(),
-        MonitorPowerAfterLaunch::DdcCiPowerOff => platform_ddc_ci_power_off(),
+        MonitorPowerAfterLaunch::WindowsPowerMessage | MonitorPowerAfterLaunch::DdcCiPowerOff => {
+            unreachable!("real monitor power-off policies are rejected before platform calls")
+        }
         MonitorPowerAfterLaunch::DdcCiDim => platform_ddc_ci_dim(),
     }
-}
-
-#[cfg(windows)]
-fn platform_turn_off_monitor() -> Result<(), MonitorPowerError> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        HWND_BROADCAST, SC_MONITORPOWER, SendMessageW, WM_SYSCOMMAND,
-    };
-
-    const MONITOR_POWER_OFF: isize = 2;
-
-    unsafe {
-        SendMessageW(
-            HWND_BROADCAST,
-            WM_SYSCOMMAND,
-            SC_MONITORPOWER as usize,
-            MONITOR_POWER_OFF,
-        );
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn platform_ddc_ci_power_off() -> Result<(), MonitorPowerError> {
-    with_single_physical_monitor(|monitor| set_vcp_feature(monitor, 0xD6, 0x04))
 }
 
 #[cfg(windows)]
@@ -191,21 +173,6 @@ impl Drop for PhysicalMonitors {
 }
 
 #[cfg(windows)]
-fn set_vcp_feature(
-    monitor: windows_sys::Win32::Foundation::HANDLE,
-    code: u8,
-    value: u32,
-) -> Result<(), MonitorPowerError> {
-    let result =
-        unsafe { windows_sys::Win32::Devices::Display::SetVCPFeature(monitor, code, value) };
-    if result == 0 {
-        return Err(last_os_error("通过 DDC/CI 设置显示器 VCP 功能失败"));
-    }
-
-    Ok(())
-}
-
-#[cfg(windows)]
 fn set_monitor_brightness_to_minimum(
     monitor: windows_sys::Win32::Foundation::HANDLE,
 ) -> Result<(), MonitorPowerError> {
@@ -239,18 +206,6 @@ fn last_os_error(action: &'static str) -> MonitorPowerError {
 }
 
 #[cfg(not(windows))]
-fn platform_turn_off_monitor() -> Result<(), MonitorPowerError> {
-    Err(make_monitor_power_error(
-        "当前平台不支持关闭宿主端显示器：仅 Windows 支持显示器电源控制",
-    ))
-}
-
-#[cfg(not(windows))]
-fn platform_ddc_ci_power_off() -> Result<(), MonitorPowerError> {
-    unsupported_monitor_power_platform()
-}
-
-#[cfg(not(windows))]
 fn platform_ddc_ci_dim() -> Result<(), MonitorPowerError> {
     unsupported_monitor_power_platform()
 }
@@ -269,15 +224,22 @@ fn make_monitor_power_error(message: impl Into<String>) -> MonitorPowerError {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn non_windows_monitor_power_control_reports_clear_error() {
-        #[cfg(not(windows))]
-        {
-            let error = super::platform_turn_off_monitor().expect_err("non-Windows should fail");
-
-            assert_eq!(
-                error.to_string(),
-                "当前平台不支持关闭宿主端显示器：仅 Windows 支持显示器电源控制"
-            );
-        }
+    fn unsupported_real_power_off_policies_are_rejected_before_platform_calls() {
+        assert_eq!(
+            super::apply_after_launch(
+                wincast_protocol::config::MonitorPowerAfterLaunch::WindowsPowerMessage
+            )
+            .expect_err("Windows power message should not be allowed")
+            .to_string(),
+            "真正关闭显示器会破坏 DXGI Desktop Duplication 画面捕获；请使用 disabled 或 ddc_ci_dim"
+        );
+        assert_eq!(
+            super::apply_after_launch(
+                wincast_protocol::config::MonitorPowerAfterLaunch::DdcCiPowerOff
+            )
+            .expect_err("DDC/CI power off should not be allowed")
+            .to_string(),
+            "真正关闭显示器会破坏 DXGI Desktop Duplication 画面捕获；请使用 disabled 或 ddc_ci_dim"
+        );
     }
 }
